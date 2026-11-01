@@ -1,0 +1,20 @@
+{
+  "version": "5",
+  "dialect": "pg",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1792090326880,
+      "tag": "0000_white_shriek",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1792105693346,
+      "tag": "0001_peaceful_patriot",
+      "breakpoints": true
+    }
+  ]
+}
