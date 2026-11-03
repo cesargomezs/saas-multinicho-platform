@@ -27,6 +27,13 @@ out/
 build
 dist
 
+node_modules/
+.next/
+.expo/
+dist/
+build/
+.env
+.turbo/
 
 # Debug
 npm-debug.log*
@@ -36,3 +43,9 @@ yarn-error.log*
 # Misc
 .DS_Store
 *.pem
+
+# 1. Limpia la caché de Git (esto le obliga a leer de nuevo el .gitignore)
+git rm -r --cached .
+
+# 2. Vuelve a añadir los archivos limpios (ahora sí respetando las reglas)
+git add .
