@@ -1,1983 +1,1139 @@
 'use client';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
+// ⚙️ Configuración de Supabase
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hboflqdubrtogwbuddsa.supabase.co';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || 'tu-anon-key';
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-interface WorkOrderRecord {
-  id: string;
-  date: string;
-  type: string;
-  title: string;
-  mechanic: string;
-  notes: string;
-  status: string;
-  cost?: string;
-  mileage?: string; 
-  oldPartPhoto?: string;
-  newPartPhoto?: string;
-}
+// ==========================================
+// 🎨 FUNCIONES AUXILIARES DE UX
+// ==========================================
+const toTitleCase = (str: string) => str.replace(/\b\w/g, (match) => match.toUpperCase());
+const formatCurrency = (value: string) => {
+  const numbers = value.replace(/\D/g, '');
+  if (!numbers) return '';
+  return `$ ${Number(numbers).toLocaleString('en-US')}`;
+};
 
-interface AppointmentRecord {
-  id: string;
-  clientName: string;
-  carBrand: string;
-  carModel: string;
-  carPlate: string;
-  time: string;
-  serviceType: string;
-  plate: string;
-  brand: string;
-  model: string;
-  mileage?: string;
-  notes: string;
-}
-
-interface ReportRecord {
-  id: string;
-  plate: string;
-  date: string;
-  mechanic: string;
-  cost: string;
-  status: string;
-  serviceType: string;
-}
-
-function PrivateImage({ path, alt, onClick, style, title }: any) {
-  const [src, setSrc] = useState<string | null>(null);
+// ==========================================
+// 🔒 COMPONENTE LAZY LOAD PARA IMÁGENES PRIVADAS
+// ==========================================
+const PrivateSupabaseImage = ({ path, alt, isExpanded = false }: { path: string, alt: string, isExpanded?: boolean }) => {
+  const [signedUrl, setSignedUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (!path) return;
-    
-    if (path.startsWith('http')) {
-      setSrc(path);
-      return;
-    }
-    
-    const fetchSecureUrl = async () => {
-      const { data, error } = await supabase.storage
-        .from('autoflow')
-        .createSignedUrl(path, 3600); 
-      
-      if (data?.signedUrl) {
-        setSrc(data.signedUrl);
-      } else {
-        console.error("Error pidiendo URL firmada:", error);
+    const fetchSignedUrl = async () => {
+      if (!path) return;
+      let cleanPath: string = path;
+      if (path.includes('/public/autoflow/')) {
+        const splitResult = path.split('/public/autoflow/')[1];
+        if (splitResult) cleanPath = splitResult;
+      } else if (!path.includes('/')) {
+        cleanPath = path.startsWith('old') ? `old/${path}` : `new/${path}`;
       }
+      const { data, error } = await supabase.storage.from('autoflow').createSignedUrl(cleanPath, 3600);
+      if (error || !data?.signedUrl) setError(true);
+      else setSignedUrl(data.signedUrl);
     };
-    
-    fetchSecureUrl();
+    fetchSignedUrl();
   }, [path]);
 
-  if (!src) {
-    return (
-      <div style={{ ...style, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888', fontSize: '10px' }}>
-        ⏳
-      </div>
-    );
-  }
+  if (error) return <div style={{ fontSize: '14px', color: '#EF4444', fontStyle: 'italic', padding: '20px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '12px' }}>❌ Acceso denegado</div>;
+  if (!signedUrl) return <div style={{ fontSize: '14px', color: 'var(--text-muted)', fontStyle: 'italic', padding: '40px', display: 'flex', justifyContent: 'center' }}>⏳ Desencriptando...</div>;
+  return <img src={signedUrl} alt={alt} style={{ width: '100%', maxHeight: isExpanded ? '85vh' : '100%', objectFit: 'contain', borderRadius: '12px', boxShadow: isExpanded ? '0 25px 50px -12px rgba(0,0,0,0.5)' : 'none', background: '#000' }} />;
+};
 
-  return <img src={src} alt={alt} onClick={() => onClick && onClick(src)} style={style} title={title} />;
+// ==========================================
+// 🧩 INTERFACES DE TYPESCRIPT
+// ==========================================
+interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; }
+interface ServiceInfo { id: string; name: string; description: string | null; price: string; }
+interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
+interface ReportItem {
+  id: string; date: string; plate: string; clientName: string; service: string;
+  mechanicId: string; mechanicName: string; cost: number; status: string;
 }
 
 export default function AutoFlowPlatform() {
   const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
   const [isDark, setIsDark] = useState(true);
-  const [lang, setLang] = useState<'es' | 'en'>('es');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   
-  const [isMechanicLoggedIn, setIsMechanicLoggedIn] = useState(false);
-  const [mechanicPin, setMechanicPin] = useState('');
+  const [tenantId, setTenantId] = useState<string | null>(null);
+  const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
+  const [servicesList, setServicesList] = useState<ServiceInfo[]>([]);
+  const [staffList, setStaffList] = useState<StaffInfo[]>([]);
 
-  const [searchPlate, setSearchPlate] = useState('');
-  const [activePlate, setActivePlate] = useState<string | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
-  const [vehicleHistory, setVehicleHistory] = useState<WorkOrderRecord[]>([]);
-  const [vehicleMileage, setVehicleMileage] = useState('62,450 km');
-  
+  // 📝 Flujo Cliente
   const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
-  const [selectedServiceType, setSelectedServiceType] = useState('mechanical');
+  const [selectedServiceType, setSelectedServiceType] = useState('');
+  const [selectedBookingStaff, setSelectedBookingStaff] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [modalImageSrc, setModalImageSrc] = useState<string | null>(null);
-  
-  const [isStopModalOpen, setIsStopModalOpen] = useState(false);
-  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-
+  const [isSearchingPlate, setIsSearchingPlate] = useState(false);
+  const [isPlateSearched, setIsPlateSearched] = useState(false);
   const [clientName, setClientName] = useState('');
   const [clientEmail, setClientEmail] = useState('');
   const [clientPhone, setClientPhone] = useState('');
-  const [carBrand, setCarBrand] = useState('Porsche');
-  const [carModel, setCarModel] = useState('911 GT3');
-  const [carYear, setCarYear] = useState('2025');
-  const [carVin, setCarVin] = useState('');
-  const [carMileage, setCarMileage] = useState('');
   const [appointmentDate, setAppointmentDate] = useState('');
   const [appointmentTime, setAppointmentTime] = useState('');
-  const [appointmentNotes, setAppointmentNotes] = useState('');
-  const [smsConsent, setSmsConsent] = useState(true);
+  const [searchPlate, setSearchPlate] = useState('');
+  const [carBrand, setCarBrand] = useState('');
+  const [carModel, setCarModel] = useState('');
+  const [carYear, setCarYear] = useState('');
+  const [carMileage, setCarMileage] = useState('');
+  const [quickNotes, setQuickNotes] = useState('');
 
-  const [bookedTimes, setBookedTimes] = useState<string[]>([]);
+  // 📋 Expediente
+  const [expedienteQuery, setExpedienteQuery] = useState('');
+  const [isSearchingExpediente, setIsSearchingExpediente] = useState(false);
+  const [clientExpedienteData, setClientExpedienteData] = useState<any | null>(null);
+  const [expandedImage, setExpandedImage] = useState<{ path: string, alt: string } | null>(null);
 
-  const [mechanicPlate, setMechanicPlate] = useState('');
-  const [workOrderStatus, setWorkOrderStatus] = useState('diagnosis');
-  const [workOrderMileage, setWorkOrderMileage] = useState('');
+  // 🛠️ Portal Interno
+  const [isMechanicAuth, setIsMechanicAuth] = useState(false);
+  const [mechanicPin, setMechanicPin] = useState('');
+  const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff'>('today');
+  const [todayOrders, setTodayOrders] = useState<any[]>([]);
+  const [upcomingOrders, setUpcomingOrders] = useState<any[]>([]);
+  const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
+  
+  // 👥 Gestión de Personal
+  const [newStaffName, setNewStaffName] = useState('');
+  const [selectedStaffRole, setSelectedStaffRole] = useState('');
+  const [customStaffRole, setCustomStaffRole] = useState('');
+
+  // 📋 POS
+  const [finalCost, setFinalCost] = useState('');
+  const [exitMileage, setExitMileage] = useState('');
+  const [oldParts, setOldParts] = useState('');
+  const [newParts, setNewParts] = useState('');
   const [mechanicNotes, setMechanicNotes] = useState('');
-  const [estimatedCost, setEstimatedCost] = useState('');
-  const [nextServiceMonth, setNextServiceMonth] = useState('2026-11');
-
-  const [oldPartFile, setOldPartFile] = useState<File | null>(null);
+  const [nextServiceTime, setNextServiceTime] = useState('');
+  const [assignedMechanicId, setAssignedMechanicId] = useState('');
+  
+  const [oldPartImage, setOldPartImage] = useState<File | null>(null);
   const [oldPartPreview, setOldPartPreview] = useState<string | null>(null);
-  const [newPartFile, setNewPartFile] = useState<File | null>(null);
+  const [newPartImage, setNewPartImage] = useState<File | null>(null);
   const [newPartPreview, setNewPartPreview] = useState<string | null>(null);
 
-  const [todaysAppointments, setTodaysAppointments] = useState<AppointmentRecord[]>([]);
-  const [selectedAppointment, setSelectedAppointment] = useState<AppointmentRecord | null>(null);
-  const [isLoadingAppointments, setIsLoadingAppointments] = useState(false);
-  
-  const [agendaTab, setAgendaTab] = useState<'hoy' | 'manana' | 'semana'>('hoy');
+  // 📊 Módulo de Reportes Reales
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultStart.getDate() - 30);
+  const [reportStartDate, setReportStartDate] = useState<string>(defaultStart.toISOString().split('T')[0] || '');
+  const [reportEndDate, setReportEndDate] = useState<string>(new Date().toISOString().split('T')[0] || '');
+  const [reportMechanic, setReportMechanic] = useState('');
+  const [reportPage, setReportPage] = useState(1);
+  const [reportsData, setReportsData] = useState<ReportItem[]>([]); 
+  const [isPrinting, setIsPrinting] = useState(false);
+  const ITEMS_PER_PAGE = 10;
 
-  const [mechanicPortalView, setMechanicPortalView] = useState<'agenda' | 'reportes'>('agenda');
-  const [reportMechanic, setReportMechanic] = useState('todos');
-  const [reportStartDate, setReportStartDate] = useState('');
-  const [reportEndDate, setReportEndDate] = useState('');
-  
-  const [reportData, setReportData] = useState<ReportRecord[]>([]);
-  const [isLoadingReports, setIsLoadingReports] = useState(false);
-  const [reportTotalValue, setReportTotalValue] = useState(0);
+  const clientQuickServices = ['Cambio de Aceite', 'Revisión General', 'Frenos', 'Ruidos', 'Llantas'];
+  const mechanicQuickNotes = ['Niveles OK', 'Frenos Desgastados', 'Fugas de Aceite', 'Requiere Alineación', 'Filtros Sucios'];
+  const nextServiceOptions = ['3 Meses', '6 Meses', '1 Año', '5,000 Millas'];
 
-  // Estados de paginación web
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
+  const saasDirectory = [
+    { id: '123e4567-e89b-12d3-a456-426614174000', name: 'AutoFlow Central', type: 'automotive', label: 'Taller Automotriz', icon: '🚗' },
+    { id: 'spa-demo-uuid-1234', name: 'Zen Beauty Spa', type: 'spa', label: 'Spa & Relajación', icon: '💆‍♀️' },
+    { id: 'barber-demo-uuid-5678', name: 'Classic BarberShop', type: 'barbershop', label: 'Barbería Clásica', icon: '✂️' }
+  ];
+
+  const apiFetch = async (url: string, options: RequestInit = {}) => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
+    const headers = { 'Content-Type': 'application/json', 'x-tenant-id': tenantId || '', ...(options.headers || {}) };
+    return fetch(`${API_URL}${url}`, { ...options, headers });
+  };
 
   useEffect(() => {
-    const today = new Date();
-    const past30Days = new Date();
-    past30Days.setDate(today.getDate() - 30);
-    
-    setReportEndDate(today.toISOString().substring(0, 10));
-    setReportStartDate(past30Days.toISOString().substring(0, 10));
-  }, [mechanicPortalView]);
+    const handleResize = () => {
+      if (window.innerWidth <= 850) setIsSidebarOpen(false);
+      else setIsSidebarOpen(true);
+    };
+    handleResize(); 
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
-  const popularBrands = ['Porsche', 'BMW', 'Mercedes-Benz', 'Audi', 'Toyota', 'Honda', 'Ford', 'Chevrolet', 'Tesla', 'Lexus', 'Nissan', 'Hyundai'];
-  const brandModelsMap: Record<string, string[]> = {
-    'Porsche': ['911 GT3', 'Cayenne', 'Macan', 'Panamera', 'Taycan', '718 Cayman'],
-    'BMW': ['M3', 'M4', 'X5', 'X3', 'Series 3', 'Series 5', 'i4'],
-    'Mercedes-Benz': ['C-Class', 'E-Class', 'GLE', 'GLC', 'AMG GT', 'S-Class'],
-    'Audi': ['A4', 'A6', 'Q5', 'Q7', 'RS6', 'e-tron'],
-    'Toyota': ['Corolla', 'Camry', 'RAV4', 'Tacoma', 'Tundra', 'Prius'],
-    'Honda': ['Civic', 'Accord', 'CR-V', 'Pilot', 'HR-V'],
-    'Ford': ['Mustang', 'F-150', 'Explorer', 'Escape', 'Bronco'],
-    'Chevrolet': ['Camaro', 'Corvette', 'Silverado', 'Equinox', 'Tahoe'],
-    'Tesla': ['Model 3', 'Model Y', 'Model S', 'Model X', 'Cybertruck'],
-    'Lexus': ['RX', 'ES', 'NX', 'GX', 'IS'],
-    'Nissan': ['Altima', 'Rogue', 'Sentra', 'Pathfinder', 'Z'],
-    'Hyundai': ['Elantra', 'Tucson', 'Santa Fe', 'Sonata', 'Ioniq 5']
+  const handleNavClick = (view: 'servicios' | 'expediente' | 'mecanico') => {
+    setActiveView(view);
+    if (window.innerWidth <= 850) setIsSidebarOpen(false);
   };
 
-  const availableModels = brandModelsMap[carBrand] || ['Sedán', 'SUV', 'Deportivo', 'Truck'];
-  const availableYears = Array.from({ length: 63 }, (_, i) => (2027 - i).toString());
-
-  const t = {
-    es: {
-      navServices: "Servicios & Taller",
-      navVehicle: "Mi Vehículo",
-      navPortal: "Portal Taller",
-      heroTitle: "Ingeniería y Cuidado Automotriz de",
-      heroHighlight: "Alta Precisión",
-      heroDesc: "Más de 14 años de trayectoria respaldando la potencia y seguridad de tu vehículo con tecnología de punta y estándares de concesionario.",
-      aboutTitle: "Nuestra Trayectoria",
-      aboutText: "Fundados con el compromiso de ofrecer diagnósticos exactos y total transparencia. Contamos con equipos de escaneo computarizado de última generación, cabina de pintura horneada de alta gama y técnicos certificados.",
-      statYears: "+14 Años",
-      statYearsDesc: "De experiencia",
-      statVehicles: "+8,500",
-      statVehiclesDesc: "Vehículos listos",
-      statWarranty: "100%",
-      statWarrantyDesc: "Garantía directa",
-      serviceTitle: "Centro Integral de Servicios",
-      serviceDesc: "Infraestructura completa para diagnóstico avanzado, mecánica general, mantenimiento preventivo y carrocería.",
-      serviceItem1: "Mecánica General & Escáner Avanzado",
-      serviceItem2: "Latonería, Pintura Horneada & Detailing",
-      btnAgenda: "Agendar Cita en Bahía",
-      searchTitle: "Consulta de Expediente",
-      searchDesc: "Ingresa la placa o VIN de tu vehículo para acceder al historial clínico oficial y órdenes de trabajo.",
-      searchPlaceholder: "EJEMPLO: XYZ-789 o VIN",
-      searchBtn: "Acceder al Expediente",
-      searchingBtn: "Consultando...",
-      currentMileageLabel: "Kilometraje Actual",
-      nextSrvLabel: "Próximo SRV",
-      workOrdersTitle: "Órdenes de Trabajo (work_orders)",
-      workOrdersSub: "Historial clínico y fotográfico oficial",
-      optimalBadge: "Óptimo",
-      techReportLabel: "Reporte Técnico:",
-      photoEvidenceLabel: "Evidencia Fotográfica de la Orden:",
-      oldPartLabel: "Pieza Vieja",
-      newPartLabel: "Pieza Nueva",
-      clickToZoom: "Click para ampliar",
-      mileageNotReg: "Millaje no reg.",
-      estCostLabel: "Costo Estimado:",
-      noRecord: "Sin registro",
-      newNoRecord: "Nuevo / Sin registro",
-      inviteRegisterAlert: "¡Te invitamos a registrarte! No estás en nuestros sistemas. Completa tus datos para crear tu expediente y agendar tu cita.",
-      defaultWoDate: "Reciente",
-      defaultWoTitle: "Registro de Ingreso",
-      defaultWoMechanic: "Taller",
-      defaultWoNotes: "Vehículo validado en sistema sin órdenes previas.",
-      shopAccessTitle: "Acceso Taller",
-      shopAccessDesc: "Ingresa el PIN de seguridad (Usa: 2026)",
-      pinPlaceholder: "PIN",
-      enterPortalBtn: "Ingresar al Portal",
-      wrongPinAlert: 'PIN incorrecto. Usa "2026" para acceder.',
-      shopPanelTitle: "Panel Operativo del Taller",
-      orderFor: "Orden para",
-      todaysSchedule: "Agenda",
-      loadingSchedule: "Cargando agenda...",
-      freeDayTitle: "Día Libre",
-      freeDayDesc: "No hay citas pendientes para esta selección.",
-      attendBtn: "Atender",
-      backToSchedule: "← Volver a la agenda",
-      tabToday: "📅 Hoy",
-      tabTomorrow: "🌅 Mañana",
-      tabWeek: "📆 Próximos 7 días",
-      plateVinLabel: "Placa / VIN (vehicles)",
-      orderStatusLabel: "Estado de Orden (work_orders.status)",
-      statusDiagnosis: "Diagnóstico",
-      statusPending: "Pendiente de Aprobación",
-      statusInProgress: "En Progreso",
-      statusQc: "Control de Calidad",
-      statusReady: "Listo para Entrega",
-      estCostInputLabel: "Costo Estimado (estimated_cost)",
-      estCostPlaceholder: "Ej: $350.00",
-      currentMileageInputLabel: "Kilometraje Actual (work_orders.mileage)",
-      currentMileagePlaceholder: "Ej: 63,100 km",
-      quickTemplatesLabel: "⚡ Plantillas Rápidas de Servicio",
-      mechanicTemplates: [
-        { label: '🛢️ Cambio de Aceite', text: 'Sustitución de aceite sintético y filtro de motor. Revisión de niveles y fugas OK.' },
-        { label: '🛑 Frenos', text: 'Cambio de pastillas de freno (evidencia de desgaste en pieza vieja). Ajuste y purgado del sistema.' },
-        { label: '🔧 Preventivo', text: 'Mantenimiento preventivo general de 45 puntos, rotación de neumáticos y filtros.' },
-        { label: '🔩 Suspensión', text: 'Inspección de elementos de suspensión y dirección. Terminales y amortiguadores.' }
-      ],
-      photoEvidenceWebpLabel: "📸 Evidencia Fotográfica (WebP Optimizado)",
-      oldPartUploadLabel: "🔴 Pieza / Estado Anterior",
-      newPartUploadLabel: "🟢 Pieza / Resultado Nuevo",
-      nextServiceRecLabel: "Próximo Servicio Recomendado",
-      mechanicNotesLabel: "Notas del Mecánico (mechanic_notes)",
-      mechanicNotesPlaceholder: "Diagnóstico, piezas cambiadas...",
-      savingOrderBtn: "Procesando y Guardando...",
-      saveCloseOrderBtn: "💾 Guardar y Cerrar Cita",
-      orderSavedAlert: "✅ ¡Orden guardada y cita cerrada con éxito!",
-      reviewPrefix: "Revisar:",
-      viewAgenda: "📋 Ver Agenda",
-      viewReports: "📊 Reportes & Pagos",
-      reportsFilterTitle: "Filtro de Servicios",
-      dateStartLabel: "Desde Fecha",
-      dateEndLabel: "Hasta Fecha",
-      allMechanics: "Todos los mecánicos",
-      generateReportBtn: "Consultar",
-      btnExportExcel: "Excel",
-      btnExportPDF: "PDF",
-      loadingReports: "Consultando servicios...",
-      totalServicesCard: "Servicios Terminados",
-      totalValueCard: "Valor Total Generado",
-      noReportsFound: "No se encontraron servicios completados para estos filtros.",
-      colDate: "Fecha",
-      colPlate: "Placa",
-      colService: "Servicio",
-      colMechanic: "Mecánico",
-      colValue: "Valor",
-      bookingModalTitle: "Agendar Cita en Bahía",
-      bookingModalDesc: "Registra tu cita conectada con las tablas `users`, `vehicles` y `appointments`.",
-      serviceTypeLabel: "Tipo de Servicio (appointments.service_type)",
-      serviceMechOption: "Mecánica General & Diagnóstico",
-      serviceBodyOption: "Latonería, Pintura & Detailing",
-      fullNameLabel: "Nombre Completo (users.name)",
-      fullNamePlaceholder: "Ej: Carlos Pérez",
-      emailLabel: "Email (users.email)",
-      phoneLabel: "Teléfono (users.phone)",
-      brandLabel: "Marca (vehicles.brand)",
-      modelLabel: "Modelo (vehicles.model)",
-      yearLabel: "Año (vehicles.year)",
-      plateInputLabel: "Placa (vehicles.plate)",
-      platePlaceholder: "Ej: XYZ-789",
-      vinInputLabel: "VIN (vehicles.vin)",
-      mileageBookingLabel: "Current Mileage (vehicles.mileage)",
-      mileageBookingPlaceholder: "Ej: 62,450 km",
-      dateInputLabel: "Fecha de Cita",
-      timeInputLabel: "Hora (Intervalos de 30 min)",
-      selectTimeOption: "Selecciona la hora",
-      chooseDateFirstOption: "Primero elige una fecha",
-      bookedSuffix: "(Ocupado)",
-      quickReasonTemplatesLabel: "⚡ Plantillas Rápidas para el Motivo",
-      bookingTemplates: [
-        { label: '🛢️ Cambio de Aceite', text: 'Requiere revisión y cambio de aceite sintético de motor.' },
-        { label: '🛑 Frenos', text: 'Presenta ruidos y desgaste en sistema de frenos.' },
-        { label: '🔧 Preventivo', text: 'Mantenimiento preventivo general y revisión de 45 puntos.' },
-        { label: '🔩 Suspensión', text: 'Revisión por ruidos o inestabilidad en la suspensión.' }
-      ],
-      notesBookingLabel: "Notas (appointments.notes)",
-      notesBookingPlaceholder: "Ej: Ruidos extraños al frenar...",
-      smsConsentText: "Autorizo a AutoFlow a enviarme mensajes de texto o WhatsApp con el estado de mi vehículo y alertas de mantenimiento. Responde 'STOP' para cancelar.",
-      processingBtn: "Procesando...",
-      submitBookingBtn: "Enviar Solicitud de Cita",
-      footerRate: "Califícanos en Google",
-      footerRights: "© 2026 AutoFlow Technologies. Todos los derechos reservados.",
-      footerStop: "Darse de baja (SMS)",
-      footerDelete: "Eliminar Datos (CCPA)",
-      stopModalTitle: "Darse de baja",
-      stopModalDesc: "Ingresa tu número para dejar de recibir notificaciones de WhatsApp o SMS. Tu expediente seguirá seguro.",
-      stopModalBtn: "Dar de baja",
-      stopSuccessAlert: "Número dado de baja con éxito.",
-      deleteModalTitle: "Eliminar Cuenta",
-      deleteModalDesc: "Ingresa tu número para borrar por completo tus datos y expediente de la base de datos de forma irreversible.",
-      deleteModalBtn: "Eliminar Permanentemente",
-      deleteSuccessAlert: "Cuenta eliminada permanentemente.",
-      successBooking: (name: string) => `¡Cita confirmada, ${name}! Tu solicitud ha sido registrada en las tablas de Drizzle ORM.`,
-      btnPrev: "Anterior",
-      btnNext: "Siguiente",
-      pageIndicator: (current: number, total: number) => `Página ${current} de ${total}`
-    },
-    en: {
-      navServices: "Services & Shop",
-      navVehicle: "My Vehicle",
-      navPortal: "Shop Portal",
-      heroTitle: "Precision Engineering &",
-      heroHighlight: "Automotive Care",
-      heroDesc: "Over 14 years of excellence backing your vehicle's performance and safety with cutting-edge tech and dealership standards.",
-      aboutTitle: "Our Legacy & Expertise",
-      aboutText: "Established to deliver precise diagnostics and total transparency. Equipped with state-of-the-art computer diagnostic scanners, premium baking paint booths, and certified technicians.",
-      statYears: "+14 Years",
-      statYearsDesc: "Experience",
-      statVehicles: "+8,500",
-      statVehiclesDesc: "Vehicles serviced",
-      statWarranty: "100%",
-      statWarrantyDesc: "Direct warranty",
-      serviceTitle: "Comprehensive Service Center",
-      serviceDesc: "Equipped with full infrastructure for advanced diagnostics, general mechanics, and bodywork.",
-      serviceItem1: "General Mechanics & Advanced Scanner",
-      serviceItem2: "Bodywork, Baking Paint Booth & Detailing",
-      btnAgenda: "Book Service Bay",
-      searchTitle: "Service Record Lookup",
-      searchDesc: "Enter your vehicle's license plate or VIN to access its official technical history and work orders.",
-      searchPlaceholder: "EXAMPLE: XYZ-789 or VIN",
-      searchBtn: "View Service Record",
-      searchingBtn: "Searching...",
-      currentMileageLabel: "Current Mileage",
-      nextSrvLabel: "Next SRV",
-      workOrdersTitle: "Work Orders (work_orders)",
-      workOrdersSub: "Official clinical & photographic history",
-      optimalBadge: "Optimal",
-      techReportLabel: "Technical Report:",
-      photoEvidenceLabel: "Work Order Photographic Evidence:",
-      oldPartLabel: "Old Part",
-      newPartLabel: "New Part",
-      clickToZoom: "Click to enlarge",
-      mileageNotReg: "Mileage not reg.",
-      estCostLabel: "Estimated Cost:",
-      noRecord: "No record",
-      newNoRecord: "New / No record",
-      inviteRegisterAlert: "We invite you to register! You are not in our system yet. Complete your details to create your record and book your appointment.",
-      defaultWoDate: "Recent",
-      defaultWoTitle: "Check-in Record",
-      defaultWoMechanic: "Shop",
-      defaultWoNotes: "Vehicle validated in system with no prior work orders.",
-      shopAccessTitle: "Shop Access",
-      shopAccessDesc: "Enter security PIN (Use: 2026)",
-      pinPlaceholder: "PIN",
-      enterPortalBtn: "Enter Portal",
-      wrongPinAlert: 'Incorrect PIN. Use "2026" to access.',
-      shopPanelTitle: "Shop Operations Panel",
-      orderFor: "Order for",
-      todaysSchedule: "Schedule",
-      loadingSchedule: "Loading schedule...",
-      freeDayTitle: "Free Day",
-      freeDayDesc: "No pending appointments for this selection.",
-      attendBtn: "Attend",
-      backToSchedule: "← Back to schedule",
-      tabToday: "📅 Today",
-      tabTomorrow: "🌅 Tomorrow",
-      tabWeek: "📆 Next 7 Days",
-      plateVinLabel: "License Plate / VIN (vehicles)",
-      orderStatusLabel: "Order Status (work_orders.status)",
-      statusDiagnosis: "Diagnosis",
-      statusPending: "Pending Approval",
-      statusInProgress: "In Progress",
-      statusQc: "Quality Control",
-      statusReady: "Ready for Pickup",
-      estCostInputLabel: "Estimated Cost (estimated_cost)",
-      estCostPlaceholder: "Ex: $350.00",
-      currentMileageInputLabel: "Current Mileage (work_orders.mileage)",
-      currentMileagePlaceholder: "Ex: 63,100 km",
-      quickTemplatesLabel: "⚡ Quick Service Templates",
-      mechanicTemplates: [
-        { label: '🛢️ Oil Change', text: 'Synthetic motor oil and filter replacement. Fluid levels and leak inspection OK.' },
-        { label: '🛑 Brakes', text: 'Brake pad replacement (wear evidence on old part). System adjustment and bleeding.' },
-        { label: '🔧 Preventive', text: '45-point general preventive maintenance, tire rotation and filters.' },
-        { label: '🔩 Suspension', text: 'Suspension and steering components inspection. Tie rods and shock absorbers.' }
-      ],
-      photoEvidenceWebpLabel: "📸 Photographic Evidence (Optimized WebP)",
-      oldPartUploadLabel: "🔴 Old Part / Previous Condition",
-      newPartUploadLabel: "🟢 New Part / Final Result",
-      nextServiceRecLabel: "Recommended Next Service",
-      mechanicNotesLabel: "Mechanic Notes (mechanic_notes)",
-      mechanicNotesPlaceholder: "Diagnostics, replaced parts...",
-      savingOrderBtn: "Processing and Saving...",
-      saveCloseOrderBtn: "💾 Save and Close Appointment",
-      orderSavedAlert: "✅ Work order saved and appointment closed successfully!",
-      reviewPrefix: "Review:",
-      viewAgenda: "📋 View Schedule",
-      viewReports: "📊 Reports & Payments",
-      reportsFilterTitle: "Services Filter",
-      dateStartLabel: "Start Date",
-      dateEndLabel: "End Date",
-      allMechanics: "All mechanics",
-      generateReportBtn: "Query",
-      btnExportExcel: "Excel",
-      btnExportPDF: "PDF",
-      loadingReports: "Querying services...",
-      totalServicesCard: "Completed Services",
-      totalValueCard: "Total Generated Value",
-      noReportsFound: "No completed services found for these filters.",
-      colDate: "Date",
-      colPlate: "Plate",
-      colService: "Service",
-      colMechanic: "Mechanic",
-      colValue: "Value",
-      bookingModalTitle: "Book Service Bay",
-      bookingModalDesc: "Register your appointment connected with `users`, `vehicles` and `appointments` tables.",
-      serviceTypeLabel: "Service Type (appointments.service_type)",
-      serviceMechOption: "General Mechanics & Diagnostics",
-      serviceBodyOption: "Bodywork, Paint & Detailing",
-      fullNameLabel: "Full Name (users.name)",
-      fullNamePlaceholder: "Ex: Carlos Perez",
-      emailLabel: "Email (users.email)",
-      phoneLabel: "Phone (users.phone)",
-      brandLabel: "Brand (vehicles.brand)",
-      modelLabel: "Model (vehicles.model)",
-      yearLabel: "Year (vehicles.year)",
-      plateInputLabel: "License Plate (vehicles.plate)",
-      platePlaceholder: "Ex: XYZ-789",
-      vinInputLabel: "VIN (vehicles.vin)",
-      mileageBookingLabel: "Current Mileage (vehicles.mileage)",
-      mileageBookingPlaceholder: "Ex: 62,450 km",
-      dateInputLabel: "Appointment Date",
-      timeInputLabel: "Time (30 min intervals)",
-      selectTimeOption: "Select a time",
-      chooseDateFirstOption: "Choose a date first",
-      bookedSuffix: "(Booked)",
-      quickReasonTemplatesLabel: "⚡ Quick Reason Templates",
-      bookingTemplates: [
-        { label: '🛢️ Oil Change', text: 'Requires inspection and synthetic motor oil change.' },
-        { label: '🛑 Brakes', text: 'Experiencing noises and wear in the braking system.' },
-        { label: '🔧 Preventive', text: 'General preventive maintenance and 45-point inspection.' },
-        { label: '🔩 Suspension', text: 'Inspection for noises or instability in the suspension.' }
-      ],
-      notesBookingLabel: "Notes (appointments.notes)",
-      notesBookingPlaceholder: "Ex: Strange noises when braking...",
-      smsConsentText: "I authorize AutoFlow to send me text messages or WhatsApp with my vehicle status and maintenance alerts. Reply 'STOP' to cancel.",
-      processingBtn: "Processing...",
-      submitBookingBtn: "Submit Appointment Request",
-      footerRate: "Rate Us on Google",
-      footerRights: "© 2026 AutoFlow Technologies. All rights reserved.",
-      footerStop: "SMS Opt-out",
-      footerDelete: "Delete Data (CCPA)",
-      stopModalTitle: "Opt-out of Notifications",
-      stopModalDesc: "Enter your phone number to stop receiving WhatsApp or SMS notifications. Your service record will remain safe.",
-      stopModalBtn: "Opt-out",
-      stopSuccessAlert: "Phone number unsubscribed successfully.",
-      deleteModalTitle: "Delete Account",
-      deleteModalDesc: "Enter your phone number to permanently and irreversibly delete all your data and records from the database.",
-      deleteModalBtn: "Delete Permanently",
-      deleteSuccessAlert: "Account permanently deleted.",
-      successBooking: (name: string) => `Appointment confirmed, ${name}! Your request has been registered in Drizzle ORM tables.`,
-      btnPrev: "Previous",
-      btnNext: "Next",
-      pageIndicator: (current: number, total: number) => `Page ${current} of ${total}`
-    }
-  }[lang];
-
-  const formatCapitalize = (val: string) => val.replace(/\b\w/g, l => l.toUpperCase());
-  const formatSentenceCase = (val: string) => {
-    if (!val) return '';
-    return val.charAt(0).toUpperCase() + val.slice(1);
-  };
-
-  const compressImageToWebP = (file: File, maxWidth = 1000, quality = 0.8): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = (event) => {
-        const img = new Image();
-        img.src = event.target?.result as string;
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          let width = img.width;
-          let height = img.height;
-
-          if (width > maxWidth) {
-            height = Math.round((height * maxWidth) / width);
-            width = maxWidth;
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            reject(new Error('No se pudo inicializar el contexto del canvas'));
-            return;
-          }
-
-          ctx.drawImage(img, 0, 0, width, height);
-          canvas.toBlob(
-            (blob) => {
-              if (blob) {
-                resolve(blob);
-              } else {
-                reject(new Error('Falló la compresión de la imagen'));
-              }
-            },
-            'image/webp',
-            quality
-          );
-        };
-        img.onerror = (error) => reject(error);
-      };
-      reader.onerror = (error) => reject(error);
-    });
-  };
-
-  const handleSearchVehicle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const query = searchPlate.trim().toUpperCase();
-    if (query === '') return;
-    
-    setIsSearching(true);
-    try {
-      const response = await fetch(`/api/vehicles/lookup/${query}`);
-      const data = await response.json();
-
-      if (response.ok && data.exists && data.vehicle) {
-        setActivePlate(data.vehicle.plate);
-        setCarBrand(data.vehicle.brand || 'Porsche');
-        setCarModel(data.vehicle.model || '911 GT3');
-        setCarYear(data.vehicle.year ? data.vehicle.year.toString() : '2025');
-        setVehicleMileage(data.vehicle.mileage ? `${data.vehicle.mileage} km` : t.noRecord);
-        if (data.vehicle.mileage) setCarMileage(data.vehicle.mileage);
-        
-        if (data.user) {
-          setClientName(data.user.name || '');
-          setClientEmail(data.user.email || '');
-          setClientPhone(data.user.phone || '');
+  useEffect(() => {
+    if (!tenantId) return;
+    setActiveView('servicios');
+    const fetchTenantData = async () => {
+      try {
+        const resInfo = await apiFetch('/api/tenants/info');
+        if (resInfo.ok) {
+          const dataInfo = await resInfo.json();
+          if (dataInfo.success) setTenantInfo(dataInfo.tenant);
         }
-        
-        if (data.vehicle.workOrders && data.vehicle.workOrders.length > 0) {
-          setVehicleHistory(data.vehicle.workOrders);
+        const resServices = await apiFetch('/api/services');
+        if (resServices.ok) {
+          const dataServices = await resServices.json();
+          if (dataServices.success && dataServices.services.length > 0) {
+            setServicesList(dataServices.services);
+            setSelectedServiceType(dataServices.services[0].id);
+          }
+        }
+        const resStaff = await apiFetch('/api/staff');
+        if (resStaff.ok) {
+          const dataStaff = await resStaff.json();
+          if (dataStaff.success) {
+            const mappedStaff = dataStaff.staff.map((s: any) => ({ ...s, isActive: s.isActive ?? true }));
+            setStaffList(mappedStaff);
+          }
         } else {
-          setVehicleHistory([
-            { id: 'WO-001', date: t.defaultWoDate, type: 'mechanical', title: t.defaultWoTitle, mechanic: t.defaultWoMechanic, notes: t.defaultWoNotes, status: 'completed', cost: '$0.00', mileage: data.vehicle.mileage }
+          setStaffList([
+            { id: 'stf-1', name: 'Admin Principal', role: 'Gerente / General', isActive: true },
+            { id: 'stf-2', name: 'Andy Perez', role: 'Mecánico General', isActive: true }
           ]);
         }
-      } else {
-        alert(t.inviteRegisterAlert);
-        setActivePlate(query);
-        setCarVin(query.length > 12 ? query : '');
-        setVehicleMileage(t.newNoRecord);
-        setVehicleHistory([]);
-        setIsBookingModalOpen(true);
+      } catch (error) { 
+        console.error("Error:", error); 
+        setStaffList([{ id: 'stf-1', name: 'Personal (Demo)', role: 'General', isActive: true }]);
       }
-    } catch (error) {
-      console.error('Error al conectar con la API del taller:', error);
-      alert('Error de conexión con el servidor.');
-    } finally {
-      setIsSearching(false);
+    };
+    fetchTenantData();
+  }, [tenantId]);
+
+  const isAutomotive = tenantInfo?.businessType === 'automotive' || tenantInfo?.niche === 'automotive';
+  const isSpa = tenantInfo?.businessType === 'spa' || tenantInfo?.niche === 'spa';
+  const isBarbershop = tenantInfo?.businessType === 'barbershop' || tenantInfo?.niche === 'barbershop';
+  const staffTerm = isAutomotive ? 'Mecánico' : 'Profesional';
+
+  const activeStaffList = useMemo(() => staffList.filter(s => s.isActive !== false), [staffList]);
+
+  const availableRoles = useMemo(() => {
+    if (isAutomotive) {
+      return ['Mecánico General', 'Especialista en Frenos', 'Electricista Automotriz', 'Técnico de Suspensión y Llantas', 'Jefe de Taller'];
+    } else if (isSpa) {
+      return ['Masajista Profesional', 'Cosmetóloga', 'Esteticista', 'Terapeuta Corporal', 'Especialista en Spa'];
+    } else if (isBarbershop) {
+      return ['Barbero Senior', 'Estilista', 'Especialista en Barba', 'Colorista', 'Barbero Master'];
     }
-  };
+    return ['Especialista', 'Técnico', 'Asistente', 'Gerente'];
+  }, [isAutomotive, isSpa, isBarbershop]);
 
-  const fetchVehicleDataForBooking = async (plateVal: string) => {
-    const cleanPlate = plateVal.trim().toUpperCase();
-    if (cleanPlate.length < 2) return;
-
+  const loadReports = async () => {
     try {
-      const response = await fetch(`/api/vehicles/lookup/${cleanPlate}`);
-      const data = await response.json();
+      const queryParams = new URLSearchParams({ startDate: reportStartDate, endDate: reportEndDate });
+      if (reportMechanic) queryParams.append('mechanicId', reportMechanic);
 
-      if (response.ok && data.exists && data.vehicle) {
-        setCarBrand(data.vehicle.brand || 'Porsche');
-        setCarModel(data.vehicle.model || '911 GT3');
-        setCarYear(data.vehicle.year ? data.vehicle.year.toString() : '2025');
-        setCarVin(data.vehicle.vin || '');
-        if (data.vehicle.mileage) {
-          setCarMileage(data.vehicle.mileage);
-        }
-
-        if (data.user) {
-          setClientName(data.user.name || '');
-          setClientEmail(data.user.email || '');
-          setClientPhone(data.user.phone || '');
-        }
+      const res = await apiFetch(`/api/work-orders/reports?${queryParams.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) setReportsData(data.reports);
       }
-    } catch (err) {
-      console.error('Error buscando vehículo para agendamiento:', err);
-    }
+    } catch (err) { console.error("Error cargando reportes", err); }
   };
 
-  const handleBookingPlateChange = (val: string) => {
-    const upperVal = val.toUpperCase();
-    setActivePlate(upperVal);
-    setSearchPlate(upperVal);
-    fetchVehicleDataForBooking(upperVal);
-  };
+  useEffect(() => {
+    if (agendaFilter === 'reports') loadReports();
+  }, [agendaFilter]);
 
-  const openBooking = (type: string) => {
-    setSelectedServiceType(type);
-    setIsBookingModalOpen(true);
-    if (activePlate || searchPlate) {
-      fetchVehicleDataForBooking(activePlate || searchPlate);
-    }
-  };
+  const paginatedReports = useMemo(() => {
+    if (isPrinting) return reportsData;
+    return reportsData.slice((reportPage - 1) * ITEMS_PER_PAGE, reportPage * ITEMS_PER_PAGE);
+  }, [reportsData, reportPage, isPrinting]);
 
-  const handleDateChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedDate = e.target.value;
-    setAppointmentDate(selectedDate);
-    setAppointmentTime('');
-    if (!selectedDate) return;
-    try {
-      const response = await fetch(`/api/appointments/availability?date=${selectedDate}`);
-      if (response.ok) {
-        const data = await response.json();
-        setBookedTimes(data.bookedTimes || []);
-      }
-    } catch (error) {
-      setBookedTimes([]);
-    }
-  };
+  const totalRevenue = useMemo(() => reportsData.reduce((acc, curr) => acc + curr.cost, 0), [reportsData]);
+  const totalPages = Math.ceil(reportsData.length / ITEMS_PER_PAGE);
 
-  const handleBookService = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      const combinedDateTime = appointmentDate && appointmentTime 
-        ? `${appointmentDate}T${appointmentTime}:00Z` : new Date().toISOString();
-
-      const response = await fetch('/api/appointments', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientName, clientEmail, clientPhone, carBrand, carModel,
-          carYear: Number(carYear), carPlate: activePlate || searchPlate,
-          carVin, mileage: carMileage, serviceType: selectedServiceType,
-          appointmentDate: combinedDateTime, notes: appointmentNotes,
-        }),
-      });
-
-      const data = await response.json();
-      if (response.ok) {
-        alert(t.successBooking(clientName));
-        setIsBookingModalOpen(false);
-        setSmsConsent(true);
-        setActiveView('expediente');
-      } else {
-        alert(`Error: ${data.error || 'No se pudo registrar'}`);
-      }
-    } catch (error) {
-      alert('Error de conexión con el servidor de la API.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const loadAgendaAppointments = async (tab: 'hoy' | 'manana' | 'semana') => {
-    setIsLoadingAppointments(true);
-    setAgendaTab(tab);
-    try {
-      const res = await fetch(`/api/appointments?filter=${tab}`);
-      const data = await res.json();
-      if (data.success) {
-        setTodaysAppointments(data.appointments);
-      } else {
-        setTodaysAppointments([]);
-      }
-    } catch (error) {
-      console.error("Error cargando citas de la agenda", error);
-      setTodaysAppointments([]);
-    } finally {
-      setIsLoadingAppointments(false);
-    }
-  };
-
-  const handleLoadReports = async () => {
-    setIsLoadingReports(true);
-    try {
-      const url = `/api/reports?mechanic=${encodeURIComponent(reportMechanic)}&startDate=${reportStartDate}&endDate=${reportEndDate}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      
-      if (data.success && data.reports) {
-        // Al quitar el "limit" del backend, ahora recibimos los 50 registros completos en data.reports
-        setReportData(data.reports);
-        const total = data.reports.reduce((sum: number, req: ReportRecord) => {
-          const costStr = req.cost || '$0';
-          const val = parseFloat(costStr.replace(/[^0-9.-]+/g,""));
-          return sum + (isNaN(val) ? 0 : val);
-        }, 0);
-        setReportTotalValue(total);
-        setCurrentPage(1); 
-      } else {
-        setReportData([]);
-        setReportTotalValue(0);
-      }
-    } catch (error) {
-      console.error("Error cargando reportes", error);
-      setReportData([]);
-      setReportTotalValue(0);
-    } finally {
-      setIsLoadingReports(false);
-    }
-  };
-
-  const handleMechanicLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if(mechanicPin === '2026' || mechanicPin === 'admin') {
-      setIsMechanicLoggedIn(true);
-      loadAgendaAppointments('hoy');
-    } else {
-      alert(t.wrongPinAlert);
-    }
-  };
-
-  const handleSaveWorkOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      let oldPartUrl = '';
-      let newPartUrl = '';
-
-      if (oldPartFile) {
-        const compressedBlob = await compressImageToWebP(oldPartFile);
-        const fileName = `old-${Date.now()}.webp`;
-        const filePath = `old/${fileName}`;
-
-        const { error } = await supabase.storage
-          .from('autoflow')
-          .upload(filePath, compressedBlob, { contentType: 'image/webp', upsert: true });
-          
-        if (error) throw new Error(`Error subiendo pieza vieja: ${error.message}`);
-        oldPartUrl = filePath;
-      }
-
-      if (newPartFile) {
-        const compressedBlob = await compressImageToWebP(newPartFile);
-        const fileName = `new-${Date.now()}.webp`;
-        const filePath = `new/${fileName}`;
-
-        const { error } = await supabase.storage
-          .from('autoflow')
-          .upload(filePath, compressedBlob, { contentType: 'image/webp', upsert: true });
-          
-        if (error) throw new Error(`Error subiendo pieza nueva: ${error.message}`);
-        newPartUrl = filePath;
-      }
-
-      const formattedCost = estimatedCost.startsWith('$') ? estimatedCost : `$${Number(estimatedCost || 0).toFixed(2)}`;
-
-      const response = await fetch('/api/work-orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          plate: mechanicPlate,
-          status: workOrderStatus,
-          mileage: workOrderMileage,
-          estimatedCost: formattedCost,
-          nextServiceMonth,
-          mechanicNotes,
-          oldPartPhoto: oldPartUrl,
-          newPartPhoto: newPartUrl
-        }),
-      });
-      
-      const data = await response.json();
-      
-      if(response.ok) {
-        alert(t.orderSavedAlert);
-        setMechanicPlate('');
-        setWorkOrderMileage('');
-        setEstimatedCost('');
-        setMechanicNotes('');
-        setOldPartFile(null);
-        setOldPartPreview(null);
-        setNewPartFile(null);
-        setNewPartPreview(null);
-        setSelectedAppointment(null);
-        loadAgendaAppointments(agendaTab);
-      } else {
-        alert(`❌ Error: ${data.error || 'No se pudo guardar la orden'}`);
-      }
-    } catch (error: any) {
-      alert(`Error: ${error.message}`);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleExportExcel = () => {
-    if (reportData.length === 0) {
-      alert(t.noReportsFound);
-      return;
-    }
-    const headers = [t.colDate, t.colPlate, t.colService, t.colMechanic, t.colValue];
-    const csvRows = [headers.join(',')];
-    
-    // Al usar reportData directamente, garantizamos que el CSV se lleve los 50 registros completos
-    reportData.forEach(row => {
-      const numericCost = parseFloat((row.cost || '$0').replace(/[^0-9.-]+/g,""));
-      const formattedCost = isNaN(numericCost) ? row.cost : numericCost.toFixed(2);
-      csvRows.push(`"${row.date}","${row.plate}","${row.serviceType}","${row.mechanic}","${formattedCost}"`);
-    });
-    
-    csvRows.push(`"","","","TOTAL:","${reportTotalValue.toFixed(2)}"`);
-
-    const csvContent = "\uFEFF" + csvRows.join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const exportToCSV = () => {
+    const headers = ["Fecha", "Identificador", "Cliente", "Servicio", "Personal", "Total Cobrado"];
+    const csvRows = reportsData.map(r => `${r.date},${r.plate},${r.clientName},${r.service},${r.mechanicName},$${r.cost}`);
+    const csvContent = "data:text/csv;charset=utf-8," + headers.join(",") + "\n" + csvRows.join("\n");
+    const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Reporte_AutoFlow_${reportMechanic}_${reportStartDate || 'Inicio'}_al_${reportEndDate || 'Final'}.csv`);
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `Reporte_AutoFlow_${reportStartDate}_al_${reportEndDate}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  const handleExportPDF = () => {
-    if (reportData.length === 0) {
-      alert(t.noReportsFound);
-      return;
+  const exportToPDF = () => {
+    setIsPrinting(true);
+    setTimeout(() => {
+      window.print();
+      setIsPrinting(false);
+    }, 800); 
+  };
+
+  const handleSearchExpediente = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!expedienteQuery) return;
+    setIsSearchingExpediente(true); setClientExpedienteData(null);
+    try {
+      const res = await apiFetch(`/api/clients/history/${expedienteQuery.trim()}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) setClientExpedienteData(data); else alert('No se encontró historial.');
+      }
+    } catch (err) { alert('Error.'); } finally { setIsSearchingExpediente(false); }
+  };
+
+  const handleSearchVehicle = async () => {
+    if (!searchPlate) return;
+    setIsSearchingPlate(true);
+    try {
+      const res = await apiFetch(`/api/clients/vehicle/${searchPlate}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.vehicle) {
+          setCarBrand(data.vehicle.brand || ''); setCarModel(data.vehicle.model || ''); 
+          setCarYear(data.vehicle.year || ''); setCarMileage(data.vehicle.currentMileage || ''); 
+          if (data.client) {
+            setClientName(toTitleCase(data.client.name || '')); 
+            setClientEmail(data.client.email || ''); 
+            setClientPhone(data.client.phone ? data.client.phone.replace('+1 ', '') : '');
+          }
+          setIsPlateSearched(true);
+        } else { setIsPlateSearched(true); }
+      }
+    } catch (error) { setIsPlateSearched(true); } finally { setIsSearchingPlate(false); }
+  };
+
+  const handleBookService = async (e: React.FormEvent) => {
+    e.preventDefault(); setIsSubmitting(true);
+    try {
+      const combinedDateTime = appointmentDate && appointmentTime ? `${appointmentDate}T${appointmentTime}:00Z` : new Date().toISOString();
+      const metadata = isAutomotive ? { carPlate: searchPlate, carBrand, carModel, carYear, carMileage } : {};
+      const formattedPhone = clientPhone.startsWith('+1') ? clientPhone : `+1 ${clientPhone.trim()}`;
+
+      const response = await apiFetch('/api/appointments', {
+        method: 'POST',
+        body: JSON.stringify({ 
+          clientName: toTitleCase(clientName), 
+          clientEmail, 
+          clientPhone: formattedPhone, 
+          serviceId: selectedServiceType, 
+          staffId: selectedBookingStaff || null, 
+          appointmentDate: combinedDateTime, 
+          notes: quickNotes, 
+          metadata 
+        }),
+      });
+      if (response.ok) {
+        alert(`¡Cita confirmada!`);
+        setIsBookingModalOpen(false); setIsPlateSearched(false);
+      }
+    } catch (error) { alert('Error.'); } finally { setIsSubmitting(false); }
+  };
+
+  const handleMechanicLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mechanicPin === '1234') { setIsMechanicAuth(true); fetchAgendaData(); } else alert('PIN Incorrecto');
+  };
+
+  const fetchAgendaData = async () => {
+    try {
+      const resToday = await apiFetch('/api/appointments/today');
+      if (resToday.ok) { const data = await resToday.json(); if (data.success) setTodayOrders(data.appointments); }
+      
+      const resUpcoming = await apiFetch('/api/appointments/upcoming?filter=upcoming');
+      if (resUpcoming.ok) { const data = await resUpcoming.json(); if (data.success) setUpcomingOrders(data.appointments); }
+    } catch (err) { console.error("Error agenda:", err); }
+  };
+
+  const handleAddStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStaffName || (!selectedStaffRole && !customStaffRole)) return;
+    
+    const formattedName = toTitleCase(newStaffName.trim());
+    const finalRole = selectedStaffRole === 'custom' ? toTitleCase(customStaffRole.trim()) : selectedStaffRole;
+    
+    try {
+      const res = await apiFetch('/api/staff', {
+        method: 'POST',
+        body: JSON.stringify({ name: formattedName, role: finalRole })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStaffList([...staffList, { ...data.member, isActive: true }]);
+        } else {
+          setStaffList([...staffList, { id: `stf-${Date.now()}`, name: formattedName, role: finalRole, isActive: true }]);
+        }
+      } else {
+        setStaffList([...staffList, { id: `stf-${Date.now()}`, name: formattedName, role: finalRole, isActive: true }]);
+      }
+    } catch (err) {
+      setStaffList([...staffList, { id: `stf-${Date.now()}`, name: formattedName, role: finalRole, isActive: true }]);
     }
-    window.print();
+    
+    setNewStaffName(''); setSelectedStaffRole(''); setCustomStaffRole('');
+    alert(`✅ ${formattedName} agregado exitosamente.`);
   };
 
-  // Lógica matemática para Paginación Web
-  const indexOfLastItem = currentPage * itemsPerPage;
-  const indexOfFirstItem = indexOfLastItem - itemsPerPage;
-  const currentItems = reportData.slice(indexOfFirstItem, indexOfLastItem);
-  const totalPages = Math.ceil(reportData.length / itemsPerPage) || 1;
+  // 🔄 ALTERNAR ESTADO ACTIVO / INACTIVO CON PERSISTENCIA REAL
+  const toggleStaffStatus = async (id: string, currentStatus: boolean) => {
+    try {
+      const nextStatus = !currentStatus;
+      const res = await apiFetch(`/api/staff/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ isActive: nextStatus })
+      });
 
-  const nextPage = () => {
-    if (currentPage < totalPages) setCurrentPage(currentPage + 1);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
+        } else {
+          setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
+        }
+      } else {
+        setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
+      }
+    } catch (err) {
+      console.error("Error al cambiar estado:", err);
+      setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: !currentStatus } : s));
+    }
   };
 
-  const prevPage = () => {
-    if (currentPage > 1) setCurrentPage(currentPage - 1);
+  const convertImageToWebp = (file: File): Promise<File> => { 
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader(); reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image(); img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas'); let width = img.width; let height = img.height;
+          if (width > height) { if (width > 1200) { height = Math.round((height *= 1200 / width)); width = 1200; } } else { if (height > 1200) { width = Math.round((width *= 1200 / height)); height = 1200; } }
+          canvas.width = width; canvas.height = height; const ctx = canvas.getContext('2d'); ctx?.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+              if (!blob) return reject(new Error('Fallo'));
+              resolve(new File([blob], `${file.name.substring(0, file.name.lastIndexOf('.')) || file.name}.webp`, { type: 'image/webp' }));
+            }, 'image/webp', 0.8);
+        }; img.onerror = (error) => reject(error);
+      }; reader.onerror = (error) => reject(error);
+    });
   };
+
+  const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'old' | 'new') => {
+    if (e.target.files && e.target.files[0]) {
+      const rawFile = e.target.files[0];
+      try {
+        const webpFile = await convertImageToWebp(rawFile);
+        const url = URL.createObjectURL(webpFile);
+        if (type === 'old') { setOldPartImage(webpFile); setOldPartPreview(url); } else { setNewPartImage(webpFile); setNewPartPreview(url); }
+      } catch (err) { alert('Error imagen.'); }
+    }
+  };
+
+  const uploadImageToSupabase = async (file: File, folderName: 'old' | 'new') => {
+    try {
+      const fileName = `${folderName}-${Date.now()}.webp`; const filePath = `${folderName}/${fileName}`;
+      const { error } = await supabase.storage.from('autoflow').upload(filePath, file, { upsert: true, contentType: 'image/webp' });
+      return error ? null : filePath; 
+    } catch (err) { return null; }
+  };
+
+  const handleCompleteWorkOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignedMechanicId) { alert("Asigne al personal responsable."); return; }
+    setIsSubmitting(true);
+    try {
+      let oldImageUrl = await (oldPartImage ? uploadImageToSupabase(oldPartImage, 'old') : null);
+      let newImageUrl = await (newPartImage ? uploadImageToSupabase(newPartImage, 'new') : null);
+      const cleanCost = finalCost.replace(/[^0-9.]/g, '');
+
+      const payload = {
+        finalCost: cleanCost, exitMileage, oldParts, newParts, mechanicNotes, nextServiceDate: nextServiceTime,
+        oldPartImageUrl: oldImageUrl, newPartImageUrl: newImageUrl, staffId: assignedMechanicId
+      };
+
+      await apiFetch(`/api/appointments/${selectedOrder.id}/complete`, { method: 'PUT', body: JSON.stringify(payload) });
+      alert('✅ Orden cerrada con éxito.');
+      setSelectedOrder(null); fetchAgendaData();
+    } catch (error) { alert('Error.'); } finally { setIsSubmitting(false); }
+  };
+
+  const getDynamicTheme = () => {
+    if (!tenantInfo) return { bg: 'url("https://images.unsplash.com/photo-1451187580459-43490279c0fa?q=80&w=2000&auto=format&fit=crop")', accent: '#3B82F6', glow: 'rgba(59, 130, 246, 0.4)' };
+    if (isAutomotive) return { bg: 'url("/Gemini_Generated_Image_exx9q8exx9q8exx9.jpg")', accent: '#FF5E00', glow: 'rgba(255, 94, 0, 0.4)' };
+    return { bg: 'url("https://images.unsplash.com/photo-1540555700478-4be289fbecef?q=80&w=2000&auto=format&fit=crop")', accent: '#10B981', glow: 'rgba(16, 185, 129, 0.4)' };
+  };
+
+  const themeConfig = getDynamicTheme();
+  const activeOrdersList = agendaFilter === 'today' ? todayOrders : upcomingOrders;
 
   return (
-    <div className="app-canvas" data-theme={isDark ? 'dark' : 'light'}>
+    <div className="app-container" data-theme={isDark ? 'dark' : 'light'}>
       <style dangerouslySetInnerHTML={{__html: `
         [data-theme="dark"] {
-          color-scheme: dark;
-          --overlay-top: rgba(3, 5, 10, 0.65);
-          --overlay-bottom: rgba(3, 5, 10, 0.9);
-          --bg-nav: rgba(10, 10, 12, 0.8);
-          --bg-card: rgba(18, 18, 22, 0.95);
-          --bg-card-hover: rgba(24, 24, 30, 0.98);
-          --border: rgba(255, 255, 255, 0.1);
-          --border-hover: rgba(255, 94, 0, 0.5);
-          --accent: #FF5E00;
-          --accent-glow: rgba(255, 94, 0, 0.4);
-          --text-main: #FFFFFF;
-          --text-muted: #94A3B8;
-          --shadow-glass: 0 25px 50px -12px rgba(0,0,0,0.7);
-          --surface-subtle: rgba(255, 255, 255, 0.04);
-          --surface-box: rgba(0, 0, 0, 0.25);
-          --input-bg: rgba(0, 0, 0, 0.25);
+          color-scheme: dark; --overlay-top: rgba(5, 7, 12, 0.75); --overlay-bottom: rgba(5, 7, 12, 0.95);
+          --bg-sidebar: rgba(10, 12, 16, 0.85); --bg-card: rgba(18, 22, 28, 0.65); --bg-card-hover: rgba(24, 28, 36, 0.85);
+          --border: rgba(255, 255, 255, 0.08); --text-main: #FFFFFF; --text-muted: #94A3B8; --input-bg: rgba(0, 0, 0, 0.3);
         }
-
         [data-theme="light"] {
-          color-scheme: light;
-          --overlay-top: rgba(248, 250, 252, 0.82);
-          --overlay-bottom: rgba(248, 250, 252, 0.98);
-          --bg-nav: rgba(255, 255, 255, 0.92);
-          --bg-card: rgba(255, 255, 255, 0.96);
-          --bg-card-hover: rgba(255, 255, 255, 1);
-          --border: rgba(15, 23, 42, 0.14);
-          --border-hover: rgba(255, 94, 0, 0.45);
-          --accent: #FF5E00;
-          --accent-glow: rgba(230, 85, 0, 0.25);
-          --text-main: #0F172A;
-          --text-muted: #475569;
-          --shadow-glass: 0 20px 40px -10px rgba(0,0,0,0.12);
-          --surface-subtle: rgba(15, 23, 42, 0.04);
-          --surface-box: rgba(15, 23, 42, 0.05);
-          --input-bg: rgba(15, 23, 42, 0.04);
+          color-scheme: light; --overlay-top: rgba(248, 250, 252, 0.85); --overlay-bottom: rgba(248, 250, 252, 0.98);
+          --bg-sidebar: rgba(255, 255, 255, 0.9); --bg-card: rgba(255, 255, 255, 0.75); --bg-card-hover: rgba(255, 255, 255, 1);
+          --border: rgba(15, 23, 42, 0.1); --text-main: #0F172A; --text-muted: #475569; --input-bg: rgba(15, 23, 42, 0.05);
         }
-
+        :root { --accent: ${themeConfig.accent}; --accent-glow: ${themeConfig.glow}; }
         * { box-sizing: border-box; font-family: 'Inter', system-ui, sans-serif; transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease; }
-        body { margin: 0; padding: 0; overflow-x: hidden; background-color: #000; width: 100%; }
-
-        nextjs-portal, [data-nextjs-toast] { display: none !important; opacity: 0 !important; pointer-events: none !important; }
-
-        .app-canvas {
-          min-height: 100vh; width: 100vw; max-width: 100%;
-          background-image: linear-gradient(to bottom, var(--overlay-top), var(--overlay-bottom)), url('/Gemini_Generated_Image_exx9q8exx9q8exx9.jpg');
-          background-size: cover; background-position: center; background-attachment: fixed;
-          color: var(--text-main); display: flex; flex-direction: column; overflow-x: hidden;
-        }
-
-        .top-nav {
-          background: var(--bg-nav); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-          border-bottom: 1px solid var(--border); padding: 0 24px;
-          display: flex; justify-content: space-between; align-items: center; 
-          height: 76px; position: sticky; top: 0; z-index: 100; gap: 12px; width: 100%;
-        }
-
-        .brand { display: flex; align-items: center; gap: 8px; font-weight: 900; font-size: 21px; letter-spacing: -0.5px; flex-shrink: 0; }
-        .brand span { color: var(--accent); }
-
-        .nav-desktop { display: flex; gap: 6px; background: var(--surface-box); padding: 4px; border-radius: 14px; border: 1px solid var(--border); }
-        .nav-tab { background: transparent; border: none; color: var(--text-muted); font-size: 14px; font-weight: 700; padding: 8px 16px; border-radius: 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
-        .nav-tab:hover { color: var(--text-main); }
-        .nav-tab.active { background: var(--bg-card-hover); color: var(--text-main); box-shadow: 0 4px 10px rgba(0,0,0,0.08); border: 1px solid var(--border); }
-
-        .nav-mobile-select { display: none; background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); padding: 10px 14px; border-radius: 12px; font-weight: 700; font-size: 13.5px; outline: none; width: 100%; max-width: 200px; }
-
-        .nav-right-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-        .control-btn { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); height: 38px; padding: 0 12px; border-radius: 19px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 13px; font-weight: 800; }
-        .control-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
-
-        .main-content { padding: 40px 20px; max-width: 1200px; margin: 0 auto; width: 100%; flex: 1; display: flex; flex-direction: column; gap: 32px; }
-
-        .glass-card { 
-          background: var(--bg-card); backdrop-filter: blur(25px); -webkit-backdrop-filter: blur(25px); 
-          border: 1px solid var(--border); border-radius: 24px; padding: 36px 28px; 
-          box-shadow: var(--shadow-glass); position: relative; width: 100%; max-width: 100%; 
-        }
-
-        .close-view-btn { position: absolute; top: 18px; right: 18px; background: var(--surface-box); border: 1px solid var(--border); color: var(--text-main); width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; cursor: pointer; z-index: 10; }
-        .close-view-btn:hover { background: rgba(255,94,0,0.15); color: var(--accent); border-color: var(--accent); transform: scale(1.05); }
-
-        .btn-primary { background: var(--accent); color: #fff; border: none; padding: 16px 22px; border-radius: 14px; font-size: 15px; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; box-shadow: 0 8px 20px var(--accent-glow); white-space: nowrap; }
-        .btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
-        .btn-primary:disabled { opacity: 0.7; cursor: not-allowed; }
+        body { margin: 0; padding: 0; background-color: #000; overflow-x: hidden; }
         
-        .btn-excel { background: #107c41; box-shadow: 0 8px 20px rgba(16, 124, 65, 0.3); padding: 0 20px; height: 42px; font-size: 13.5px; }
-        .btn-pdf { background: #da0b20; box-shadow: 0 8px 20px rgba(218, 11, 32, 0.3); padding: 0 20px; height: 42px; font-size: 13.5px; }
-
-        .site-footer { margin-top: 60px; padding: 35px 16px; display: flex; flex-direction: column; align-items: center; gap: 16px; background: var(--bg-nav); border-top: 1px solid var(--border); text-align: center; width: 100%; }
-        .rate-btn { background: transparent; color: var(--accent); border: 1px solid var(--accent); padding: 8px 24px; border-radius: 20px; font-weight: 700; font-size: 13.5px; display: flex; align-items: center; gap: 6px; cursor: pointer; }
-        .footer-text { font-size: 12.5px; color: var(--text-muted); margin: 0; }
-        .footer-links { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 12.5px; color: var(--text-main); font-weight: 600; flex-wrap: wrap; }
-        .footer-links span { cursor: pointer; }
-        .footer-links span:hover { color: var(--accent); }
-        .footer-divider { width: 30px; height: 1px; background: var(--border); }
-
-        .landing-bento { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; width: 100%; align-items: stretch; }
-        .bento-card { display: flex; flex-direction: column; justify-content: space-between; height: 100%; }
-        .bento-grid { display: grid; grid-template-columns: 380px 1fr; gap: 24px; width: 100%; }
+        .app-container { display: flex; min-height: 100vh; width: 100vw; background-image: linear-gradient(to bottom, var(--overlay-top), var(--overlay-bottom)), ${themeConfig.bg}; background-size: cover; background-position: center; background-attachment: fixed; color: var(--text-main); }
+        .sidebar { width: ${isSidebarOpen ? '260px' : '80px'}; background: var(--bg-sidebar); backdrop-filter: blur(25px); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; transition: width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); z-index: 100; }
+        .sidebar-header { height: 80px; display: flex; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--border); justify-content: ${isSidebarOpen ? 'space-between' : 'center'}; }
         
-        .timeline { position: relative; padding-left: 18px; margin-top: 20px; width: 100%; }
-        .timeline::before { content: ''; position: absolute; left: 0; top: 6px; bottom: 0; width: 2px; background: var(--border); }
-        .timeline-item { position: relative; margin-bottom: 20px; width: 100%; }
-        .timeline-dot { position: absolute; left: -23px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--bg-card); border: 2px solid var(--accent); }
+        .brand { cursor: pointer; display: flex; align-items: center; }
+        .brand-text-full { display: ${isSidebarOpen ? 'inline-flex' : 'none'}; font-weight: 900; font-size: 20px; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; }
+        .brand-text-full span { color: var(--accent); }
+        .brand-text-short { display: ${isSidebarOpen ? 'none' : 'inline-flex'}; font-weight: 900; font-size: 24px; color: var(--text-main); }
         
-        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; width: 100%; }
-        .input-group { display: flex; flex-direction: column; gap: 6px; position: relative; width: 100%; max-width: 100%; }
-        .input-label { font-size: 11.5px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+        .toggle-btn { background: transparent; border: none; color: var(--text-muted); cursor: pointer; font-size: 20px; padding: 5px; }
         
-        .form-input, .form-textarea, .form-select { 
-          background: var(--input-bg); border: 1px solid var(--border); color: var(--text-main); 
-          padding: 13px 14px; border-radius: 12px; font-size: 14.5px; outline: none; width: 100%; max-width: 100%;
-          box-sizing: border-box;
-        }
-        .form-input:focus, .form-textarea:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); background: var(--bg-card); }
-        .form-textarea { min-height: 90px; resize: vertical; grid-column: 1 / -1; width: 100%; }
-        .form-input[readOnly] { background: var(--surface-box); cursor: not-allowed; opacity: 0.8; }
-
-        input[type="date"], input[type="time"], input[type="month"] {
-          appearance: none; -webkit-appearance: none; min-height: 48px;
-        }
-        [data-theme="dark"] input[type="date"],
-        [data-theme="dark"] input[type="time"],
-        [data-theme="dark"] input[type="month"] {
-          color-scheme: dark;
-        }
-        [data-theme="light"] input[type="date"],
-        [data-theme="light"] input[type="time"],
-        [data-theme="light"] input[type="month"] {
-          color-scheme: light;
-        }
-        input[type="date"]::-webkit-calendar-picker-indicator,
-        input[type="time"]::-webkit-calendar-picker-indicator,
-        input[type="month"]::-webkit-calendar-picker-indicator {
-          cursor: pointer; opacity: 0.85; padding: 6px; width: 26px; height: 26px; filter: none;
-        }
-        input[type="date"]::-webkit-calendar-picker-indicator:hover,
-        input[type="time"]::-webkit-calendar-picker-indicator:hover,
-        input[type="month"]::-webkit-calendar-picker-indicator:hover {
-          opacity: 1;
-        }
-
-        .phone-input-container { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg); overflow: hidden; width: 100%; max-width: 100%; box-sizing: border-box; }
-        .phone-input-container:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); background: var(--bg-card); }
-        .phone-prefix-box { display: flex; align-items: center; gap: 4px; padding: 0 12px; font-weight: 700; font-size: 13px; color: var(--text-main); border-right: 1px solid var(--border); background: var(--surface-box); height: 100%; min-height: 48px; flex-shrink: 0; }
-        .phone-field { border: none !important; background: transparent !important; box-shadow: none !important; border-radius: 0 !important; width: 100% !important; padding: 13px 12px !important; }
-
-        .consent-box { display: flex; gap: 10px; align-items: flex-start; background: var(--surface-box); border: 1px solid var(--border); padding: 12px; border-radius: 12px; margin-bottom: 20px; cursor: pointer; text-align: left; width: 100%; }
-        .consent-checkbox { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; margin-top: 2px; flex-shrink: 0; }
-        .consent-text { font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
-
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); backdrop-filter: blur(8px); display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 12px; }
-        .modal-content { background: var(--bg-card); backdrop-filter: blur(25px); width: 100%; max-width: 480px; padding: 28px 20px; border-radius: 24px; border: 1px solid var(--border); box-shadow: 0 30px 60px rgba(0,0,0,0.8); position: relative; max-height: 92vh; overflow-y: auto; text-align: center; box-sizing: border-box; }
+        .nav-menu { padding: 24px 12px; display: flex; flex-direction: column; gap: 8px; flex-grow: 1; }
+        .nav-item { display: flex; align-items: center; gap: 14px; padding: 14px 16px; border-radius: 12px; color: var(--text-muted); font-weight: 700; font-size: 14.5px; cursor: pointer; border: 1px solid transparent; background: transparent; transition: all 0.2s; white-space: nowrap; overflow: hidden; }
+        .nav-item:hover { background: var(--bg-card); color: var(--text-main); }
+        .nav-item.active { background: var(--bg-card-hover); color: var(--text-main); border: 1px solid var(--border); box-shadow: 0 8px 20px rgba(0,0,0,0.1); }
+        .nav-icon { font-size: 18px; flex-shrink: 0; display: flex; justify-content: center; width: 24px; }
+        .nav-item.active .nav-icon { color: var(--accent); }
+        .sidebar-footer { padding: 20px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
         
-        .report-table { width: 100%; border-collapse: collapse; font-size: 13.5px; text-align: left; }
-        .report-table th { padding: 16px 12px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-weight: 800; text-transform: uppercase; font-size: 11.5px; }
-        .report-table td { padding: 14px 12px; color: var(--text-main); }
-        .report-table tr { transition: background-color 0.2s; }
+        .main-content { flex-grow: 1; display: flex; flex-direction: column; height: 100vh; overflow-y: auto; }
+        .top-bar { height: 80px; padding: 0 40px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); background: transparent; }
+        .content-area { padding: 40px; max-width: 1200px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 40px; }
         
-        .zebra-even { background: var(--surface-subtle); }
-        .zebra-odd { background: transparent; }
-        .val-green { font-weight: 800; color: #00E676; }
+        .glass-card { background: var(--bg-card); backdrop-filter: blur(30px); border: 1px solid var(--border); border-radius: 24px; padding: 32px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); position: relative; }
+        .interactive-card { cursor: pointer; transition: transform 0.3s, border-color 0.3s; }
+        .interactive-card:hover { transform: translateY(-5px); border-color: var(--accent); background: var(--bg-card-hover); }
+        
+        .btn-primary { background: var(--accent); color: #fff; border: none; padding: 14px 24px; border-radius: 12px; font-size: 14.5px; font-weight: 800; cursor: pointer; box-shadow: 0 8px 20px var(--accent-glow); transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+        .btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-2px); box-shadow: 0 12px 25px var(--accent-glow); }
+        .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+        
+        .btn-secondary { background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border); padding: 14px 24px; border-radius: 12px; font-size: 14.5px; font-weight: 800; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+        .btn-secondary:hover { border-color: var(--accent); color: var(--accent); background: rgba(255,255,255,0.05); }
+        .btn-secondary.active { background: var(--accent); color: white; border-color: var(--accent); }
+        
+        .form-input, .form-select { background: var(--input-bg); border: 1px solid var(--border); color: var(--text-main); padding: 14px 16px; border-radius: 12px; width: 100%; font-size: 14.5px; outline: none; transition: all 0.2s; }
+        .form-input:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+        
+        .bento-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; }
+        .badge { background: var(--border); color: var(--text-main); padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
+        
+        .reports-filters { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 24px; padding: 20px; }
+        .filter-group { flex: 1; min-width: 150px; }
+        .export-group { display: flex; gap: 12px; margin-left: auto; }
+        .btn-search { height: 48px; padding: 0 24px; }
 
-        .report-table tbody tr:hover { background: rgba(255, 255, 255, 0.05) !important; }
-
-        .pagination-container { display: flex; justify-content: space-between; align-items: center; padding: 16px 0 0 0; margin-top: 16px; border-top: 1px solid var(--border); }
-        .pagination-btn { background: var(--surface-box); border: 1px solid var(--border); color: var(--text-main); padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 12.5px; cursor: pointer; transition: all 0.2s; }
-        .pagination-btn:hover:not(:disabled) { background: var(--bg-card-hover); border-color: var(--accent); color: var(--accent); }
-        .pagination-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        .pagination-info { font-size: 12.5px; color: var(--text-muted); font-weight: 600; }
-
-        /* MAGIA PARA IMPRESIÓN PDF AISLADA Y PERFECTAMENTE ALINEADA */
-        .only-print { display: none; }
+        .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; margin-top: 16px; }
+        .glass-table { width: 100%; border-collapse: collapse; min-width: 800px; }
+        .glass-table th, .glass-table td { white-space: nowrap; padding: 16px; text-align: left; }
+        .glass-table th { border-bottom: 2px solid var(--border); color: var(--accent); font-size: 13px; font-weight: 900; text-transform: uppercase; }
+        .glass-table td { border-bottom: 1px solid var(--border); font-size: 14.5px; font-weight: 500; }
+        .glass-table tr:hover td { background: rgba(255,255,255,0.02); }
+        
+        @media (max-width: 850px) {
+          .app-container { flex-direction: column; }
+          .sidebar { 
+            width: 100% !important; height: auto; position: sticky; top: 0; z-index: 2000; 
+            border-right: none; border-bottom: 1px solid var(--border); background: var(--bg-sidebar); box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+          }
+          .sidebar-header { justify-content: space-between !important; width: 100%; }
+          .brand-text-full { display: inline-flex !important; }
+          .brand-text-short { display: none !important; }
+          
+          .nav-menu { display: ${isSidebarOpen ? 'flex' : 'none'}; padding: 16px; }
+          .sidebar-footer { display: ${isSidebarOpen ? 'flex' : 'none'}; flex-direction: row; flex-wrap: wrap; justify-content: space-between; padding: 16px; }
+          
+          .main-content { height: auto; overflow-y: visible; }
+          .top-bar { padding: 15px 20px; height: auto; min-height: 60px; flex-wrap: wrap; gap: 10px; justify-content: center; }
+          .content-area { padding: 20px; gap: 24px; }
+          
+          .bento-grid { grid-template-columns: 1fr; }
+          .glass-card { padding: 20px; }
+          .order-card { padding: 20px; }
+          .form-input, .form-select, .btn-primary, .btn-secondary { font-size: 14px; padding: 14px; }
+          
+          .reports-filters { flex-direction: column; align-items: stretch; gap: 16px; }
+          .filter-group { min-width: 100%; width: 100%; }
+          .export-group { margin-left: 0; width: 100%; flex-direction: column; }
+          .export-group button { width: 100%; margin: 0; }
+          .btn-search { width: 100%; }
+          
+          .modal-content { padding: 24px 20px; width: 95%; }
+        }
+        
         @media print {
-          @page { size: A4 portrait; margin: 10mm; }
-          
-          .no-print { display: none !important; }
-          .only-print { display: block !important; width: 100% !important; }
-
-          /* Reset total para evitar márgenes escondidos */
-          body, html, .app-canvas, .main-content, .glass-card { 
-            display: block !important;
-            width: 100% !important; 
-            max-width: 100% !important; 
-            margin: 0 !important; 
-            padding: 0 !important;
-            background: white !important; 
-            border: none !important;
-            box-shadow: none !important;
-            backdrop-filter: none !important;
-            -webkit-backdrop-filter: none !important;
-            position: static !important;
-            overflow: visible !important;
-          }
-
-          .print-table-container { display: block !important; width: 100% !important; max-width: 100% !important; }
-
-          /* Tabla de PDF forzada al 100% */
-          .pdf-table { 
-            width: 100% !important; 
-            max-width: 100% !important;
-            table-layout: fixed !important;
-            border-collapse: collapse !important;
-            margin: 0 !important;
-          }
-
-          .pdf-table th, .pdf-table td { 
-            padding: 10px !important;
-            word-wrap: break-word !important;
-            overflow-wrap: break-word !important;
-            border-bottom: 1px solid #e2e8f0 !important;
-          }
-          
-          .pdf-table th { background: #f1f5f9 !important; color: #0f172a !important; border-bottom: 2px solid #cbd5e1 !important; }
-          .pdf-table td { color: #0f172a !important; }
-          .zebra-even { background: #f8fafc !important; }
-          .zebra-odd { background: #ffffff !important; }
-          .val-green { color: #16a34a !important; font-weight: 900 !important; }
-
-          * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          .sidebar, .top-bar, .modal-overlay, .no-print { display: none !important; }
+          @page { margin: 1.5cm; size: landscape; }
+          body { background: white !important; color: black !important; }
+          .app-container { background: white !important; color: black !important; display: block !important; }
+          .main-content { margin: 0 !important; padding: 0 !important; height: auto !important; overflow: visible !important; }
+          .glass-card { background: none !important; box-shadow: none !important; border: none !important; padding: 0 !important; }
+          .table-responsive { overflow: visible !important; }
+          .glass-table { width: 100% !important; border-collapse: collapse !important; margin-top: 20px !important; min-width: auto !important; }
+          .glass-table th { color: black !important; border-bottom: 2px solid black !important; background: #f8f9fa !important; -webkit-print-color-adjust: exact; padding: 12px !important; font-size: 12px !important; }
+          .glass-table td { border-bottom: 1px solid #ddd !important; padding: 10px !important; color: black !important; font-size: 12px !important; }
+          .badge { background: none !important; color: black !important; padding: 0 !important; font-weight: bold !important; border: 1px solid #000; padding: 2px 6px !important; border-radius: 4px; }
+          .print-only-header { display: flex !important; flex-direction: column !important; align-items: center !important; margin-bottom: 20px !important; border-bottom: 2px solid black !important; padding-bottom: 20px !important; }
+          .print-only-header img { height: 60px !important; margin-bottom: 10px !important; }
+          h1, h2, h3, h4, p, td, th { color: black !important; }
         }
 
-        @media (max-width: 900px) {
-          .top-nav { padding: 0 12px; height: 68px; }
-          .brand { font-size: 17px; }
-          .nav-desktop { display: none !important; }
-          .nav-mobile-select { display: block !important; }
-          .landing-bento, .bento-grid, .form-grid { grid-template-columns: 1fr !important; gap: 16px; width: 100%; }
-          .glass-card { padding: 22px 16px; border-radius: 20px; width: 100%; }
-          .main-content { padding: 20px 12px; width: 100%; gap: 24px; overflow-x: hidden; }
-          .modal-content { padding: 22px 14px; border-radius: 20px; width: 96vw; max-width: 96vw; }
-          .control-btn { height: 34px; padding: 0 10px; font-size: 12px; }
-          .form-input, .form-textarea, .form-select, .phone-input-container { width: 100% !important; max-width: 100% !important; }
-          .report-table { font-size: 12px; }
-          .report-table th, .report-table td { padding: 10px 6px; }
-        }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(12px); display: flex; justify-content: center; align-items: center; z-index: 1000; padding: 20px; overflow-y: auto; }
+        .modal-content { background: var(--bg-sidebar); border: 1px solid var(--border); border-radius: 24px; padding: 32px; width: 100%; max-width: 650px; max-height: 90vh; overflow-y: auto; position: relative; margin: auto; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
+        .close-btn { position: absolute; top: 24px; right: 24px; background: var(--input-bg); border: none; color: var(--text-muted); width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+        .close-btn:hover { background: var(--accent); color: white; }
+        
+        .order-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 16px; transition: border-color 0.3s; }
+        .order-card:hover { border-color: var(--accent); }
+        .order-header { display: flex; justify-content: space-between; align-items: center; }
+        .order-plate { background: var(--accent); color: white; padding: 6px 12px; border-radius: 8px; font-weight: 900; font-size: 16px; letter-spacing: 1.5px; box-shadow: 0 4px 10px var(--accent-glow); }
+        .order-status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: rgba(255,255,255,0.1); border-radius: 12px; font-size: 12px; font-weight: bold; }
+        
+        .img-preview-box { position: relative; width: 100%; height: 120px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); margin-top: 8px; background: #000; display: flex; align-items: center; justify-content: center; }
+        .img-preview-box img { width: 100%; height: 100%; object-fit: cover; }
+        .remove-img-btn { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,0.7); color: white; border: 1px solid rgba(255,255,255,0.2); border-radius: 50%; width: 28px; height: 28px; font-size: 14px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .remove-img-btn:hover { background: #EF4444; border-color: #EF4444; }
+        .upload-btn-label { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px; border: 2px dashed var(--border); border-radius: 12px; background: rgba(255,255,255,0.02); color: var(--text-muted); font-size: 13px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-top: 8px; }
+        .upload-btn-label:hover { border-color: var(--accent); color: var(--accent); background: rgba(255,255,255,0.05); }
       `}} />
 
-      <header className="top-nav no-print">
-        <div className="brand">
-          <img 
-            src="/logocar.png" 
-            alt="AutoFlow Logo" 
-            style={{ width: '65px', height: '55px', objectFit: 'contain' }} 
-          />
-          AUTO<span>FLOW</span>
-        </div>
-        
-        <div className="nav-desktop">
-          <button className={`nav-tab ${activeView === 'servicios' ? 'active' : ''}`} onClick={() => setActiveView('servicios')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-            {t.navServices}
-          </button>
-          <button className={`nav-tab ${activeView === 'expediente' ? 'active' : ''}`} onClick={() => setActiveView('expediente')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-            {t.navVehicle}
-          </button>
-          <button className={`nav-tab ${activeView === 'mecanico' ? 'active' : ''}`} onClick={() => setActiveView('mecanico')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
-            {t.navPortal}
-          </button>
-        </div>
-
-        <select className="nav-mobile-select" value={activeView} onChange={(e) => setActiveView(e.target.value as any)}>
-          <option value="servicios">🛠️ {t.navServices}</option>
-          <option value="expediente">📋 {t.navVehicle}</option>
-          <option value="mecanico">⚙️ {t.navPortal}</option>
-        </select>
-
-        <div className="nav-right-controls">
-          <button className="control-btn" onClick={() => setLang(lang === 'es' ? 'en' : 'es')}>
-            🌐 {lang.toUpperCase()}
-          </button>
-          <button className="control-btn" onClick={() => setIsDark(!isDark)} title={isDark ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}>
-            {isDark ? '☀️' : '🌙'}
-          </button>
-        </div>
-      </header>
-
-      <main className="main-content">
-
-        {/* 1. VISTA DE SERVICIOS & TRAYECTORIA */}
-        {activeView === 'servicios' && (
-          <>
-            <div style={{ textAlign: 'center', maxWidth: '750px', margin: '0 auto' }}>
-              <h1 style={{ fontSize: 'clamp(28px, 5vw, 42px)', fontWeight: '900', margin: '0 0 14px 0', letterSpacing: '-1px', lineHeight: '1.2' }}>
-                {t.heroTitle} <span style={{ color: 'var(--accent)' }}>{t.heroHighlight}</span>
-              </h1>
-              <p style={{ color: 'var(--text-muted)', fontSize: '15.5px', lineHeight: '1.6' }}>{t.heroDesc}</p>
-            </div>
-
-            <div className="landing-bento">
-              <div className="glass-card bento-card" style={{ background: 'linear-gradient(135deg, var(--bg-card), rgba(255,94,0,0.04))' }}>
-                <div>
-                  <h2 style={{ fontSize: '22px', fontWeight: '900', margin: '0 0 10px 0' }}>{t.aboutTitle}</h2>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '14px', lineHeight: '1.6', margin: '0 0 24px 0' }}>{t.aboutText}</p>
-                </div>
-                
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', textAlign: 'center' }}>
-                  <div style={{ background: 'var(--surface-box)', padding: '12px 6px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '17px', fontWeight: '900', color: 'var(--accent)' }}>{t.statYears}</div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>{t.statYearsDesc}</div>
-                  </div>
-                  <div style={{ background: 'var(--surface-box)', padding: '12px 6px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '17px', fontWeight: '900', color: 'var(--accent)' }}>{t.statVehicles}</div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>{t.statVehiclesDesc}</div>
-                  </div>
-                  <div style={{ background: 'var(--surface-box)', padding: '12px 6px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '17px', fontWeight: '900', color: 'var(--accent)' }}>{t.statWarranty}</div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>{t.statWarrantyDesc}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="glass-card bento-card">
-                <div>
-                  <h2 style={{ fontSize: '22px', fontWeight: '900', margin: '0 0 8px 0' }}>{t.serviceTitle}</h2>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '13.5px', marginBottom: '20px', lineHeight: '1.5' }}>{t.serviceDesc}</p>
-                  
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', textAlign: 'left', marginBottom: '24px', background: 'var(--surface-box)', padding: '16px', borderRadius: '14px', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '14px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
-                      {t.serviceItem1}
-                    </div>
-                    <div style={{ fontSize: '14px', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-                      {t.serviceItem2}
-                    </div>
-                  </div>
-                </div>
-
-                <button className="btn-primary" onClick={() => openBooking('mechanical')}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                  {t.btnAgenda}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* 2. VISTA EXPEDIENTE CLIENTE */}
-        {activeView === 'expediente' && (
-          <div key="expediente">
-            {!activePlate ? (
-              <div className="glass-card" style={{ maxWidth: '540px', margin: '20px auto', textAlign: 'center', padding: '36px 16px' }}>
-                <div style={{ fontSize: '42px', marginBottom: '14px' }}>🔍</div>
-                <h2 style={{ fontSize: '22px', fontWeight: '900', margin: '0 0 8px 0' }}>{t.searchTitle}</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '14px', marginBottom: '24px', lineHeight: '1.5' }}>{t.searchDesc}</p>
-                <form onSubmit={handleSearchVehicle} style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-                  <input type="text" className="form-input" placeholder={t.searchPlaceholder} value={searchPlate} onChange={(e) => setSearchPlate(e.target.value.toUpperCase())} required style={{ textTransform: 'uppercase', textAlign: 'center', fontSize: '17px', letterSpacing: '2px', fontWeight: 'bold' }} />
-                  <button type="submit" className="btn-primary" disabled={isSearching}>{isSearching ? t.searchingBtn : t.searchBtn}</button>
-                </form>
-              </div>
-            ) : (
-              <div className="bento-grid">
-                <div className="glass-card" style={{ textAlign: 'center', padding: '24px 16px' }}>
-                  <button className="close-view-btn" onClick={() => { setActivePlate(null); setSearchPlate(''); }}>✕</button>
-                  <img src="https://pngimg.com/uploads/porsche/porsche_PNG10622.png" alt="Carro" style={{ width: '80%', objectFit: 'contain', filter: 'drop-shadow(0 15px 10px rgba(0,0,0,0.6))', marginBottom: '16px' }} />
-                  <h2 style={{ fontSize: '20px', margin: '0 0 4px 0', fontWeight: '900' }}>{carBrand} {carModel} ({carYear})</h2>
-                  <span style={{ color: 'var(--text-main)', background: 'var(--border)', padding: '5px 12px', borderRadius: '8px', fontSize: '13.5px', fontWeight: '800', letterSpacing: '2px' }}>{activePlate}</span>
-                  
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', margin: '24px 0' }}>
-                    <div style={{ background: 'var(--surface-box)', padding: '14px 10px', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                      <span style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', fontWeight: '700', marginBottom: '2px' }}>{t.currentMileageLabel}</span>
-                      <strong style={{ fontSize: '16px' }}>{vehicleMileage}</strong>
-                    </div>
-                    <div style={{ background: 'rgba(255,94,0,0.05)', padding: '14px 10px', borderRadius: '12px', border: '1px solid var(--border-hover)' }}>
-                      <span style={{ fontSize: '10px', color: 'var(--accent)', textTransform: 'uppercase', display: 'block', fontWeight: '800', marginBottom: '2px' }}>{t.nextSrvLabel}</span>
-                      <strong style={{ fontSize: '16px', color: 'var(--text-main)' }}>{nextServiceMonth}</strong>
-                    </div>
-                  </div>
-                  
-                  <button className="btn-primary" onClick={() => openBooking('mechanical')}>📅 {t.btnAgenda}</button>
-                </div>
-
-                <div className="glass-card">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)', paddingBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
-                    <div>
-                      <h2 style={{ margin: '0 0 2px 0', fontSize: '18px', fontWeight: '800' }}>{t.workOrdersTitle}</h2>
-                      <span style={{ fontSize: '12.5px', color: 'var(--text-muted)' }}>{t.workOrdersSub}</span>
-                    </div>
-                    <span style={{ background: 'rgba(0, 230, 118, 0.1)', color: '#00E676', padding: '5px 12px', borderRadius: '20px', fontSize: '11.5px', fontWeight: '800', border: '1px solid rgba(0, 230, 118, 0.2)' }}>{t.optimalBadge}</span>
-                  </div>
-                  
-                  <div className="timeline">
-                    {vehicleHistory.map(record => (
-                      <div className="timeline-item" key={record.id}>
-                        <div className="timeline-dot"></div>
-                        <div style={{ background: 'var(--surface-box)', border: '1px solid var(--border)', padding: '16px', borderRadius: '14px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', flexWrap: 'wrap', gap: '6px' }}>
-                            <div>
-                              <span style={{ fontSize: '10.5px', color: 'var(--accent)', fontWeight: '800', letterSpacing: '0.5px' }}>{record.date} • {record.type}</span>
-                              <h4 style={{ margin: '2px 0 0 0', fontSize: '15px', fontWeight: '800' }}>{record.title}</h4>
-                            </div>
-                            <span style={{ fontSize: '11.5px', color: 'var(--text-muted)', background: 'var(--bg-nav)', padding: '3px 8px', borderRadius: '6px', border: '1px solid var(--border)' }}>👨‍🔧 {record.mechanic}</span>
-                          </div>
-                          
-                          <div style={{ background: 'var(--surface-subtle)', padding: '12px', borderRadius: '10px', fontSize: '13.5px', color: 'var(--text-muted)', borderLeft: '3px solid var(--border-hover)', lineHeight: '1.4' }}>
-                            <strong style={{ color: 'var(--text-main)' }}>{t.techReportLabel}</strong><br/>{record.notes}
-                          </div>
-
-                          {(record.oldPartPhoto || record.newPartPhoto) && (
-                            <div style={{ marginTop: '14px' }}>
-                              <span style={{ fontSize: '11px', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>{t.photoEvidenceLabel}</span>
-                              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                                {record.oldPartPhoto && (
-                                  <div style={{ textAlign: 'center' }}>
-                                    <PrivateImage 
-                                      path={record.oldPartPhoto} 
-                                      alt={t.oldPartLabel} 
-                                      onClick={(secureUrl: string) => setModalImageSrc(secureUrl)}
-                                      style={{ width: '80px', height: '80px', objectFit: 'cover', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.4)', cursor: 'pointer' }} 
-                                      title={t.clickToZoom}
-                                    />
-                                    <span style={{ fontSize: '10px', display: 'block', color: '#ef4444', marginTop: '2px', fontWeight: '700' }}>{t.oldPartLabel}</span>
-                                  </div>
-                                )}
-                                {record.newPartPhoto && (
-                                  <div style={{ textAlign: 'center' }}>
-                                    <PrivateImage 
-                                      path={record.newPartPhoto} 
-                                      alt={t.newPartLabel} 
-                                      onClick={(secureUrl: string) => setModalImageSrc(secureUrl)}
-                                      style={{ width: '80px', height: '80px', objectFit: 'cover', borderRadius: '8px', border: '1px solid rgba(0, 230, 118, 0.4)', cursor: 'pointer' }} 
-                                      title={t.clickToZoom}
-                                    />
-                                    <span style={{ fontSize: '10px', display: 'block', color: '#00E676', marginTop: '2px', fontWeight: '700' }}>{t.newPartLabel}</span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          
-                          <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between', fontWeight: '800', fontSize: '13.5px' }}>
-                            <span style={{ color: 'var(--text-muted)' }}>🛣️ {record.mileage ? `${record.mileage}` : t.mileageNotReg}</span>
-                            <span>{t.estCostLabel} <span style={{ color: 'var(--text-main)' }}>{record.cost}</span></span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
+      {/* Menú Lateral */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="brand" onClick={() => setTenantId(null)}>
+            <span className="brand-text-full">
+              {tenantInfo ? tenantInfo.name.split(' ')[0] : 'SaaS'}
+              <span>{tenantInfo ? (tenantInfo.name.split(' ')[1] || 'App') : 'PORTAL'}</span>
+            </span>
+            <span className="brand-text-short">
+              {tenantInfo ? tenantInfo.name.charAt(0) : 'S'}
+            </span>
           </div>
-        )}
+          <button className="toggle-btn" onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={{ transform: isSidebarOpen ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.3s' }}>
+            {isSidebarOpen ? '✖' : '☰'}
+          </button>
+        </div>
 
-        {/* 3. VISTA PORTAL TALLER */}
-        {activeView === 'mecanico' && (
-          <div key="mecanico">
-            {!isMechanicLoggedIn ? (
-              <div className="glass-card no-print" style={{ maxWidth: '400px', margin: '30px auto', textAlign: 'center', padding: '36px 16px' }}>
-                <button className="close-view-btn" onClick={() => setActiveView('servicios')}>✕</button>
-                <div style={{ fontSize: '38px', marginBottom: '12px' }}>🔐</div>
-                <h2 style={{ fontSize: '20px', fontWeight: '900', margin: '0 0 4px 0' }}>{t.shopAccessTitle}</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '20px' }}>{t.shopAccessDesc}</p>
-                <form onSubmit={handleMechanicLogin} style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-                  <input type="password" className="form-input" placeholder={t.pinPlaceholder} value={mechanicPin} onChange={(e) => setMechanicPin(e.target.value)} style={{ textAlign: 'center', fontSize: '18px', letterSpacing: '4px' }} required autoFocus />
-                  <button type="submit" className="btn-primary">{t.enterPortalBtn}</button>
-                </form>
+        <nav className="nav-menu">
+          {tenantId ? (
+            <>
+              <button className={`nav-item ${activeView === 'servicios' ? 'active' : ''}`} onClick={() => handleNavClick('servicios')}><span className="nav-icon">✨</span> {isSidebarOpen && 'Catálogo & Reservas'}</button>
+              <button className={`nav-item ${activeView === 'expediente' ? 'active' : ''}`} onClick={() => handleNavClick('expediente')}><span className="nav-icon">📋</span> {isSidebarOpen && 'Expediente Cliente'}</button>
+              <button className={`nav-item ${activeView === 'mecanico' ? 'active' : ''}`} onClick={() => handleNavClick('mecanico')}><span className="nav-icon">⚙️</span> {isSidebarOpen && 'Portal Interno'}</button>
+            </>
+          ) : (
+            <div style={{ padding: '0 16px', color: 'var(--text-muted)', fontSize: '12px', fontWeight: 'bold' }}>{isSidebarOpen && 'SELECCIONA UN NEGOCIO'}</div>
+          )}
+        </nav>
+        <div className="sidebar-footer">
+          {tenantId && isSidebarOpen && <button onClick={() => { setTenantId(null); if (window.innerWidth <= 850) setIsSidebarOpen(false); }} className="btn-primary" style={{ background: 'var(--input-bg)', color: 'var(--text-main)', boxShadow: 'none' }}>🔙 Salir</button>}
+          <button onClick={() => { setIsDark(!isDark); if (window.innerWidth <= 850) setIsSidebarOpen(false); }} className="nav-item" style={{ justifyContent: isSidebarOpen ? 'flex-start' : 'center', width: 'auto' }}><span className="nav-icon">{isDark ? '☀️' : '🌙'}</span>{isSidebarOpen && (isDark ? 'Modo Claro' : 'Modo Oscuro')}</button>
+        </div>
+      </aside>
+
+      {/* Contenido Principal */}
+      <main className="main-content">
+        <header className="top-bar no-print">
+          <div><span className="badge">{tenantId ? ((tenantInfo?.businessType || tenantInfo?.niche)?.toUpperCase() || 'SAAS') : 'DIRECTORIO GLOBAL'}</span></div>
+          <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+             <span style={{ fontSize: '13px', fontWeight: 'bold', color: 'var(--text-muted)' }}>{new Date().toLocaleDateString('es-ES', { weekday: 'long', month: 'long', day: 'numeric' })}</span>
+          </div>
+        </header>
+
+        <div className="content-area">
+          {!tenantId ? (
+            <div style={{ padding: '20px 0' }}>
+              <h1 style={{ fontSize: 'clamp(32px, 4vw, 48px)', fontWeight: '900', letterSpacing: '-1px', margin: '0 0 16px 0' }}>Ecosistema de <span style={{ color: 'var(--accent)' }}>Negocios</span></h1>
+              <p style={{ color: 'var(--text-muted)', fontSize: '16px', maxWidth: '600px', lineHeight: '1.6', marginBottom: '48px' }}>Selecciona una de las sucursales afiliadas para cargar su interfaz y catálogo dinámico.</p>
+              <div className="bento-grid">
+                {saasDirectory.map(biz => (
+                  <div key={biz.id} className="glass-card interactive-card" onClick={() => { setTenantId(biz.id); if (window.innerWidth <= 850) setIsSidebarOpen(false); }}>
+                    <div style={{ fontSize: '48px', marginBottom: '20px' }}>{biz.icon}</div>
+                    <h3 style={{ margin: '0 0 8px 0', fontSize: '22px', fontWeight: '800' }}>{biz.name}</h3>
+                    <p style={{ margin: '0', fontSize: '14px', color: 'var(--text-muted)' }}>Plataforma para {biz.label}</p>
+                    <div style={{ marginTop: '24px', display: 'flex', justifyContent: 'flex-end' }}><span style={{ color: 'var(--accent)', fontWeight: 'bold', fontSize: '14px' }}>Entrar →</span></div>
+                  </div>
+                ))}
               </div>
-            ) : (
-              <div className="glass-card" style={{ maxWidth: '850px', margin: '0 auto' }}>
-                <button className="close-view-btn no-print" onClick={() => { setIsMechanicLoggedIn(false); setActiveView('servicios'); setSelectedAppointment(null); setMechanicPortalView('agenda'); }}>✕</button>
-
-                <div className="no-print" style={{ borderBottom: '1px solid var(--border)', paddingBottom: '16px', marginBottom: '20px', paddingRight: '40px' }}>
-                  <h2 style={{ fontSize: '22px', margin: '0 0 12px 0', fontWeight: '900' }}>{t.shopPanelTitle}</h2>
-                  
-                  {/* SELECTOR ENTRE AGENDA Y REPORTES */}
-                  {!selectedAppointment && (
-                    <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                      <button 
-                        onClick={() => setMechanicPortalView('agenda')}
-                        style={{ 
-                          padding: '8px 16px', borderRadius: '10px', fontWeight: '800', fontSize: '13px', cursor: 'pointer',
-                          background: mechanicPortalView === 'agenda' ? 'var(--surface-box)' : 'transparent',
-                          color: mechanicPortalView === 'agenda' ? 'var(--text-main)' : 'var(--text-muted)',
-                          border: mechanicPortalView === 'agenda' ? '1px solid var(--border)' : '1px solid transparent',
-                        }}>
-                        {t.viewAgenda}
-                      </button>
-                      <button 
-                        onClick={() => { setMechanicPortalView('reportes'); handleLoadReports(); }}
-                        style={{ 
-                          padding: '8px 16px', borderRadius: '10px', fontWeight: '800', fontSize: '13px', cursor: 'pointer',
-                          background: mechanicPortalView === 'reportes' ? 'var(--surface-box)' : 'transparent',
-                          color: mechanicPortalView === 'reportes' ? 'var(--text-main)' : 'var(--text-muted)',
-                          border: mechanicPortalView === 'reportes' ? '1px solid var(--border)' : '1px solid transparent',
-                        }}>
-                        {t.viewReports}
-                      </button>
+            </div>
+          ) : (
+            <>
+              {/* VISTA 1: SERVICIOS */}
+              {activeView === 'servicios' && (
+                <div style={{ animation: 'fadeIn 0.5s ease-in-out' }}>
+                  <div style={{ marginBottom: '48px' }}>
+                    <h1 style={{ fontSize: 'clamp(32px, 4vw, 48px)', fontWeight: '900', letterSpacing: '-1px', margin: '0 0 16px 0' }}>Servicios <span style={{ color: 'var(--accent)' }}>Premium</span></h1>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '16px', maxWidth: '600px', lineHeight: '1.6' }}>Reserva tu cita en línea en tiempo real.</p>
+                  </div>
+                  <div className="bento-grid">
+                    {servicesList.length > 0 ? servicesList.map(srv => (
+                      <div key={srv.id} className="glass-card interactive-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                        <div>
+                          <h3 style={{ margin: '0 0 12px 0', fontSize: '20px', fontWeight: '800' }}>{srv.name}</h3>
+                          <p style={{ margin: '0 0 24px 0', fontSize: '14.5px', color: 'var(--text-muted)', lineHeight: '1.5' }}>{srv.description || 'Servicio especializado con altos estándares de calidad.'}</p>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: '20px' }}>
+                          <strong style={{ fontSize: '24px', fontWeight: '900', color: 'var(--accent)' }}>${srv.price}</strong>
+                          <button className="btn-primary" onClick={() => { setSelectedServiceType(srv.id); setIsBookingModalOpen(true); setIsPlateSearched(false); }}>Reservar Cita</button>
+                        </div>
+                      </div>
+                    )) : (<div className="glass-card"><p style={{fontWeight: 'bold', textAlign:'center'}}>Cargando catálogo...</p></div>)}
+                  </div>
+                </div>
+              )}
+              
+              {/* VISTA 2: EXPEDIENTE DEL CLIENTE */}
+              {activeView === 'expediente' && (
+                <div style={{ animation: 'fadeIn 0.5s ease-in-out', display: 'flex', flexDirection: 'column', gap: '32px' }}>
+                  <div className="glass-card" style={{ maxWidth: '700px', margin: '0 auto', width: '100%', textAlign: 'center' }}>
+                    <div style={{ fontSize: '48px', marginBottom: '16px' }}>📋</div>
+                    <h2 style={{ fontSize: '26px', fontWeight: '900', marginBottom: '8px' }}>Expediente Inmutable</h2>
+                    <p style={{ color: 'var(--text-muted)', marginBottom: '24px', fontSize: '14.5px' }}>Ingresa la placa o identificador para consultar el historial.</p>
+                    <form onSubmit={handleSearchExpediente} style={{ display: 'flex', gap: '12px' }}>
+                      <input type="text" className="form-input" placeholder="Identificador / Placa" value={expedienteQuery} onChange={(e) => setExpedienteQuery(e.target.value.toUpperCase())} style={{ textAlign: 'center', fontSize: '18px', fontWeight: 'bold', letterSpacing: '2px', padding: '16px' }} required />
+                      <button type="submit" className="btn-primary" disabled={isSearchingExpediente} style={{ padding: '0 32px' }}>{isSearchingExpediente ? 'Buscando...' : '🔍 Consultar'}</button>
+                    </form>
+                  </div>
+                  {clientExpedienteData && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '800px', margin: '0 auto', width: '100%' }}>
+                      <div className="glass-card" style={{ borderLeft: '4px solid var(--accent)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+                          <div>
+                            <span className="order-plate">{clientExpedienteData.vehicle.plate}</span>
+                          </div>
+                        </div>
+                        <div style={{ borderTop: '1px solid var(--border)', paddingTop: '16px', display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: 'var(--text-muted)' }}>
+                          <span>👤 Cliente: <strong>{toTitleCase(clientExpedienteData.client?.name || 'Cliente General')}</strong></span>
+                          <span>📞 Tel: <strong>🇺🇸 +1 {clientExpedienteData.client?.phone?.replace('+1 ', '') || 'N/A'}</strong></span>
+                        </div>
+                      </div>
+                      <h3 style={{ fontSize: '20px', fontWeight: '900', margin: '10px 0 0 0' }}>Historial de Visitas</h3>
+                      {clientExpedienteData.serviceHistory.length === 0 ? (
+                        <div className="glass-card" style={{ textAlign: 'center', padding: '24px' }}><p style={{ color: 'var(--text-muted)', margin: 0, fontWeight: 'bold' }}>Aún no registra órdenes cerradas.</p></div>
+                      ) : (
+                        clientExpedienteData.serviceHistory.map((wo: any, idx: number) => (
+                          <div key={wo.id} className="glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border)', paddingBottom: '12px' }}>
+                              <span className="badge">Visita #{clientExpedienteData.serviceHistory.length - idx}</span>
+                              <span style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold' }}>{new Date(wo.createdAt).toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                              <div><span style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 'bold' }}>Costo Pagado</span><div style={{ fontSize: '22px', fontWeight: '900', color: 'var(--accent)' }}>${Number(wo.finalCost || 0).toLocaleString('en-US')}</div></div>
+                            </div>
+                          </div>
+                        ))
+                      )}
                     </div>
-                  )}
-
-                  {/* TABS DE AGENDA MODULAR */}
-                  {mechanicPortalView === 'agenda' && !selectedAppointment && (
-                    <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px', scrollbarWidth: 'none' }}>
-                      <button 
-                        onClick={() => loadAgendaAppointments('hoy')}
-                        style={{ 
-                          padding: '8px 16px', borderRadius: '12px', fontWeight: '800', fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap',
-                          background: agendaTab === 'hoy' ? 'var(--accent)' : 'var(--surface-box)',
-                          color: agendaTab === 'hoy' ? '#fff' : 'var(--text-muted)',
-                          border: agendaTab === 'hoy' ? 'none' : '1px solid var(--border)',
-                          transition: 'all 0.2s'
-                        }}>
-                        {t.tabToday}
-                      </button>
-                      <button 
-                        onClick={() => loadAgendaAppointments('manana')}
-                        style={{ 
-                          padding: '8px 16px', borderRadius: '12px', fontWeight: '800', fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap',
-                          background: agendaTab === 'manana' ? 'var(--accent)' : 'var(--surface-box)',
-                          color: agendaTab === 'manana' ? '#fff' : 'var(--text-muted)',
-                          border: agendaTab === 'manana' ? 'none' : '1px solid var(--border)',
-                          transition: 'all 0.2s'
-                        }}>
-                        {t.tabTomorrow}
-                      </button>
-                      <button 
-                        onClick={() => loadAgendaAppointments('semana')}
-                        style={{ 
-                          padding: '8px 16px', borderRadius: '12px', fontWeight: '800', fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap',
-                          background: agendaTab === 'semana' ? 'var(--accent)' : 'var(--surface-box)',
-                          color: agendaTab === 'semana' ? '#fff' : 'var(--text-muted)',
-                          border: agendaTab === 'semana' ? 'none' : '1px solid var(--border)',
-                          transition: 'all 0.2s'
-                        }}>
-                        {t.tabWeek}
-                      </button>
-                    </div>
-                  )}
-
-                  {selectedAppointment && (
-                    <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '13.5px', fontWeight: '700' }}>
-                      {t.orderFor} {selectedAppointment.plate}
-                    </p>
                   )}
                 </div>
-                
-                {/* --- RENDERIZADO DE AGENDA --- */}
-                {mechanicPortalView === 'agenda' && (
-                  <div className="no-print">
-                    {!selectedAppointment ? (
-                      <div>
-                        {isLoadingAppointments ? (
-                          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>{t.loadingSchedule}</div>
-                        ) : todaysAppointments.length === 0 ? (
-                          <div style={{ textAlign: 'center', padding: '40px', background: 'var(--surface-box)', borderRadius: '14px', border: '1px solid var(--border)' }}>
-                            <span style={{ fontSize: '30px' }}>☕</span>
-                            <h3 style={{ margin: '10px 0 5px 0' }}>{t.freeDayTitle}</h3>
-                            <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>{t.freeDayDesc}</p>
-                          </div>
-                        ) : (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {todaysAppointments.map(app => (
-                              <div 
-                                key={app.id}
-                                onClick={() => {
-                                  setSelectedAppointment(app);
-                                  setMechanicPlate(app.plate);
-                                  setWorkOrderMileage(app.mileage || '');
-                                  setMechanicNotes(`${t.reviewPrefix} ${app.notes}`); 
-                                }}
-                                style={{ 
-                                  background: 'var(--bg-nav)', border: '1px solid var(--border)', padding: '16px', borderRadius: '14px', 
-                                  cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', transition: 'all 0.2s' 
-                                }}
-                                onMouseOver={(e) => e.currentTarget.style.borderColor = 'var(--accent)'}
-                                onMouseOut={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
-                              >
-                                <div>
-                                  <div style={{ fontSize: '16px', fontWeight: '900', color: 'var(--accent)' }}>{app.time} - {app.plate}</div>
-                                  <div style={{ fontSize: '13px', color: 'var(--text-main)' }}>{app.brand} {app.model} • {app.clientName}</div>
-                                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>{app.serviceType}</div>
-                                </div>
-                                <div style={{ background: 'rgba(255,94,0,0.1)', color: 'var(--accent)', padding: '8px 16px', borderRadius: '8px', fontWeight: '800', fontSize: '13px' }}>
-                                  {t.attendBtn}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <form onSubmit={handleSaveWorkOrder}>
-                        <button 
-                          type="button" 
-                          onClick={() => setSelectedAppointment(null)}
-                          style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '14px' }}
-                        >
-                          {t.backToSchedule}
-                        </button>
-                        
-                        <div className="form-grid">
-                          <div className="input-group">
-                            <label className="input-label">{t.plateVinLabel}</label>
-                            <input type="text" className="form-input" value={mechanicPlate} readOnly />
-                          </div>
+              )}
 
-                          <div className="input-group">
-                            <label className="input-label">{t.orderStatusLabel}</label>
-                            <select className="form-select" value={workOrderStatus} onChange={(e) => setWorkOrderStatus(e.target.value)}>
-                              <option value="diagnosis">{t.statusDiagnosis}</option>
-                              <option value="pending_approval">{t.statusPending}</option>
-                              <option value="in_progress">{t.statusInProgress}</option>
-                              <option value="quality_control">{t.statusQc}</option>
-                              <option value="ready">{t.statusReady}</option>
-                            </select>
-                          </div>
-
-                          <div className="input-group">
-                            <label className="input-label">{t.estCostInputLabel}</label>
-                            <input type="text" className="form-input" placeholder={t.estCostPlaceholder} value={estimatedCost} onChange={(e) => setEstimatedCost(e.target.value)} required />
-                          </div>
-
-                          <div className="input-group">
-                            <label className="input-label">{t.currentMileageInputLabel}</label>
-                            <input type="text" className="form-input" placeholder={t.currentMileagePlaceholder} value={workOrderMileage} onChange={(e) => setWorkOrderMileage(e.target.value)} required />
-                          </div>
-
-                          <div className="input-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="input-label">{t.quickTemplatesLabel}</label>
-                            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
-                              {t.mechanicTemplates.map((tmpl, idx) => (
-                                <button
-                                  key={idx}
-                                  type="button"
-                                  onClick={() => setMechanicNotes(tmpl.text)}
-                                  style={{
-                                    background: 'rgba(255,94,0,0.1)', border: '1px solid var(--border-hover)', color: 'var(--accent)',
-                                    padding: '6px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '800', cursor: 'pointer'
-                                  }}
-                                >
-                                  {tmpl.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          {/* EVIDENCIA FOTOGRÁFICA */}
-                          <div className="input-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="input-label">{t.photoEvidenceWebpLabel}</label>
-                            <div className="form-grid" style={{ margin: 0 }}>
-                              
-                              <div style={{ background: 'var(--surface-box)', border: '1px dashed var(--border)', padding: '14px', borderRadius: '12px', textAlign: 'center' }}>
-                                <span style={{ fontSize: '11.5px', fontWeight: '700', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>{t.oldPartUploadLabel}</span>
-                                <input 
-                                  type="file" 
-                                  accept="image/*" 
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0] || null;
-                                    setOldPartFile(file);
-                                    if (file) setOldPartPreview(URL.createObjectURL(file));
-                                  }}
-                                  style={{ fontSize: '11px', color: 'var(--text-muted)', width: '100%' }} 
-                                />
-                                {oldPartPreview && (
-                                  <img src={oldPartPreview} alt="Old Preview" style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '6px', marginTop: '8px', border: '1px solid #ef4444' }} />
-                                )}
-                              </div>
-
-                              <div style={{ background: 'var(--surface-box)', border: '1px dashed var(--border)', padding: '14px', borderRadius: '12px', textAlign: 'center' }}>
-                                <span style={{ fontSize: '11.5px', fontWeight: '700', color: 'var(--accent)', display: 'block', marginBottom: '6px' }}>{t.newPartUploadLabel}</span>
-                                <input 
-                                  type="file" 
-                                  accept="image/*" 
-                                  onChange={(e) => {
-                                    const file = e.target.files?.[0] || null;
-                                    setNewPartFile(file);
-                                    if (file) setNewPartPreview(URL.createObjectURL(file));
-                                  }}
-                                  style={{ fontSize: '11px', color: 'var(--text-muted)', width: '100%' }} 
-                                />
-                                {newPartPreview && (
-                                  <img src={newPartPreview} alt="New Preview" style={{ width: '60px', height: '60px', objectFit: 'cover', borderRadius: '6px', marginTop: '8px', border: '1px solid #00E676' }} />
-                                )}
-                              </div>
-
-                            </div>
-                          </div>
-
-                          <div className="input-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="input-label">{t.nextServiceRecLabel}</label>
-                            <input type="month" className="form-input" value={nextServiceMonth} onChange={(e) => setNextServiceMonth(e.target.value)} required />
-                          </div>
-
-                          <div className="input-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="input-label">{t.mechanicNotesLabel}</label>
-                            <textarea className="form-textarea" placeholder={t.mechanicNotesPlaceholder} value={mechanicNotes} onChange={(e) => setMechanicNotes(formatSentenceCase(e.target.value))} required></textarea>
-                          </div>
-                        </div>
-                        <button type="submit" className="btn-primary" style={{ marginTop: '8px' }} disabled={isSubmitting}>
-                          {isSubmitting ? t.savingOrderBtn : t.saveCloseOrderBtn}
-                        </button>
+              {/* VISTA 3: PORTAL INTERNO */}
+              {activeView === 'mecanico' && (
+                <div style={{ animation: 'fadeIn 0.5s ease-in-out' }}>
+                  {!isMechanicAuth ? (
+                    <div className="glass-card no-print" style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
+                      <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔒</div>
+                      <h2 style={{ fontSize: '26px', fontWeight: '900', marginBottom: '8px' }}>Acceso Operativo</h2>
+                      <p style={{ color: 'var(--text-muted)', marginBottom: '32px' }}>Personal autorizado de {tenantInfo?.name} (PIN: 1234).</p>
+                      <form onSubmit={handleMechanicLogin} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <input type="password" value={mechanicPin} onChange={(e) => setMechanicPin(e.target.value)} className="form-input" placeholder="PIN de Seguridad" style={{ textAlign: 'center', fontSize: '24px', letterSpacing: '8px', padding: '18px' }} required />
+                        <button type="submit" className="btn-primary">Ingresar al Dashboard</button>
                       </form>
-                    )}
-                  </div>
-                )}
-
-                {/* --- RENDERIZADO DE REPORTES --- */}
-                {mechanicPortalView === 'reportes' && (
-                  <div id="report-print-area">
-                    
-                    {/* ENCABEZADO OCULTO QUE SOLO APARECE EN EL PDF IMPRESO */}
-                    <div className="only-print" style={{ borderBottom: '2px solid #FF5E00', paddingBottom: '16px', marginBottom: '24px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <img src="/logocar.png" alt="AutoFlow Logo" style={{ width: '60px' }} />
-                          <h1 style={{ margin: 0, fontSize: '24px', fontWeight: '900', color: '#0F172A' }}>AUTO<span style={{color: '#FF5E00'}}>FLOW</span></h1>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <h2 style={{ margin: 0, fontSize: '18px', color: '#0F172A' }}>{t.viewReports}</h2>
-                          <p style={{ margin: 0, fontSize: '12px', color: '#64748B' }}>
-                            {t.dateStartLabel}: {reportStartDate || '-'} | {t.dateEndLabel}: {reportEndDate || '-'} | Mecánico: {reportMechanic}
-                          </p>
-                        </div>
-                      </div>
                     </div>
+                  ) : (
+                    <div>
+                      <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+                        <div>
+                          <h1 style={{ fontSize: '32px', fontWeight: '900', margin: '0 0 8px 0' }}>Panel de Control</h1>
+                          <p style={{ margin: '0', color: 'var(--text-muted)' }}>Gestión del negocio y facturación.</p>
+                        </div>
+                        <button onClick={() => setIsMechanicAuth(false)} className="btn-secondary">Cerrar Sesión</button>
+                      </div>
 
-                    {/* Filtros de Reporte (Se ocultan al imprimir PDF) */}
-                    <div className="no-print" style={{ display: 'flex', alignItems: 'flex-end', gap: '12px', flexWrap: 'wrap', marginBottom: '24px', background: 'var(--surface-box)', padding: '16px', borderRadius: '16px', border: '1px solid var(--border)' }}>
-                      <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
-                        <label className="input-label">{t.dateStartLabel}</label>
-                        <input type="date" className="form-input" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} style={{ padding: '10px' }} />
-                      </div>
-                      <div className="input-group" style={{ flex: 1, minWidth: '130px' }}>
-                        <label className="input-label">{t.dateEndLabel}</label>
-                        <input type="date" className="form-input" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} style={{ padding: '10px' }} />
-                      </div>
-                      <div className="input-group" style={{ flex: 1, minWidth: '180px' }}>
-                        <label className="input-label">{t.reportsFilterTitle}</label>
-                        <select className="form-select" value={reportMechanic} onChange={(e) => setReportMechanic(e.target.value)} style={{ padding: '10px' }}>
-                          <option value="todos">{t.allMechanics}</option>
-                          <option value="Taller">Taller</option>
-                          <option value="Carlos">Carlos</option>
-                          <option value="Juan">Juan</option>
-                        </select>
+                      <div className="no-print" style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '32px', background: 'var(--bg-card)', padding: '8px', borderRadius: '16px' }}>
+                        <button onClick={() => setAgendaFilter('today')} className={`btn-secondary ${agendaFilter === 'today' ? 'active' : ''}`} style={{ flex: 1, border: 'none', background: agendaFilter === 'today' ? 'var(--accent)' : 'transparent', color: agendaFilter === 'today' ? 'white' : 'var(--text-muted)' }}>📅 Órdenes de Hoy</button>
+                        <button onClick={() => setAgendaFilter('upcoming')} className={`btn-secondary ${agendaFilter === 'upcoming' ? 'active' : ''}`} style={{ flex: 1, border: 'none', background: agendaFilter === 'upcoming' ? 'var(--accent)' : 'transparent', color: agendaFilter === 'upcoming' ? 'white' : 'var(--text-muted)' }}>🗓️ Próximos 7 Días</button>
+                        <button onClick={() => setAgendaFilter('reports')} className={`btn-secondary ${agendaFilter === 'reports' ? 'active' : ''}`} style={{ flex: 1, border: 'none', background: agendaFilter === 'reports' ? 'var(--accent)' : 'transparent', color: agendaFilter === 'reports' ? 'white' : 'var(--text-muted)' }}>📊 Reportes</button>
+                        <button onClick={() => setAgendaFilter('staff')} className={`btn-secondary ${agendaFilter === 'staff' ? 'active' : ''}`} style={{ flex: 1, border: 'none', background: agendaFilter === 'staff' ? 'var(--accent)' : 'transparent', color: agendaFilter === 'staff' ? 'white' : 'var(--text-muted)' }}>👥 Personal</button>
                       </div>
                       
-                      {/* BOTONES DE GENERAR Y EXPORTAR */}
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button className="btn-primary" onClick={handleLoadReports} style={{ width: 'auto', padding: '0 24px', height: '42px', fontSize: '13.5px' }}>
-                          {t.generateReportBtn}
-                        </button>
-                        <button className="btn-primary btn-excel" onClick={handleExportExcel} title="Exportar CSV compatible con Excel">
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h2.5"/><path d="M10.5 13v4"/><path d="M8 17h2.5"/><path d="M14 13l2 4"/><path d="M16 13l-2 4"/></svg>
-                          {t.btnExportExcel}
-                        </button>
-                        <button className="btn-primary btn-pdf" onClick={handleExportPDF} title="Imprimir o guardar como PDF corporativo">
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-4"/><path d="M12 15v-4"/><path d="M15 15v-4"/></svg>
-                          {t.btnExportPDF}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-                      <div style={{ background: 'var(--surface-box)', border: '1px solid var(--border)', padding: '20px', borderRadius: '16px', textAlign: 'center' }}>
-                        <span style={{ fontSize: '11.5px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '800', display: 'block', marginBottom: '4px' }}>{t.totalServicesCard}</span>
-                        <div style={{ fontSize: '32px', fontWeight: '900', color: 'var(--accent)' }}>{reportData.length}</div>
-                      </div>
-                      <div style={{ background: 'var(--surface-box)', border: '1px solid var(--border)', padding: '20px', borderRadius: '16px', textAlign: 'center' }}>
-                        <span style={{ fontSize: '11.5px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '800', display: 'block', marginBottom: '4px' }}>{t.totalValueCard}</span>
-                        <div style={{ fontSize: '32px', fontWeight: '900', color: '#00E676' }}>
-                          ${reportTotalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </div>
-                      </div>
-                    </div>
-
-                    {isLoadingReports ? (
-                      <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-muted)' }}>{t.loadingReports}</div>
-                    ) : reportData.length === 0 ? (
-                      <div className="no-print" style={{ textAlign: 'center', padding: '40px', background: 'var(--surface-box)', borderRadius: '14px', border: '1px dashed var(--border)' }}>
-                        <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>{t.noReportsFound}</p>
-                      </div>
-                    ) : (
-                      <>
-                        {/* 1. VISTA WEB (Tabla Paginada a 10 items) */}
-                        <div className="no-print">
-                          <div style={{ overflowX: 'auto', background: 'var(--bg-nav)', borderRadius: '12px', border: '1px solid var(--border)' }}>
-                            <table className="report-table">
-                              <colgroup>
-                                <col style={{ width: '15%' }} />
-                                <col style={{ width: '15%' }} />
-                                <col style={{ width: '35%' }} />
-                                <col style={{ width: '20%' }} />
-                                <col style={{ width: '15%' }} />
-                              </colgroup>
-                              <thead>
-                                <tr>
-                                  <th>{t.colDate}</th>
-                                  <th>{t.colPlate}</th>
-                                  <th>{t.colService}</th>
-                                  <th>{t.colMechanic}</th>
-                                  <th style={{ textAlign: 'right' }}>{t.colValue}</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {currentItems.map((req, idx) => {
-                                  const numericCost = parseFloat((req.cost || '$0').replace(/[^0-9.-]+/g,""));
-                                  const formattedRowCost = isNaN(numericCost) ? req.cost : `$${numericCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      {/* 👥 GESTIÓN DE PERSONAL CON TOGGLE ACTIVO / INACTIVO */}
+                      {agendaFilter === 'staff' && (
+                        <div style={{ animation: 'fadeIn 0.4s' }}>
+                          <h2 className="no-print" style={{ fontSize: '24px', fontWeight: '900', marginBottom: '24px' }}>Gestión de Equipo / Staff ({tenantInfo?.name})</h2>
+                          <div className="bento-grid">
+                            <div className="glass-card">
+                              <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '800' }}>➕ Registrar Miembro</h3>
+                              <form onSubmit={handleAddStaff} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                <div>
+                                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 'bold' }}>Nombre Completo</label>
+                                  {/* 🌟 INPUT CON CAPITALIZACIÓN AUTOMÁTICA */}
+                                  <input type="text" className="form-input" placeholder="Ej: Andy Perez" value={newStaffName} onChange={e => setNewStaffName(toTitleCase(e.target.value))} style={{ marginTop: '8px' }} required />
+                                </div>
+                                <div>
+                                  <label style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 'bold' }}>Especialidad / Cargo</label>
+                                  <select className="form-select" value={selectedStaffRole} onChange={e => setSelectedStaffRole(e.target.value)} style={{ marginTop: '8px' }} required>
+                                    <option value="" disabled>Seleccione especialidad acorde al negocio</option>
+                                    {availableRoles.map(role => <option key={role} value={role}>{role}</option>)}
+                                    <option value="custom">Otro (Personalizado)...</option>
+                                  </select>
+                                </div>
+                                {selectedStaffRole === 'custom' && (
+                                  <div>
+                                    <label style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 'bold' }}>Especifique el cargo:</label>
+                                    <input type="text" className="form-input" placeholder="Ej: Especialista Senior" value={customStaffRole} onChange={e => setCustomStaffRole(toTitleCase(e.target.value))} style={{ marginTop: '8px' }} required />
+                                  </div>
+                                )}
+                                <button type="submit" className="btn-primary" style={{ marginTop: '8px' }}>Guardar en el Sistema</button>
+                              </form>
+                            </div>
+                            
+                            <div className="glass-card">
+                              <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '800' }}>📋 Personal Registrado ({staffList.length})</h3>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '350px', overflowY: 'auto' }}>
+                                {staffList.map(m => {
+                                  const isActive = m.isActive !== false;
                                   return (
-                                    <tr key={idx} className={idx % 2 === 0 ? 'zebra-even' : 'zebra-odd'}>
-                                      <td>{req.date}</td>
-                                      <td><span style={{ background: 'var(--surface-box)', padding: '3px 8px', borderRadius: '6px', fontWeight: '800', border: '1px solid var(--border)' }}>{req.plate}</span></td>
-                                      <td>{req.serviceType}</td>
-                                      <td>{req.mechanic}</td>
-                                      <td className="val-green">{formattedRowCost}</td>
-                                    </tr>
+                                    <div key={m.id} style={{ padding: '14px 16px', background: 'var(--input-bg)', borderRadius: '12px', border: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', opacity: isActive ? 1 : 0.6 }}>
+                                      <div>
+                                        <span style={{ fontWeight: 'bold', fontSize: '14.5px', textDecoration: isActive ? 'none' : 'line-through' }}>{m.name}</span>
+                                        <span style={{ fontSize: '12px', color: 'var(--accent)', display: 'block' }}>{m.role}</span>
+                                      </div>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                        {/* 🔘 BOTÓN PARA INACTIVAR / ACTIVAR CONECTADO A BD */}
+                                        <button 
+                                          type="button" 
+                                          onClick={() => toggleStaffStatus(m.id, isActive)}
+                                          className="badge" 
+                                          style={{ 
+                                            background: isActive ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)', 
+                                            color: isActive ? '#10B981' : '#EF4444', 
+                                            border: 'none', 
+                                            cursor: 'pointer',
+                                            padding: '6px 12px'
+                                          }}
+                                        >
+                                          {isActive ? 'ACTIVO' : 'INACTIVO'}
+                                        </button>
+                                      </div>
+                                    </div>
                                   );
                                 })}
-                              </tbody>
-                            </table>
-                          </div>
-
-                          {/* Paginación desvinculada condicionalmente para que siempre aparezca si hay datos */}
-                          <div className="pagination-container">
-                            <button className="pagination-btn" onClick={prevPage} disabled={currentPage === 1}>
-                              ← {t.btnPrev}
-                            </button>
-                            <span className="pagination-info">
-                              {t.pageIndicator(currentPage, totalPages)}
-                            </span>
-                            <button className="pagination-btn" onClick={nextPage} disabled={currentPage === totalPages}>
-                              {t.btnNext} →
-                            </button>
+                              </div>
+                            </div>
                           </div>
                         </div>
+                      )}
 
-                        {/* 2. VISTA PDF AISLADA (Tabla Completa para imprimir) */}
-                        <div className="only-print print-table-container">
-                          <table className="pdf-table">
-                            <colgroup>
-                              <col style={{ width: '15%' }} />
-                              <col style={{ width: '15%' }} />
-                              <col style={{ width: '35%' }} />
-                              <col style={{ width: '20%' }} />
-                              <col style={{ width: '15%' }} />
-                            </colgroup>
-                            <thead>
-                              <tr>
-                                <th>{t.colDate}</th>
-                                <th>{t.colPlate}</th>
-                                <th>{t.colService}</th>
-                                <th>{t.colMechanic}</th>
-                                <th style={{ textAlign: 'right' }}>{t.colValue}</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {reportData.map((req, idx) => {
-                                const numericCost = parseFloat((req.cost || '$0').replace(/[^0-9.-]+/g,""));
-                                const formattedRowCost = isNaN(numericCost) ? req.cost : `$${numericCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-                                return (
-                                  <tr key={idx} className={idx % 2 === 0 ? 'zebra-even' : 'zebra-odd'}>
-                                    <td>{req.date}</td>
-                                    <td><span style={{ fontWeight: '800' }}>{req.plate}</span></td>
-                                    <td>{req.serviceType}</td>
-                                    <td>{req.mechanic}</td>
-                                    <td className="val-green">{formattedRowCost}</td>
+                      {/* 📊 MÓDULO DE REPORTES */}
+                      {agendaFilter === 'reports' && (
+                        <div style={{ animation: 'fadeIn 0.4s' }}>
+                          <h2 className="no-print" style={{ fontSize: '24px', fontWeight: '900', marginBottom: '24px' }}>Facturación Mensual</h2>
+                          
+                          <div className="bento-grid no-print" style={{ marginBottom: '32px' }}>
+                            <div className="glass-card" style={{ padding: '24px', borderLeft: '4px solid var(--accent)' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Total de Ingresos (Filtrado)</span>
+                              <div style={{ fontSize: '36px', fontWeight: '900', color: 'var(--text-main)', marginTop: '8px' }}>${totalRevenue.toLocaleString('en-US')}</div>
+                            </div>
+                            <div className="glass-card" style={{ padding: '24px' }}>
+                              <span style={{ fontSize: '13px', fontWeight: 'bold', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Servicios Completados</span>
+                              <div style={{ fontSize: '36px', fontWeight: '900', color: 'var(--text-main)', marginTop: '8px' }}>{reportsData.length}</div>
+                            </div>
+                          </div>
+
+                          <div className="glass-card no-print reports-filters">
+                            <div className="filter-group">
+                              <label style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--text-muted)', marginBottom: '8px', display: 'block' }}>Desde:</label>
+                              <input type="date" className="form-input" value={reportStartDate} onChange={e => setReportStartDate(e.target.value)} />
+                            </div>
+                            <div className="filter-group">
+                              <label style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--text-muted)', marginBottom: '8px', display: 'block' }}>Hasta:</label>
+                              <input type="date" className="form-input" value={reportEndDate} onChange={e => setReportEndDate(e.target.value)} />
+                            </div>
+                            <div className="filter-group">
+                              <label style={{ fontSize: '12px', fontWeight: 'bold', color: 'var(--text-muted)', marginBottom: '8px', display: 'block' }}>Filtrar {staffTerm}:</label>
+                              <select className="form-select" value={reportMechanic} onChange={e => setReportMechanic(e.target.value)}>
+                                <option value="">Todo el personal</option>
+                                {staffList.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                              </select>
+                            </div>
+                            <button onClick={() => { setReportPage(1); loadReports(); }} className="btn-primary btn-search">🔍 Consultar</button>
+                            
+                            <div className="export-group">
+                              <button onClick={exportToCSV} className="btn-secondary" title="Exporta todos los registros filtrados">📥 CSV</button>
+                              <button onClick={exportToPDF} className="btn-primary" title="Imprimir PDF sin cortes" style={{ background: '#FF5E00', boxShadow: '0 8px 20px rgba(255, 94, 0, 0.4)' }}>🖨️ Imprimir / PDF</button>
+                            </div>
+                          </div>
+
+                          <div className="glass-card" style={{ padding: '0', overflow: 'hidden' }}>
+                            <div className="print-only-header" style={{ display: 'none', padding: '24px', borderBottom: '2px solid var(--border)' }}>
+                              <img src="/logocar.png" alt="AutoFlow Logo" style={{ height: '60px', marginBottom: '10px' }} />
+                              <h2 style={{ margin: 0, fontSize: '24px', fontWeight: '900' }}>Reporte de Servicios Oficial</h2>
+                              <p style={{ margin: '4px 0 0 0', fontSize: '14px', color: '#666' }}>Periodo: {new Date(reportStartDate).toLocaleDateString('es-ES')} al {new Date(reportEndDate).toLocaleDateString('es-ES')}</p>
+                              <p style={{ margin: '4px 0 0 0', fontSize: '14px', color: '#666' }}>Personal: {reportMechanic ? staffList.find(m => m.id === reportMechanic)?.name : 'Todos'}</p>
+                              <div style={{ marginTop: '16px', display: 'flex', gap: '32px', borderTop: '1px dashed #ccc', paddingTop: '16px' }}>
+                                <strong>Total de Ingresos: ${totalRevenue.toLocaleString('en-US')}</strong>
+                                <strong>Servicios: {reportsData.length}</strong>
+                              </div>
+                            </div>
+                            
+                            <div className="table-responsive">
+                              <table className="glass-table">
+                                <thead>
+                                  <tr>
+                                    <th>Fecha</th>
+                                    <th>Identificador</th>
+                                    <th>Cliente</th>
+                                    <th>Servicio</th>
+                                    <th>{staffTerm} (Staff)</th>
+                                    <th>Total ($)</th>
+                                    <th>Estado</th>
                                   </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
+                                </thead>
+                                <tbody>
+                                  {paginatedReports.length > 0 ? paginatedReports.map(r => (
+                                    <tr key={r.id}>
+                                      <td>{new Date(r.date).toLocaleDateString('es-ES')}</td>
+                                      <td><strong>{r.plate}</strong></td>
+                                      <td>{r.clientName}</td>
+                                      <td>{r.service}</td>
+                                      <td style={{ color: 'var(--text-muted)' }}>{r.mechanicName}</td>
+                                      <td style={{ fontWeight: '900', color: 'var(--accent)' }}>${Number(r.cost).toLocaleString('en-US')}</td>
+                                      <td><span className="badge" style={{ background: 'rgba(16, 185, 129, 0.2)', color: '#10B981' }}>{r.status.toUpperCase()}</span></td>
+                                    </tr>
+                                  )) : (
+                                    <tr><td colSpan={7} style={{ textAlign: 'center', padding: '32px' }}>No hay servicios registrados en estas fechas.</td></tr>
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                            
+                            {totalPages > 1 && !isPrinting && (
+                              <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px', borderTop: '1px solid var(--border)' }}>
+                                <button onClick={() => setReportPage(p => Math.max(1, p - 1))} disabled={reportPage === 1} className="btn-secondary" style={{ padding: '8px 16px', fontSize: '13px' }}>Anterior</button>
+                                <span style={{ fontSize: '14px', fontWeight: 'bold' }}>Página {reportPage} de {totalPages}</span>
+                                <button onClick={() => setReportPage(p => Math.min(totalPages, p + 1))} disabled={reportPage === totalPages} className="btn-secondary" style={{ padding: '8px 16px', fontSize: '13px' }}>Siguiente</button>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
+                      )}
+
+                      {/* AGENDA (Hoy o Próximos 7 días) */}
+                      {(agendaFilter === 'today' || agendaFilter === 'upcoming') && (
+                        <div className="bento-grid">
+                          {activeOrdersList.length === 0 ? (
+                            <div className="glass-card" style={{ gridColumn: '1 / -1' }}><p style={{ textAlign: 'center', fontWeight: 'bold', fontSize: '18px', margin: '0' }}>No hay órdenes programadas para este periodo.</p></div>
+                          ) : (
+                            activeOrdersList.map(order => (
+                              <div key={order.id} className="order-card">
+                                <div className="order-header">
+                                  <span className="order-plate">{order.plate}</span>
+                                  <span className="order-status"><span style={{ color: 'var(--accent)' }}>●</span> {order.time}</span>
+                                </div>
+                                <div style={{ marginTop: '8px' }}>
+                                  <h3 style={{ margin: '0 0 4px 0', fontSize: '20px', fontWeight: '800' }}>{order.brand} {order.model}</h3>
+                                  <p style={{ margin: '0 0 16px 0', fontSize: '14px', color: 'var(--text-muted)' }}>Cliente: <strong>{toTitleCase(order.clientName)}</strong></p>
+                                </div>
+                                <div style={{ background: 'var(--input-bg)', padding: '16px', borderRadius: '12px', fontSize: '14px', fontWeight: '700', marginBottom: '16px', border: '1px solid var(--border)' }}>
+                                  🛠️ {order.serviceType}
+                                  {agendaFilter === 'upcoming' && (<div style={{ marginTop: '8px', color: 'var(--accent)', fontSize: '12px' }}>📆 Para el: {new Date(order.date).toLocaleDateString()}</div>)}
+                                </div>
+                                <button onClick={() => setSelectedOrder(order)} className="btn-primary" style={{ width: '100%', marginTop: 'auto' }}>📋 Completar Orden (POS)</button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </main>
 
-      {/* MODAL DE ZOOM DE IMÁGENES */}
-      {modalImageSrc && (
-        <div className="modal-overlay no-print" onClick={() => setModalImageSrc(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: '750px', background: 'rgba(10,10,12,0.95)', padding: '16px' }}>
-            <button className="close-view-btn" onClick={() => setModalImageSrc(null)}>✕</button>
-            <img src={modalImageSrc} alt="Zoom Evidencia" style={{ width: '100%', maxHeight: '80vh', objectFit: 'contain', borderRadius: '12px' }} />
+      {/* Modal 1: Reserva de Cliente */}
+      {isBookingModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <button className="close-btn" onClick={() => { setIsBookingModalOpen(false); setIsPlateSearched(false); }}>✕</button>
+            <h2 style={{ margin: '0 0 8px 0', fontSize: '28px', fontWeight: '900', letterSpacing: '-0.5px' }}>Nueva Reserva</h2>
+            <p style={{ color: 'var(--text-muted)', marginBottom: '32px', fontSize: '15px' }}>Completa los datos para agendar tu servicio en {tenantInfo?.name}.</p>
+            
+            {isAutomotive && !isPlateSearched ? (
+              <div style={{ background: 'var(--bg-card)', padding: '32px', borderRadius: '16px', border: '1px solid var(--border)', textAlign: 'center' }}>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>🚗</div>
+                <h3 style={{ fontSize: '20px', fontWeight: '800', marginBottom: '12px' }}>¿Ya nos has visitado antes?</h3>
+                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '24px' }}>
+                  <input type="text" className="form-input" placeholder="Placa (Ej: JNT776)" value={searchPlate} onChange={(e) => setSearchPlate(e.target.value.toUpperCase())} style={{ maxWidth: '250px', textAlign: 'center', fontWeight: '900', fontSize: '20px', letterSpacing: '2px', padding: '16px' }} />
+                </div>
+                <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                  <button onClick={handleSearchVehicle} className="btn-primary" disabled={isSearchingPlate} style={{ flex: 1, minWidth: '140px', padding: '16px' }}>{isSearchingPlate ? 'Buscando...' : '🔍 Buscar Placa'}</button>
+                  <button onClick={() => setIsPlateSearched(true)} className="btn-secondary" style={{ flex: 1, minWidth: '140px', padding: '16px' }}>Primera Vez ➔</button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleBookService}>
+                <div style={{ marginBottom: '24px' }}>
+                  <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-muted)', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '8px' }}>Servicio Seleccionado</label>
+                  <select className="form-select" value={selectedServiceType} onChange={(e) => setSelectedServiceType(e.target.value)} required>
+                    {servicesList.map(srv => <option key={srv.id} value={srv.id}>{srv.name} - ${srv.price}</option>)}
+                  </select>
+                </div>
+
+                {!isAutomotive && activeStaffList.length > 0 && (
+                  <div style={{ marginBottom: '24px', background: 'var(--input-bg)', padding: '16px', borderRadius: '12px', border: '1px dashed var(--accent)' }}>
+                    <label style={{ display: 'block', fontSize: '12px', color: 'var(--accent)', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '8px' }}>Elegir {staffTerm} (Opcional)</label>
+                    <select className="form-select" value={selectedBookingStaff} onChange={(e) => setSelectedBookingStaff(e.target.value)}>
+                      <option value="">Cualquiera disponible</option>
+                      {activeStaffList.map(stf => <option key={stf.id} value={stf.id}>{stf.name} ({stf.role})</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {isAutomotive && (
+                  <div style={{ background: 'var(--input-bg)', padding: '24px', borderRadius: '16px', marginBottom: '24px', border: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                      <h4 style={{ margin: '0', fontSize: '16px', color: 'var(--accent)', fontWeight: '800' }}>Datos del Vehículo</h4>
+                      <span onClick={() => setIsPlateSearched(false)} style={{ fontSize: '13px', cursor: 'pointer', color: 'var(--text-muted)', textDecoration: 'underline', fontWeight: 'bold' }}>Volver a buscar</span>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: '16px', marginBottom: '16px' }}>
+                      <input type="text" className="form-input" placeholder="Placa" value={searchPlate} onChange={(e) => setSearchPlate(e.target.value.toUpperCase())} required />
+                      <input type="text" className="form-input" placeholder="Marca" value={carBrand} onChange={(e) => setCarBrand(e.target.value)} required />
+                      <input type="text" className="form-input" placeholder="Modelo" value={carModel} onChange={(e) => setCarModel(e.target.value)} required />
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '16px', marginBottom: '20px' }}>
+                      <input type="number" className="form-input" placeholder="Año" value={carYear} onChange={(e) => setCarYear(e.target.value)} />
+                      <input type="number" className="form-input" placeholder="Kilometraje" value={carMileage} onChange={(e) => setCarMileage(e.target.value)} />
+                    </div>
+                    <div style={{ marginBottom: '12px' }}>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold' }}>Síntomas rápidos:</span>
+                      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '12px' }}>
+                        {clientQuickServices.map(qs => (
+                          <span key={qs} onClick={() => setQuickNotes(prev => prev.includes(qs) ? prev : `${prev} ${qs}`.trim())} style={{ padding: '8px 16px', background: quickNotes.includes(qs) ? 'var(--accent)' : 'var(--bg-card)', color: quickNotes.includes(qs) ? '#fff' : 'var(--text-main)', border: '1px solid var(--border)', borderRadius: '20px', fontSize: '13px', cursor: 'pointer', fontWeight: '600' }}>+ {qs}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <textarea className="form-input" placeholder="Detalles adicionales..." value={quickNotes} onChange={(e) => setQuickNotes(e.target.value)} style={{ marginTop: '12px', minHeight: '80px', resize: 'vertical' }} />
+                  </div>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '16px', marginBottom: '16px' }}>
+                  <input type="text" className="form-input" placeholder="Nombre Completo (Ej: Cesar Lopez)" value={clientName} onChange={(e) => setClientName(toTitleCase(e.target.value))} required />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '32px' }}>
+                  <input type="email" className="form-input" placeholder="Correo Electrónico" value={clientEmail} onChange={(e) => setClientEmail(e.target.value)} required />
+                  <div style={{ display: 'flex', background: 'var(--input-bg)', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden' }}>
+                    <span style={{ padding: '14px 16px', borderRight: '1px solid var(--border)', background: 'rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 'bold' }}>🇺🇸 +1</span>
+                    <input type="tel" style={{ border: 'none', background: 'transparent', width: '100%', padding: '14px 16px', color: 'var(--text-main)', outline: 'none', fontSize: '14.5px' }} placeholder="Teléfono" value={clientPhone} onChange={(e) => setClientPhone(e.target.value.replace(/[^0-9\s-]/g, ''))} required />
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '16px', marginBottom: '32px' }}>
+                  <input type="date" className="form-input" value={appointmentDate} onChange={(e) => setAppointmentDate(e.target.value)} required />
+                  <select className="form-select" value={appointmentTime} onChange={(e) => setAppointmentTime(e.target.value)} required>
+                    <option value="" disabled>Seleccione Hora</option>
+                    {['08:00', '09:00', '10:00', '11:00', '14:00', '15:00', '16:00'].map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <button type="submit" className="btn-primary" style={{ width: '100%', padding: '20px', fontSize: '16px' }} disabled={isSubmitting}>{isSubmitting ? 'Procesando...' : 'Confirmar Agendamiento'}</button>
+              </form>
+            )}
           </div>
         </div>
       )}
 
-      {/* FOOTER */}
-      <footer className="site-footer no-print">
-        <button className="rate-btn">⭐ {t.footerRate}</button>
-        <p className="footer-text">{t.footerRights}</p>
-        <div className="footer-links">
-          <span onClick={() => setIsStopModalOpen(true)}>{t.footerStop}</span>
-          <span>•</span>
-          <span onClick={() => setIsDeleteModalOpen(true)} style={{ color: '#ef4444' }}>{t.footerDelete}</span>
-        </div>
-        <div className="footer-divider"></div>
-      </footer>
+      {/* Modal 2: Cierre de Orden POS */}
+      {selectedOrder && (
+        <div className="modal-overlay no-print">
+          <div className="modal-content" style={{ maxWidth: '750px' }}>
+            <button className="close-btn" onClick={() => setSelectedOrder(null)}>✕</button>
+            <h2 style={{ margin: '0 0 8px 0', fontSize: '28px', fontWeight: '900', letterSpacing: '-0.5px' }}>Cierre de Servicio (POS)</h2>
+            <div style={{ background: 'rgba(255,255,255,0.05)', padding: '16px', borderRadius: '12px', marginBottom: '24px', border: '1px solid var(--border)' }}>
+              <p style={{ margin: '0 0 8px 0', fontSize: '16px', fontWeight: 'bold' }}>{isAutomotive ? 'Vehículo:' : 'Reserva:'} <span style={{ color: 'var(--accent)' }}>{selectedOrder.brand} {selectedOrder.model}</span></p>
+              <p style={{ margin: '0', fontSize: '14px', color: 'var(--text-muted)' }}>Identificador: <strong>{selectedOrder.plate}</strong> | Cliente: <strong>{toTitleCase(selectedOrder.clientName)}</strong> | Servicio: <strong>{selectedOrder.serviceType}</strong></p>
+            </div>
+            
+            <form onSubmit={handleCompleteWorkOrder}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '24px', marginBottom: '24px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 'bold', textTransform: 'uppercase' }}>Valor Final a Cobrar ($)</label>
+                  <input type="text" className="form-input" placeholder="Ej: $ 250" value={finalCost} onChange={(e) => setFinalCost(formatCurrency(e.target.value))} style={{ marginTop: '8px', fontSize: '24px', fontWeight: '900', color: 'var(--accent)' }} required />
+                </div>
+                {isAutomotive && (
+                  <div>
+                    <label style={{ fontSize: '12px', color: 'var(--text-muted)', fontWeight: 'bold', textTransform: 'uppercase' }}>Millaje de Salida</label>
+                    <input type="number" className="form-input" placeholder="Ej: 21000" value={exitMileage} onChange={(e) => setExitMileage(e.target.value)} style={{ marginTop: '8px', fontSize: '18px', fontWeight: 'bold' }} required />
+                  </div>
+                )}
+              </div>
 
-      {/* MODAL AGENDAMIENTO */}
-      {isBookingModalOpen && (
-        <div className="modal-overlay no-print" onClick={() => !isSubmitting && setIsBookingModalOpen(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ textAlign: 'left' }}>
-            <button className="close-view-btn" onClick={() => setIsBookingModalOpen(false)} disabled={isSubmitting}>✕</button>
-            
-            <h2 style={{ margin: '0 0 4px 0', fontSize: '20px', fontWeight: '900' }}>{t.bookingModalTitle}</h2>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '20px', fontSize: '13px' }}>
-              {t.bookingModalDesc}
-            </p>
-            
-            <form onSubmit={handleBookService}>
-              <div className="input-group" style={{ marginBottom: '14px' }}>
-                <label className="input-label">{t.serviceTypeLabel}</label>
-                <select className="form-select" value={selectedServiceType} onChange={(e) => setSelectedServiceType(e.target.value)}>
-                  <option value="mechanical">{t.serviceMechOption}</option>
-                  <option value="bodywork">{t.serviceBodyOption}</option>
+              <div style={{ marginBottom: '24px' }}>
+                <label style={{ fontSize: '12px', color: 'var(--text-main)', fontWeight: 'bold', textTransform: 'uppercase' }}>⚙️ Asignar {staffTerm} Responsable</label>
+                <select className="form-select" value={assignedMechanicId} onChange={e => setAssignedMechanicId(e.target.value)} style={{ marginTop: '8px', border: '1px solid var(--accent)' }} required>
+                  <option value="" disabled>Seleccione el personal a cargo</option>
+                  {activeStaffList.map(m => <option key={m.id} value={m.id}>{m.name} ({m.role})</option>)}
                 </select>
               </div>
 
-              <div className="input-group" style={{ marginBottom: '14px' }}>
-                <label className="input-label">{t.fullNameLabel}</label>
-                <input type="text" className="form-input" placeholder={t.fullNamePlaceholder} value={clientName} onChange={(e) => setClientName(formatCapitalize(e.target.value))} required />
-              </div>
-
-              <div className="form-grid" style={{ marginBottom: '14px' }}>
-                <div className="input-group">
-                  <label className="input-label">{t.emailLabel}</label>
-                  <input type="email" className="form-input" placeholder="carlos@email.com" value={clientEmail} onChange={(e) => setClientEmail(e.target.value)} required />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">{t.phoneLabel}</label>
-                  <div className="phone-input-container">
-                    <div className="phone-prefix-box"><span>🇺🇸</span> +1</div>
-                    <input type="tel" className="form-input phone-field" placeholder="9510000000" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} required />
+              <div style={{ background: 'var(--input-bg)', padding: '24px', borderRadius: '16px', marginBottom: '24px', border: '1px solid var(--border)' }}>
+                <h4 style={{ margin: '0 0 16px 0', fontSize: '16px', color: 'var(--text-main)', fontWeight: '800' }}>Reporte y Evidencias WebP</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+                  <div>
+                    <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold' }}>Nota 1 / Estado Inicial</label>
+                    <input type="text" className="form-input" placeholder="Detalle..." value={oldParts} onChange={(e) => setOldParts(e.target.value)} style={{ marginTop: '8px', marginBottom: '12px' }} />
+                    {!oldPartPreview ? (
+                      <><input type="file" id="uploadOldPart" accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e, 'old')} /><label htmlFor="uploadOldPart" className="upload-btn-label">📸 Subir WebP (Antes)</label></>
+                    ) : (
+                      <div className="img-preview-box"><img src={oldPartPreview} alt="Evidencia Antes WebP" /><button type="button" className="remove-img-btn" onClick={() => { setOldPartPreview(null); setOldPartImage(null); }}>✕</button></div>
+                    )}
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold' }}>Nota 2 / Resultado</label>
+                    <input type="text" className="form-input" placeholder="Detalle..." value={newParts} onChange={(e) => setNewParts(e.target.value)} style={{ marginTop: '8px', marginBottom: '12px' }} />
+                    {!newPartPreview ? (
+                      <><input type="file" id="uploadNewPart" accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e, 'new')} /><label htmlFor="uploadNewPart" className="upload-btn-label">📸 Subir WebP (Después)</label></>
+                    ) : (
+                      <div className="img-preview-box"><img src={newPartPreview} alt="Evidencia Después WebP" /><button type="button" className="remove-img-btn" onClick={() => { setNewPartPreview(null); setNewPartImage(null); }}>✕</button></div>
+                    )}
                   </div>
                 </div>
               </div>
 
-              <div className="form-grid" style={{ marginBottom: '14px' }}>
-                <div className="input-group">
-                  <label className="input-label">{t.brandLabel}</label>
-                  <select 
-                    className="form-select" 
-                    value={carBrand} 
-                    onChange={(e) => {
-                      const newBrand = e.target.value;
-                      setCarBrand(newBrand);
-                      setCarModel(brandModelsMap[newBrand]?.[0] || 'Modelo General');
-                    }} 
-                    required
-                  >
-                    {popularBrands.map(b => <option key={b} value={b}>{b}</option>)}
-                  </select>
+              <div style={{ marginBottom: '24px' }}>
+                <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold', textTransform: 'uppercase' }}>Notas y Diagnóstico Interno</label>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', margin: '12px 0' }}>
+                  {mechanicQuickNotes.map(opt => (
+                    <span key={opt} onClick={() => setMechanicNotes(prev => prev.includes(opt) ? prev : `${prev} ${opt}. `.trimStart())} style={{ padding: '8px 16px', background: mechanicNotes.includes(opt) ? 'var(--accent)' : 'var(--bg-card)', color: mechanicNotes.includes(opt) ? '#fff' : 'var(--text-main)', border: '1px solid var(--border)', borderRadius: '20px', fontSize: '12px', cursor: 'pointer', fontWeight: 'bold' }}>+ {opt}</span>
+                  ))}
                 </div>
-                <div className="input-group">
-                  <label className="input-label">{t.modelLabel}</label>
-                  <select 
-                    className="form-select" 
-                    value={carModel} 
-                    onChange={(e) => setCarModel(e.target.value)} 
-                    required
-                  >
-                    {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </div>
+                <textarea className="form-input" placeholder="Describe los ajustes realizados..." value={mechanicNotes} onChange={(e) => setMechanicNotes(e.target.value)} style={{ minHeight: '100px', resize: 'vertical' }} required />
               </div>
 
-              <div className="form-grid" style={{ marginBottom: '14px' }}>
-                <div className="input-group">
-                  <label className="input-label">{t.yearLabel}</label>
-                  <select 
-                    className="form-select" 
-                    value={carYear} 
-                    onChange={(e) => setCarYear(e.target.value)} 
-                    required
-                  >
-                    {availableYears.map(y => <option key={y} value={y}>{y}</option>)}
-                  </select>
-                </div>
-                <div className="input-group">
-                  <label className="input-label">{t.plateInputLabel}</label>
-                  <input 
-                    type="text" 
-                    className="form-input" 
-                    placeholder={t.platePlaceholder} 
-                    value={activePlate || searchPlate || ''} 
-                    onChange={(e) => handleBookingPlateChange(e.target.value)} 
-                    style={{ textTransform: 'uppercase' }} 
-                    required 
-                  />
-                </div>
-              </div>
-
-              <div className="form-grid" style={{ marginBottom: '14px', alignItems: 'flex-end' }}>
-                <div className="input-group">
-                  <label className="input-label">{t.vinInputLabel}</label>
-                  <input type="text" className="form-input" placeholder="1FA6P8CF..." value={carVin} onChange={(e) => setCarVin(e.target.value.toUpperCase())} style={{ textTransform: 'uppercase' }} />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">{t.mileageBookingLabel}</label>
-                  <input type="text" className="form-input" placeholder={t.mileageBookingPlaceholder} value={carMileage} onChange={(e) => setCarMileage(e.target.value)} required />
-                </div>
-              </div>
-              
-              <div className="form-grid" style={{ marginBottom: '14px' }}>
-                <div className="input-group">
-                  <label className="input-label">{t.dateInputLabel}</label>
-                  <input type="date" className="form-input" value={appointmentDate} onChange={handleDateChange} min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().substring(0, 10)} required />
-                </div>
-                <div className="input-group">
-                  <label className="input-label">{t.timeInputLabel}</label>
-                  <select className="form-select" value={appointmentTime} onChange={(e) => setAppointmentTime(e.target.value)} disabled={!appointmentDate} required>
-                    <option value="" disabled>{appointmentDate ? t.selectTimeOption : t.chooseDateFirstOption}</option>
-                    {['08:00', '08:30', '09:00', '09:30', '10:00', '10:30', '11:00', '11:30', '12:00', '12:30', '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00' , '17:30', '18:00'].map(time => {
-                      const isBooked = bookedTimes.includes(time);
-                      return (
-                        <option key={time} value={time} disabled={isBooked} style={isBooked ? { color: '#ef4444' } : {}}>
-                          {time} {isBooked ? t.bookedSuffix : ''}
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-              </div>
-
-              {/* PLANTILLAS RÁPIDAS DE SERVICIO EN EL AGENDAMIENTO */}
-              <div className="input-group" style={{ marginBottom: '14px' }}>
-                <label className="input-label">{t.quickReasonTemplatesLabel}</label>
-                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
-                  {t.bookingTemplates.map((tmpl, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setAppointmentNotes(tmpl.text)}
-                      style={{
-                        background: 'rgba(255,94,0,0.1)', border: '1px solid var(--border-hover)', color: 'var(--accent)',
-                        padding: '6px 10px', borderRadius: '8px', fontSize: '11.5px', fontWeight: '800', cursor: 'pointer'
-                      }}
-                    >
-                      {tmpl.label}
-                    </button>
+              <div style={{ marginBottom: '32px' }}>
+                <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 'bold', textTransform: 'uppercase' }}>Alerta de Próxima Visita</label>
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '12px' }}>
+                  {nextServiceOptions.map(opt => (
+                    <span key={opt} onClick={() => setNextServiceTime(opt)} style={{ padding: '10px 18px', background: nextServiceTime === opt ? 'var(--accent)' : 'var(--bg-card)', color: nextServiceTime === opt ? '#fff' : 'var(--text-main)', border: '1px solid', borderColor: nextServiceTime === opt ? 'var(--accent)' : 'var(--border)', borderRadius: '24px', fontSize: '14px', cursor: 'pointer', fontWeight: '800' }}>{opt}</span>
                   ))}
                 </div>
               </div>
-
-              <div className="input-group" style={{ marginBottom: '14px' }}>
-                <label className="input-label">{t.notesBookingLabel}</label>
-                <textarea className="form-textarea" placeholder={t.notesBookingPlaceholder} value={appointmentNotes} onChange={(e) => setAppointmentNotes(formatSentenceCase(e.target.value))} required style={{ minHeight: '70px' }}></textarea>
-              </div>
-
-              <label className="consent-box">
-                <input type="checkbox" className="consent-checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)} />
-                <span className="consent-text">
-                  {t.smsConsentText}
-                </span>
-              </label>
               
-              <button type="submit" className="btn-primary" disabled={isSubmitting}>
-                {isSubmitting ? t.processingBtn : t.submitBookingBtn}
-              </button>
+              <button type="submit" className="btn-primary" style={{ width: '100%', padding: '20px', fontSize: '16px' }} disabled={isSubmitting}>{isSubmitting ? 'Procesando...' : '✅ Cerrar Orden y Facturar'}</button>
             </form>
           </div>
         </div>
       )}
 
-      {/* MODALES FOOTER */}
-      {isStopModalOpen && (
-        <div className="modal-overlay no-print" onClick={() => setIsStopModalOpen(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <button className="close-view-btn" onClick={() => setIsStopModalOpen(false)}>✕</button>
-            <div style={{ fontSize: '32px', marginBottom: '8px' }}>🔕</div>
-            <h2 style={{ fontSize: '20px', fontWeight: '900', margin: '0 0 4px 0' }}>{t.stopModalTitle}</h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '12.5px', marginBottom: '20px', lineHeight: '1.4' }}>
-              {t.stopModalDesc}
-            </p>
-            <div className="input-group" style={{ marginBottom: '16px', textAlign: 'left' }}>
-              <div className="phone-input-container">
-                <div className="phone-prefix-box"><span>🇺🇸</span> +1</div>
-                <input type="tel" className="form-input phone-field" placeholder="951 000 0000" autoFocus />
-              </div>
-            </div>
-            <button className="btn-primary" style={{ background: '#1e293b' }} onClick={() => { alert(t.stopSuccessAlert); setIsStopModalOpen(false); }}>
-              {t.stopModalBtn}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {isDeleteModalOpen && (
-        <div className="modal-overlay no-print" onClick={() => setIsDeleteModalOpen(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <button className="close-view-btn" onClick={() => setIsDeleteModalOpen(false)}>✕</button>
-            <div style={{ fontSize: '32px', marginBottom: '8px' }}>⚠️</div>
-            <h2 style={{ fontSize: '20px', fontWeight: '900', margin: '0 0 4px 0', color: '#ef4444' }}>{t.deleteModalTitle}</h2>
-            <p style={{ color: 'var(--text-muted)', fontSize: '12.5px', marginBottom: '20px', lineHeight: '1.4' }}>
-              {t.deleteModalDesc}
-            </p>
-            <div className="input-group" style={{ marginBottom: '16px', textAlign: 'left' }}>
-              <div className="phone-input-container">
-                <div className="phone-prefix-box"><span>🇺🇸</span> +1</div>
-                <input type="tel" className="form-input phone-field" placeholder="951 000 0000" autoFocus />
-              </div>
-            </div>
-            <button className="btn-primary" style={{ background: '#ef4444' }} onClick={() => { alert(t.deleteSuccessAlert); setIsDeleteModalOpen(false); }}>
-              {t.deleteModalBtn}
-            </button>
+      {/* Modal 3: Visor de Evidencias */}
+      {expandedImage && (
+        <div className="modal-overlay no-print" onClick={() => setExpandedImage(null)} style={{ zIndex: 2000, background: 'rgba(0,0,0,0.95)' }}>
+          <div className="modal-content" style={{ maxWidth: '900px', background: 'transparent', border: 'none', boxShadow: 'none', textAlign: 'center', padding: '0', display: 'flex', flexDirection: 'column', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+            <button className="close-btn" style={{ position: 'fixed', top: '20px', right: '20px', zIndex: 2100, background: 'rgba(255,255,255,0.1)', width: '40px', height: '40px', fontSize: '20px' }} onClick={() => setExpandedImage(null)}>✕</button>
+            <h3 style={{ color: 'white', marginBottom: '16px', fontWeight: '900' }}>{expandedImage.alt}</h3>
+            <PrivateSupabaseImage path={expandedImage.path} alt={expandedImage.alt} isExpanded={true} />
           </div>
         </div>
       )}

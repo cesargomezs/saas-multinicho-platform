@@ -1,241 +1,340 @@
 import { Request, Response } from 'express';
-import { db, users, vehicles, appointments } from '@taller/database';
-import { eq, and, gte, lt, ne } from 'drizzle-orm';
+import { db, users, appointments, services, vehicles, workOrders } from '@taller/database';
+import { eq, and, gte, lt, ne, inArray } from 'drizzle-orm';
 
-// Función auxiliar para enviar notificación al bot de Telegram del taller
-async function sendTelegramNotification(message: string) {
+// 📱 Función utilitaria para enviar notificación a Telegram
+const sendTelegramNotification = async (message: string) => {
+  const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+  
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn("⚠️ Credenciales de Telegram no configuradas en el backend (.env).");
+    return;
+  }
+  
   try {
-    const token = process.env.TELEGRAM_BOT_TOKEN || process.env.VITE_TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID || process.env.VITE_TELEGRAM_CHAT_ID;
-
-    if (!token || !chatId) {
-      console.warn('⚠️ Telegram Bot Token o Chat ID no configurados en las variables de entorno.');
-      return;
-    }
-
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
-    await fetch(url, {
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: chatId,
+        chat_id: TELEGRAM_CHAT_ID,
         text: message,
-        parse_mode: 'Markdown'
+        parse_mode: 'HTML' // Permite enviar negritas y emojis
       })
     });
+    
+    if (!response.ok) {
+      console.error("Error en respuesta de Telegram:", await response.text());
+    }
   } catch (error) {
-    console.error('Error enviando notificación por Telegram:', error);
+    console.error("Excepción enviando Telegram:", error);
+  }
+};
+
+// 🔍 BUSCAR VEHÍCULO POR PLACA (EXPEDIENTE)
+export async function getVehicleByPlate(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const plate = req.params.plate;
+
+    if (!tenantId || !plate) {
+      return res.status(400).json({ error: 'Falta el tenantId o la placa.' });
+    }
+
+    const [result] = await db.select({
+      vehicle: vehicles,
+      client: users
+    })
+    .from(vehicles)
+    .innerJoin(users, eq(vehicles.clientId, users.id))
+    .where(
+      and(
+        eq(vehicles.tenantId, tenantId),
+        eq(vehicles.plate, plate.toUpperCase())
+      )
+    );
+
+    if (!result) {
+      return res.status(200).json({ success: false, message: 'Vehículo no encontrado' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      vehicle: result.vehicle,
+      client: result.client
+    });
+
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 }
 
+// 📝 CREAR CITA Y DISPARAR NOTIFICACIÓN A TELEGRAM
 export async function createAppointment(req: Request, res: Response) {
   try {
-    const { 
-      clientName, 
-      clientEmail, 
-      clientPhone, 
-      carBrand, 
-      carModel, 
-      carYear, 
-      carPlate, 
-      carVin, 
-      mileage,
-      serviceType, 
-      appointmentDate, 
-      notes 
-    } = req.body;
+    const tenantId = req.headers['x-tenant-id'] as string;
+    if (!tenantId) return res.status(400).json({ error: 'Falta identificador (x-tenant-id).' });
 
-    if (!clientEmail || !clientName || !carPlate) {
-      return res.status(400).json({ error: 'Faltan campos obligatorios (nombre, email o placa).' });
-    }
+    const { clientName, clientEmail, clientPhone, serviceId, staffId, scheduledAt, notes, metadata } = req.body;
+    if (!clientEmail || !clientName || !serviceId) return res.status(400).json({ error: 'Faltan campos obligatorios.' });
 
-    const formattedPlate = carPlate.toUpperCase().trim();
+    const cleanMetadata = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
 
-    // 1. Buscar o crear el usuario
-    let userRecord = await db.query.users.findFirst({
-      where: eq(users.email, clientEmail.trim().toLowerCase())
-    });
-
-    if (!userRecord) {
-      const [newUser] = await db.insert(users).values({
-        name: clientName.trim(),
-        email: clientEmail.trim().toLowerCase(),
-        phone: clientPhone ? clientPhone.trim() : '',
-        role: 'client',
+    let [user] = await db.select().from(users).where(and(eq(users.email, clientEmail.trim().toLowerCase()), eq(users.tenantId, tenantId)));
+    
+    if (!user) {
+      [user] = await db.insert(users).values({ 
+        tenantId, name: clientName.trim(), email: clientEmail.trim().toLowerCase(), phone: clientPhone?.trim() || '', role: 'client'
       }).returning();
-      userRecord = newUser;
     }
 
-    // 2. Buscar o crear el vehículo asociado al usuario
-    let vehicleRecord = await db.query.vehicles.findFirst({
-      where: eq(vehicles.plate, formattedPlate)
-    });
-
-    if (!vehicleRecord) {
-      const [newVehicle] = await db.insert(vehicles).values({
-        userId: userRecord.id,
-        plate: formattedPlate,
-        vin: carVin ? carVin.toUpperCase().trim() : null,
-        mileage: mileage ? String(mileage) : null,
-        brand: carBrand || 'Porsche',
-        model: carModel || '911 GT3',
-        year: Number(carYear) || 2025,
-      }).returning();
-      vehicleRecord = newVehicle;
-    } else {
-      const [updatedVehicle] = await db.update(vehicles)
-        .set({
-          vin: carVin ? carVin.toUpperCase().trim() : vehicleRecord.vin,
-          mileage: mileage ? String(mileage) : vehicleRecord.mileage
-        })
-        .where(eq(vehicles.id, vehicleRecord.id))
-        .returning();
-      vehicleRecord = updatedVehicle;
+    let vehicleRecord: any = null;
+    if (cleanMetadata.carPlate) {
+      const plateUpper = cleanMetadata.carPlate.toUpperCase();
+      let [existingVehicle] = await db.select().from(vehicles).where(and(eq(vehicles.plate, plateUpper), eq(vehicles.tenantId, tenantId)));
+      
+      if (!existingVehicle) {
+        [vehicleRecord] = await db.insert(vehicles).values({
+          tenantId, clientId: user.id, plate: plateUpper, brand: cleanMetadata.carBrand, model: cleanMetadata.carModel, year: cleanMetadata.carYear, currentMileage: cleanMetadata.carMileage
+        }).returning();
+      } else {
+        [vehicleRecord] = await db.update(vehicles).set({ 
+          currentMileage: cleanMetadata.carMileage 
+        }).where(eq(vehicles.id, existingVehicle.id)).returning();
+      }
     }
 
-    const parsedDate = appointmentDate ? new Date(appointmentDate) : new Date();
+    const parsedDate = scheduledAt ? new Date(scheduledAt) : new Date();
+    const finalMediaAndReports = vehicleRecord ? { vehicleId: vehicleRecord.id } : { preferences: cleanMetadata };
 
-    // 3. Crear la cita
-    const [newAppointment] = await db.insert(appointments).values({
-      userId: userRecord.id,
-      vehicleId: vehicleRecord.id,
-      serviceType: serviceType || 'mechanical',
-      appointmentDate: parsedDate,
-      notes: notes || 'Sin notas adicionales',
-      status: 'scheduled',
+    const [apt] = await db.insert(appointments).values({ 
+      tenantId, clientId: user.id, staffId: staffId || null, serviceId, scheduledAt: parsedDate, status: 'scheduled', staffNotes: notes || 'Sin notas', 
+      mediaAndReports: finalMediaAndReports, 
+      estimatedCost: '0.00', finalCost: '0.00' 
     }).returning();
 
-    // 4. Enviar notificación al Telegram del mecánico con la placa corregida
-    const serviceName = serviceType === 'bodywork' ? 'Latonería y Pintura' : 'Mecánica General';
-    const dateFormatted = parsedDate.toLocaleString('es-ES', { timeZone: 'UTC' });
+    // 🔔 DISPARAR NOTIFICACIÓN A TELEGRAM ANTES DE RESPONDER AL FRONTEND
+    const telegramMsg = `
+🚨 <b>¡NUEVA RESERVA EN AUTOFLOW!</b> 🚨
+👤 <b>Cliente:</b> ${clientName.trim()}
+📞 <b>Teléfono:</b> ${clientPhone?.trim() || 'N/A'}
+🗓️ <b>Fecha:</b> ${parsedDate.toLocaleString('es-ES')}
+🚗 <b>Vehículo:</b> ${cleanMetadata.carPlate || 'No registrada'}
+🛠️ <b>Servicio:</b> Revisa el sistema para más detalles.
+📝 <b>Notas:</b> ${notes || 'Sin detalles'}
+    `;
     
-    const telegramMessage = 
-      `🚨 *NUEVA CITA AGENDADA EN BAHÍA* 🚨\n\n` +
-      `🚗 *Vehículo:* ${carBrand || 'Porsche'} ${carModel || '911 GT3'} (${carYear || 2025})\n` +
-      `🔢 *Placa:* \`${formattedPlate}\`\n` +
-      `👤 *Cliente:* ${clientName.trim()}\n` +
-      `📞 *Teléfono:* +1 ${clientPhone ? clientPhone.trim() : 'Sin teléfono'}\n` +
-      `🛠️ *Servicio:* ${serviceName}\n` +
-      `📅 *Fecha y Hora:* ${dateFormatted} UTC\n` +
-      `📝 *Notas:* ${notes || 'Ninguna'}`;
+    // Llamada no bloqueante (no frena el return si Telegram falla)
+    sendTelegramNotification(telegramMsg);
 
-    sendTelegramNotification(telegramMessage);
-
-    return res.status(201).json({ success: true, appointment: newAppointment });
-  } catch (error: any) {
-    console.error('Error al registrar la cita en Express:', error);
-    return res.status(500).json({ error: error.message || String(error) });
-  }
+    return res.status(201).json({ success: true, appointment: apt });
+  } catch (error: any) { return res.status(500).json({ error: error.message }); }
 }
 
 export async function getAppointments(req: Request, res: Response) {
-  try {
-    const list = await db.select().from(appointments);
-    return res.json(list);
-  } catch (error: any) {
-    return res.status(500).json({ error: String(error) });
-  }
+  try { return res.json(await db.select().from(appointments).where(eq(appointments.tenantId, req.headers['x-tenant-id'] as string))); } catch (error: any) { return res.status(500).json({ error: String(error) }); }
 }
 
 export async function checkAvailability(req: Request, res: Response) {
   try {
-    const { date } = req.query;
-    
-    if (!date || typeof date !== 'string') {
-      return res.status(400).json({ success: false, error: 'Fecha inválida.' });
-    }
-
-    const startOfDay = new Date(`${date}T00:00:00Z`);
-    const endOfDay = new Date(`${date}T23:59:59Z`);
-
-    const dayAppointments = await db.query.appointments.findMany({
-      where: and(
-        gte(appointments.appointmentDate, startOfDay),
-        lt(appointments.appointmentDate, endOfDay)
-      ),
-      columns: {
-        appointmentDate: true
-      }
-    });
-
-    const bookedTimes = dayAppointments.map(app => {
-      const appDate = new Date(app.appointmentDate);
-      const hours = appDate.getUTCHours().toString().padStart(2, '0');
-      const minutes = appDate.getUTCMinutes().toString().padStart(2, '0');
-      return `${hours}:${minutes}`;
-    });
-
-    return res.status(200).json({ success: true, bookedTimes });
-  } catch (error: any) {
-    console.error('Error al verificar disponibilidad:', error);
-    return res.status(500).json({ success: false, error: error.message });
-  }
+    const dayApts = await db.query.appointments.findMany({ where: and(eq(appointments.tenantId, req.headers['x-tenant-id'] as string), gte(appointments.scheduledAt, new Date(`${req.query.date}T00:00:00Z`)), lt(appointments.scheduledAt, new Date(`${req.query.date}T23:59:59Z`))), columns: { scheduledAt: true } });
+    return res.status(200).json({ success: true, bookedTimes: dayApts.map(a => `${new Date(a.scheduledAt).getUTCHours().toString().padStart(2, '0')}:${new Date(a.scheduledAt).getUTCMinutes().toString().padStart(2, '0')}`) });
+  } catch (error: any) { return res.status(500).json({ success: false, error: error.message }); }
 }
 
-// ESTA ES LA FUNCIÓN AJUSTADA PARA LEER EL LAZY LOADING DE LAS PESTAÑAS
+// 🗓️ OBTENER CITAS DE HOY O PRÓXIMOS DÍAS
 export async function getTodaysAppointments(req: Request, res: Response) {
   try {
-    const { filter } = req.query; // Puede ser 'hoy', 'manana' o 'semana'
+    let start = new Date(), end = new Date(); 
+    start.setHours(0, 0, 0, 0); 
     
-    let startDate = new Date();
-    let endDate = new Date();
-
-    if (filter === 'manana') {
-      startDate.setDate(startDate.getDate() + 1);
-      endDate.setDate(endDate.getDate() + 1);
-      startDate.setHours(0, 0, 0, 0);
-      endDate.setHours(23, 59, 59, 999);
-    } else if (filter === 'semana') {
-      startDate.setHours(0, 0, 0, 0);
-      endDate.setDate(endDate.getDate() + 7);
-      endDate.setHours(23, 59, 59, 999);
+    // Configurar el rango de tiempo dependiendo del filtro (hoy o 7 días)
+    if (req.query.filter === 'upcoming') {
+      end.setDate(end.getDate() + 7); // Agenda a 7 días
+      end.setHours(23, 59, 59, 999);
     } else {
-      // Default: 'hoy'
-      startDate.setHours(0, 0, 0, 0);
-      endDate.setHours(23, 59, 59, 999);
+      end.setHours(23, 59, 59, 999); // Solo hoy por defecto
     }
 
-    const rows = await db.select({
-      appointment: appointments,
-      vehicle: vehicles,
-      user: users
+    // 1. Consultar citas cruzando con Clientes, Servicios y Órdenes de Trabajo (POS)
+    const rows = await db.select({ 
+      apt: appointments, 
+      cli: users, 
+      svc: services,
+      wo: workOrders
     })
     .from(appointments)
-    .innerJoin(vehicles, eq(appointments.vehicleId, vehicles.id))
-    .innerJoin(users, eq(appointments.userId, users.id))
+    .innerJoin(users, eq(appointments.clientId, users.id))
+    .leftJoin(services, eq(appointments.serviceId, services.id))
+    .leftJoin(workOrders, eq(workOrders.appointmentId, appointments.id))
     .where(
       and(
-        gte(appointments.appointmentDate, startDate),
-        lt(appointments.appointmentDate, endDate),
+        eq(appointments.tenantId, req.headers['x-tenant-id'] as string), 
+        gte(appointments.scheduledAt, start), 
+        lt(appointments.scheduledAt, end), 
         ne(appointments.status, 'completed')
       )
     )
-    .orderBy(appointments.appointmentDate);
+    .orderBy(appointments.scheduledAt);
 
-    const agendaAppointments = rows.map(row => {
-      const appDate = new Date(row.appointment.appointmentDate);
-      
-      // Para la vista de 'semana', mostramos también el día (ej: "Lun, 10:30")
-      const timeString = filter === 'semana' 
-        ? `${appDate.toLocaleDateString('es-ES', { weekday: 'short' })}, ${appDate.getUTCHours().toString().padStart(2, '0')}:${appDate.getUTCMinutes().toString().padStart(2, '0')}`
-        : `${appDate.getUTCHours().toString().padStart(2, '0')}:${appDate.getUTCMinutes().toString().padStart(2, '0')}`;
+    // 2. Cruzar con la tabla maestra de vehículos usando el ID del JSONB o de la relación
+    const vehicleIds = rows.map(r => (r.apt.mediaAndReports as any)?.vehicleId).filter(Boolean);
+    let vehiclesMap: any = {};
+    if (vehicleIds.length > 0) {
+      const vecs = await db.select().from(vehicles).where(inArray(vehicles.id, vehicleIds));
+      vecs.forEach(v => { vehiclesMap[v.id] = v; });
+    }
 
-      return {
-        id: row.appointment.id,
-        time: timeString,
-        clientName: row.user.name,
-        plate: row.vehicle.plate,
-        brand: row.vehicle.brand,
-        model: row.vehicle.model,
-        mileage: row.vehicle.mileage || '',
-        serviceType: row.appointment.serviceType === 'mechanical' ? 'Mecánica' : 'Latonería',
-        notes: row.appointment.notes
-      };
+    return res.status(200).json({ 
+      success: true, 
+      appointments: rows.map(r => {
+        const vId = (r.apt.mediaAndReports as any)?.vehicleId;
+        const vehicle = vId ? vehiclesMap[vId] : null;
+        const d = new Date(r.apt.scheduledAt);
+        
+        return { 
+          id: r.apt.id, 
+          // Enviamos la fecha y hora completa para que el frontend decida qué mostrar
+          date: d.toISOString(), 
+          time: `${d.getUTCHours().toString().padStart(2,'0')}:${d.getUTCMinutes().toString().padStart(2,'0')}`, 
+          clientName: r.cli.name, 
+          plate: vehicle?.plate || 'N/A', 
+          brand: vehicle?.brand || '', 
+          model: vehicle?.model || '', 
+          year: vehicle?.year || '', 
+          mileage: vehicle?.currentMileage || '0', 
+          serviceType: r.svc?.name || 'General', 
+          estimatedCost: r.apt.estimatedCost || '0.00',
+          notes: r.apt.staffNotes,
+          hasWorkOrder: !!r.wo // Indica si ya pasó por el POS
+        };
+      }) 
+    });
+  } catch (error: any) { 
+    return res.status(500).json({ success: false, error: error.message }); 
+  }
+}
+
+// 🛠️ POS UNIVERSAL: CIERRE DE ORDEN Y PERSISTENCIA EN WORK_ORDERS
+export async function completeWorkOrder(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const { appointmentId } = req.params;
+    
+    console.log("📥 Recibiendo cierre de orden para ID:", appointmentId, "Tenant:", tenantId);
+    console.log("📦 Payload recibido:", req.body);
+
+    const { 
+      finalCost, 
+      mechanicNotes, 
+      exitMileage, 
+      oldParts, 
+      newParts, 
+      nextServiceDate, 
+      oldPartImageUrl, 
+      newPartImageUrl 
+    } = req.body;
+
+    if (!tenantId || !appointmentId) {
+      return res.status(400).json({ error: 'Faltan identificadores (tenantId o appointmentId).' });
+    }
+
+    // 1. Buscamos la cita original
+    const [currentApt] = await db.select().from(appointments)
+      .where(and(eq(appointments.id, appointmentId), eq(appointments.tenantId, tenantId)));
+
+    if (!currentApt) {
+      console.warn("⚠️ Cita no encontrada con ID:", appointmentId);
+      return res.status(404).json({ error: 'Cita u Orden no encontrada en la base de datos.' });
+    }
+
+    const existingMetadata = currentApt.mediaAndReports as any || {};
+    const vehicleId = existingMetadata.vehicleId || null;
+
+    // 2. 💰 INSERCIÓN EN LA TABLA MAESTRA POS (workOrders)
+    const [workOrder] = await db.insert(workOrders).values({
+      tenantId,
+      appointmentId: currentApt.id,
+      vehicleId: vehicleId, 
+      staffId: currentApt.staffId || null,
+      finalCost: finalCost ? String(finalCost) : '0.00',
+      mechanicNotes: mechanicNotes || '',
+      oldParts: oldParts || '',
+      newParts: newParts || '',
+      oldPartImageUrl: oldPartImageUrl || null, 
+      newPartImageUrl: newPartImageUrl || null, 
+      nextServiceRecommendation: nextServiceDate || ''
+    }).returning();
+
+    console.log("✅ Work Order creada con éxito:", workOrder.id);
+
+    // 3. 🚗 Actualizar el millaje de salida en la tabla de vehículos
+    if (vehicleId && exitMileage) {
+      await db.update(vehicles)
+        .set({ currentMileage: String(exitMileage) })
+        .where(eq(vehicles.id, vehicleId));
+    }
+
+    // 4. 🔄 CERRAR CICLO de la Cita
+    const [updatedApt] = await db.update(appointments).set({
+      status: 'completed',
+      finalCost: finalCost ? String(finalCost) : '0.00',
+      staffNotes: mechanicNotes || currentApt.staffNotes,
+      mediaAndReports: { 
+        ...existingMetadata, 
+        workOrderId: workOrder.id 
+      }
+    }).where(eq(appointments.id, appointmentId)).returning();
+
+    return res.status(200).json({ 
+      success: true, 
+      message: 'Orden guardada con éxito en work_orders',
+      workOrder, 
+      order: updatedApt 
     });
 
-    return res.status(200).json({ success: true, appointments: agendaAppointments });
   } catch (error: any) {
-    console.error('Error al obtener citas de la agenda:', error);
+    console.error("🔴 Error crítico en completeWorkOrder:", error);
+    return res.status(500).json({ success: false, error: error.message }); 
+  }
+}
+
+// 📋 EXPEDIENTE COMPLETO DEL VEHÍCULO Y CLIENTE
+export async function getClientVehicleHistory(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const { identifier } = req.params; // Puede ser placa o email
+
+    if (!tenantId || !identifier) {
+      return res.status(400).json({ error: 'Falta el identificador de búsqueda.' });
+    }
+
+    // 1. Buscamos el vehículo por placa o al usuario por email
+    const [vehicleRecord] = await db.select().from(vehicles)
+      .where(and(eq(vehicles.tenantId, tenantId), eq(vehicles.plate, identifier.toUpperCase())));
+
+    if (!vehicleRecord) {
+      return res.status(404).json({ success: false, error: 'No se encontró un vehículo con esa placa.' });
+    }
+
+    // 2. Buscamos al dueño (cliente)
+    const [clientRecord] = await db.select().from(users)
+      .where(eq(users.id, vehicleRecord.clientId));
+
+    // 3. Traemos TODAS las órdenes de trabajo (historial POS e imágenes) de este vehículo
+    const historyOrders = await db.select().from(workOrders)
+      .where(eq(workOrders.vehicleId, vehicleRecord.id))
+      .orderBy(workOrders.createdAt);
+
+    return res.status(200).json({
+      success: true,
+      client: clientRecord,
+      vehicle: vehicleRecord,
+      serviceHistory: historyOrders // Aquí viaja todo el historial con fotos y costos
+    });
+
+  } catch (error: any) {
     return res.status(500).json({ success: false, error: error.message });
   }
 }

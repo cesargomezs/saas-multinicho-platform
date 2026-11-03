@@ -3,7 +3,7 @@ import postgres from 'postgres';
 import * as schema from './schema';
 
 // QUEMAMOS LA URL DIRECTO AQUÍ PARA ESQUIVAR EL FALLO DEL .ENV
-const client = postgres("postgresql://postgres:Valeria2311*@localhost:5432/taller_db");
+const client = postgres("postgresql://postgres:Valeria2311*@localhost:5432/multi-tenant");
 
 export const db = drizzle(client, { schema });
 

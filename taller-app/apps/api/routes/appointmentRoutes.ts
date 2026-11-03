@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { createAppointment, checkAvailability, getTodaysAppointments } from '../controllers/appointmentController';
+import { createAppointment, getAppointments, checkAvailability, getTodaysAppointments } from '../controllers/appointmentController';
 
 const router = Router();
 
-// <-- Se quitó el '/today' para que coincida con el frontend y reciba los filtros (hoy, manana, semana)
-router.get('/appointments', getTodaysAppointments); 
-router.get('/appointments/availability', checkAvailability);
-router.post('/appointments', createAppointment);
+router.post('/', createAppointment);
+router.get('/', getAppointments);
+router.get('/availability', checkAvailability);
+router.get('/today', getTodaysAppointments);
 
 export default router;
