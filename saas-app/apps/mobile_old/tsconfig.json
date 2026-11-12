@@ -1,0 +1,17 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts"
+, "../mobile/app/(tabs)/_layout.tsx", "../mobile/app/(tabs)/agenda.tsx", "../mobile/app/(tabs)/reports.tsx", "../mobile/app/(tabs)/staff.tsx"  ]
+}

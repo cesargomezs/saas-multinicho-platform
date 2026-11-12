@@ -1,5 +1,5 @@
 {
-  "name": "taller-app",
+  "name": "saas-app",
   "private": true,
   "scripts": {
     "build": "turbo run build",

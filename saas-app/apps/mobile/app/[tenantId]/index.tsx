@@ -1,0 +1,4862 @@
+'use client';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { createClient } from '@supabase/supabase-js';
+
+// ==========================================
+// ⚙️ CONFIGURACIÓN DE SUPABASE & API
+// ==========================================
+const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hbofrqdubrtogwbuddsa.supabase.co';
+const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'tu-anon-key';
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: false },
+  realtime: { params: { eventsPerSecond: 0 } }
+});
+
+// ==========================================
+// 🌎 LISTA PARAMETRIZADA DE INDICATIVOS DE PAÍS
+// ==========================================
+export const COUNTRY_CODES = [
+  { code: '+1', flag: '🇺🇸', label: '🇺🇸 +1', name: 'Estados Unidos / Canadá' },
+  { code: '+57', flag: '🇨🇴', label: '🇨🇴 +57', name: 'Colombia' },
+  { code: '+52', flag: '🇲🇽', label: '🇲🇽 +52', name: 'México' },
+  { code: '+34', flag: '🇪🇸', label: '🇪🇸 +34', name: 'España' },
+  { code: '+54', flag: '🇦🇷', label: '🇦🇷 +54', name: 'Argentina' },
+  { code: '+56', flag: '🇨🇱', label: '🇨🇱 +56', name: 'Chile' },
+  { code: '+51', flag: '🇵🇪', label: '🇵🇪 +51', name: 'Perú' },
+];
+
+const CountryCodeSelector = ({
+  value,
+  onChange,
+  tColor,
+  width = 110
+}: {
+  value: string;
+  onChange: (val: string) => void;
+  tColor: any;
+  width?: number;
+}) => {
+  if (Platform.OS === 'web') {
+    return (
+      <select
+        className="web-input-override"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: `${width}px`,
+          height: '100%',
+          border: 'none',
+          borderRight: `1px solid ${tColor.border}`,
+          backgroundColor: tColor.border,
+          borderRadius: 0,
+          paddingLeft: '12px',
+          fontWeight: 'bold',
+          cursor: 'pointer'
+        } as any}
+      >
+        {COUNTRY_CODES.map((c) => (
+          <option key={c.code} value={c.code}>
+            {c.label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  const currentIdx = COUNTRY_CODES.findIndex((c) => c.code === value);
+  const currentItem = COUNTRY_CODES[currentIdx >= 0 ? currentIdx : 0];
+  const handleCycleCountry = () => {
+    const nextIdx = (currentIdx + 1) % COUNTRY_CODES.length;
+    onChange(COUNTRY_CODES[nextIdx].code);
+  };
+
+  return (
+    <TouchableOpacity
+      onPress={handleCycleCountry}
+      style={{
+        paddingHorizontal: 14,
+        justifyContent: 'center',
+        alignItems: 'center',
+        borderRightWidth: 1,
+        borderColor: tColor.border,
+        backgroundColor: tColor.border
+      }}
+    >
+      <Text style={{ color: tColor.text, fontWeight: 'bold' }}>{currentItem.label} ▾</Text>
+    </TouchableOpacity>
+  );
+};
+
+// 🌟 CAPITALIZACIÓN AUTOMÁTICA (Letra Capitalizada en Nombres, Reseñas y Títulos) 🌟
+const toTitleCase = (str: string) => {
+  if (!str) return '';
+  return String(str).replace(/(^|\s)\S/g, (match) => match.toUpperCase());
+};
+
+const cleanPhoneDigits = (phoneStr?: string | null): string => {
+  if (!phoneStr) return '';
+  const digits = String(phoneStr).replace(/\D/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;
+};
+
+// 🕒 HELPER UNIVERSAL MULTI-PAÍS (WALL-CLOCK TIME):
+// Convierte cualquier cita de la BD ("2026-11-12T14:00:00.000Z" o Date + time "14:00")
+// en un objeto Date local exacto (2:00 PM = 14:00 en el reloj del usuario, sin restar ni sumar horas por UTC).
+const parseAppointmentWallClock = (appObjOrStr: any, explicitTime?: string): Date => {
+  if (!appObjOrStr) return new Date();
+  const rawStr = typeof appObjOrStr === 'string'
+    ? appObjOrStr
+    : (appObjOrStr.metadata?.localDate || appObjOrStr.appointmentDate || appObjOrStr.date || '');
+  const timeStr = explicitTime || (typeof appObjOrStr === 'object' ? (appObjOrStr.metadata?.localTime || appObjOrStr.time) : '') || '';
+  const datePart = String(rawStr).split('T')[0];
+  const cleanTime = timeStr
+    ? String(timeStr).substring(0, 5)
+    : (String(rawStr).includes('T') ? String(rawStr).split('T')[1].substring(0, 5) : '12:00');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart) && /^\d{2}:\d{2}$/.test(cleanTime)) {
+    const [y, m, d] = datePart.split('-').map(Number);
+    const [hh, mm] = cleanTime.split(':').map(Number);
+    return new Date(y, m - 1, d, hh, mm, 0, 0);
+  }
+  return new Date(rawStr);
+};
+
+// Formatea "14:00" -> "2:00 PM" de forma universal sin depender de conversiones UTC del navegador
+const formatWallClockTime12h = (orderObj: any): string => {
+  const rawTime = orderObj?.metadata?.localTime || orderObj?.time || (orderObj?.appointmentDate && String(orderObj.appointmentDate).includes('T') ? String(orderObj.appointmentDate).split('T')[1].substring(0, 5) : '');
+  if (rawTime && /^\d{2}:\d{2}/.test(rawTime)) {
+    const [hhStr, mmStr] = rawTime.substring(0, 5).split(':');
+    const hh = parseInt(hhStr, 10);
+    if (!isNaN(hh)) {
+      const ampm = hh >= 12 ? 'PM' : 'AM';
+      const hh12 = hh % 12 === 0 ? 12 : hh % 12;
+      return `${hh12}:${mmStr} ${ampm}`;
+    }
+  }
+  return rawTime || 'Hora N/A';
+};
+
+const getReportDiscountInfo = (r: any, servicesList: ServiceInfo[]) => {
+  const notesStr = String(r.mechanicNotes || r.notes || r.staffNotes || '').toUpperCase();
+  if (notesStr.includes('REFERIR') || notesStr.includes('REFERIDO') || notesStr.includes('RECOMENDADO') || r.referralDiscountApplied) {
+    return { type: 'referral', label: '🏆 Desc. Referido', color: '#3B82F6', bg: 'rgba(59, 130, 246, 0.15)' };
+  }
+  if (notesStr.includes('PREMIO DE FIDELIDAD') || notesStr.includes('SERVICIO GRATIS') || r.rewardApplied) {
+    return { type: 'loyalty', label: '🎁 Premio Fidelidad', color: '#F59E0B', bg: 'rgba(245, 158, 11, 0.15)' };
+  }
+  const paid = Number(r.cost ?? r.finalCost ?? -1);
+  if (paid >= 0 && r.service) {
+    const matchedSrv = servicesList.find(s => s.name.toLowerCase() === String(r.service).toLowerCase());
+    if (matchedSrv) {
+      const catalogPrice = Number(matchedSrv.price);
+      if (paid === 0 && catalogPrice > 0) {
+        return { type: 'loyalty', label: '🎁 Premio (100%)', color: '#F59E0B', bg: 'rgba(245, 158, 11, 0.15)' };
+      }
+      if (paid > 0 && paid < catalogPrice) {
+        const pct = Math.round(((catalogPrice - paid) / catalogPrice) * 100);
+        return { type: 'referral', label: `🏷️ Desc. (-${pct}%)`, color: '#10B981', bg: 'rgba(16, 185, 129, 0.15)' };
+      }
+    }
+  }
+  return null;
+};
+
+const formatCurrency = (value: string | number) => {
+  if (value === null || value === undefined) return '';
+  const strValue = String(value);
+  const isDecimal = strValue.includes('.');
+  const cleanStr = strValue.replace(/[^0-9.]/g, '');
+  if (!cleanStr) return '';
+  
+  if (isDecimal) {
+    const parts = cleanStr.split('.');
+    const whole = parts[0] ? Number(parts[0]).toLocaleString('en-US') : '0';
+    const decimal = parts[1] ? parts[1].substring(0, 2) : '00';
+    return `$ ${whole}.${decimal}`;
+  }
+  
+  return `$ ${Number(cleanStr).toLocaleString('en-US')}`;
+};
+
+// ==========================================
+// 🔒 COMPONENTE LAZY LOAD PARA IMÁGENES PRIVADAS
+// ==========================================
+const PrivateSupabaseImage = ({ path, alt, isExpanded = false }: { path: string, alt: string, isExpanded?: boolean }) => {
+  const [signedUrl, setSignedUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    const fetchSignedUrl = async () => {
+      if (!path) return;
+      let cleanPath: string = path;
+      
+      if (cleanPath.startsWith('old/old/')) cleanPath = cleanPath.replace('old/old/', 'old/');
+      if (cleanPath.startsWith('new/new/')) cleanPath = cleanPath.replace('new/new/', 'new/');
+      if (cleanPath.startsWith('portfolio/portfolio/')) cleanPath = cleanPath.replace('portfolio/portfolio/', 'portfolio/');
+      if (cleanPath.startsWith('services/services/')) cleanPath = cleanPath.replace('services/services/', 'services/');
+
+      if (cleanPath.includes('/public/autoflow/')) {
+        const splitResult = cleanPath.split('/public/autoflow/')[1];
+        if (splitResult) cleanPath = splitResult;
+      } else if (!cleanPath.includes('/')) {
+        if (cleanPath.startsWith('old')) cleanPath = `old/${cleanPath}`;
+        else if (cleanPath.startsWith('new')) cleanPath = `new/${cleanPath}`;
+        else if (cleanPath.startsWith('portfolio')) cleanPath = `portfolio/${cleanPath}`;
+        else if (cleanPath.startsWith('services')) cleanPath = `services/${cleanPath}`;
+      }
+      
+      const { data, error } = await supabase.storage.from('autoflow').createSignedUrl(cleanPath, 3600);
+      if (error || !data?.signedUrl) setError(true);
+      else setSignedUrl(data.signedUrl);
+    };
+    fetchSignedUrl();
+  }, [path]);
+
+  if (error) {
+    return (
+      <View style={{ padding: 20, backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: 12, width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+        <Text style={{ fontSize: 14, color: '#EF4444', fontStyle: 'italic' }}>❌ No disponible</Text>
+      </View>
+    );
+  }
+  
+  if (!signedUrl) {
+    return (
+      <View style={{ padding: 40, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+        <Text style={{ fontSize: 14, color: '#94A3B8', fontStyle: 'italic' }}>⏳ Cargando...</Text>
+      </View>
+    );
+  }
+  
+  if (Platform.OS === 'web') {
+    return (
+      <img 
+        src={signedUrl} 
+        alt={alt} 
+        style={{ width: '100%', height: '100%', maxHeight: isExpanded ? '85vh' : '100%', objectFit: 'cover', borderRadius: 'inherit', boxShadow: isExpanded ? '0 25px 50px -12px rgba(0,0,0,0.5)' : 'none', backgroundColor: '#000' }} 
+      />
+    );
+  }
+  return <Image source={{ uri: signedUrl }} style={{ width: '100%', height: '100%', borderRadius: 12 }} resizeMode="cover" />;
+};
+
+// ==========================================
+// 🎠 CARRUSEL RESPONSIVE (SNAP + FLECHAS + PUNTOS)
+// - Columnas automáticas según el ancho real del contenedor:
+//   móvil = 1 tarjeta con "peek" de la siguiente, tablet = 2, desktop = 3, wide = 4.
+// - Si hay menos tarjetas que columnas, se reparten para llenar el ancho (sin huecos).
+// - Con muchos registros: flechas siempre, puntos si son pocos y barra de progreso si son muchos.
+// ==========================================
+function ResponsiveCarousel<T>({
+  data,
+  renderItem,
+  gap = 24,
+  minItemWidth = 280,
+  maxItemWidth,
+  maxCols = 4,
+  tColor,
+  brandColor,
+  arrowTop = 120
+}: {
+  data: T[];
+  renderItem: (item: T, idx: number, itemWidth: number) => React.ReactNode;
+  gap?: number;
+  minItemWidth?: number;
+  maxItemWidth?: number;
+  maxCols?: number;
+  tColor: any;
+  brandColor: string;
+  arrowTop?: number | string;
+}) {
+  // `any` evita el conflicto de tipos del ref de ScrollView entre versiones de @types/react
+  const scrollRef = useRef<any>(null);
+  const [scrollX, setScrollX] = useState(0);
+  const [viewW, setViewW] = useState(0);
+
+  const count = data.length;
+  const isNarrow = viewW > 0 && viewW < 560;
+
+  let cols = 1;
+  let itemWidth = viewW;
+  if (viewW > 0) {
+    if (isNarrow) {
+      cols = 1;
+      itemWidth = count > 1 ? Math.round(viewW * 0.86) : viewW;
+    } else {
+      cols = Math.max(1, Math.min(maxCols, Math.floor((viewW + gap) / (minItemWidth + gap))));
+      cols = Math.min(cols, Math.max(1, count));
+      itemWidth = Math.floor((viewW - gap * (cols - 1)) / cols);
+    }
+    if (maxItemWidth) itemWidth = Math.min(itemWidth, maxItemWidth);
+  }
+
+  const step = itemWidth + gap;
+  const contentW = count * itemWidth + Math.max(0, count - 1) * gap;
+  const maxX = Math.max(0, contentW - viewW);
+  const canScroll = count > cols && maxX > 8;
+  const positions = Math.max(1, count - cols + 1);
+  const canLeft = scrollX > 8;
+  const canRight = scrollX < maxX - 8;
+  const activeIdx = !canScroll ? 0 : (scrollX >= maxX - 8 ? positions - 1 : Math.min(positions - 1, Math.max(0, Math.round(scrollX / step))));
+
+  const goTo = (idx: number) => {
+    const clamped = Math.max(0, Math.min(positions - 1, idx));
+    scrollRef.current?.scrollTo({ x: Math.min(clamped * step, maxX), animated: true });
+  };
+
+  const arrowStyle = (side: 'left' | 'right') => ({
+    position: 'absolute' as const,
+    top: arrowTop as any,
+    [side]: 8,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    backgroundColor: 'rgba(5, 7, 12, 0.82)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+    zIndex: 20
+  });
+
+  const showDots = positions <= 8;
+  const progress = maxX > 0 ? Math.min(1, Math.max(0, scrollX / maxX)) : 0;
+
+  return (
+    <View style={{ width: '100%' }} onLayout={(e) => setViewW(Math.floor(e.nativeEvent.layout.width))}>
+      {viewW > 0 ? (
+        <>
+          <View style={{ position: 'relative' }}>
+            <ScrollView
+              ref={scrollRef}
+              horizontal
+              scrollEnabled={canScroll}
+              showsHorizontalScrollIndicator={false}
+              snapToInterval={step}
+              snapToAlignment="start"
+              decelerationRate="fast"
+              scrollEventThrottle={32}
+              onScroll={(e) => setScrollX(e.nativeEvent.contentOffset.x)}
+            >
+              <View style={{ flexDirection: 'row', gap }}>
+                {data.map((item, idx) => (
+                  <View key={idx} style={{ width: itemWidth }}>
+                    {renderItem(item, idx, itemWidth)}
+                  </View>
+                ))}
+              </View>
+            </ScrollView>
+
+            {canScroll && canLeft ? (
+              <TouchableOpacity activeOpacity={0.8} style={arrowStyle('left')} onPress={() => goTo(activeIdx - (cols > 1 ? cols : 1))}>
+                <Feather name="chevron-left" size={22} color="#FFFFFF" />
+              </TouchableOpacity>
+            ) : null}
+            {canScroll && canRight ? (
+              <TouchableOpacity activeOpacity={0.8} style={arrowStyle('right')} onPress={() => goTo(activeIdx + (cols > 1 ? cols : 1))}>
+                <Feather name="chevron-right" size={22} color="#FFFFFF" />
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          {canScroll ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 16 }}>
+              {showDots ? (
+                Array.from({ length: positions }).map((_, i) => (
+                  <TouchableOpacity
+                    key={i}
+                    hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+                    onPress={() => goTo(i)}
+                    style={{ width: i === activeIdx ? 22 : 8, height: 8, borderRadius: 4, backgroundColor: i === activeIdx ? brandColor : tColor.border }}
+                  />
+                ))
+              ) : (
+                <View style={{ width: 140, height: 4, borderRadius: 2, backgroundColor: tColor.border, overflow: 'hidden' }}>
+                  <View style={{ width: `${Math.max(8, progress * 100)}%`, height: '100%', backgroundColor: brandColor, borderRadius: 2 }} />
+                </View>
+              )}
+              <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '800', marginLeft: 8 }}>
+                {cols > 1 ? `${activeIdx + 1}–${Math.min(count, activeIdx + cols)} de ${count}` : `${activeIdx + 1} de ${count}`}
+              </Text>
+            </View>
+          ) : null}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+// ==========================================
+// 🧩 ESTILOS WEB DINÁMICOS
+// ==========================================
+const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tColor: any, brandColor: string }) => {
+  if (Platform.OS !== 'web') return null;
+  return (
+    <style dangerouslySetInnerHTML={{__html: `
+      body { background-color: ${tColor.bg}; color: ${tColor.text}; margin: 0; transition: background-color 0.3s ease; }
+      * { font-family: 'Inter', system-ui, sans-serif; box-sizing: border-box; }
+      .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; max-height: 600px; overflow-y: auto; }
+      .table-responsive::-webkit-scrollbar { width: 8px; height: 8px; }
+      .table-responsive::-webkit-scrollbar-track { background: transparent; }
+      .table-responsive::-webkit-scrollbar-thumb { background: ${tColor.border}; border-radius: 4px; }
+      .glass-table { width: 100%; border-collapse: separate; border-spacing: 0; min-width: 800px; }
+      .glass-table th { position: sticky; top: 0; background-color: ${theme === 'dark' ? '#12161C' : '#E2E8F0'}; z-index: 10; border-bottom: 2px solid ${tColor.border}; color: ${brandColor}; font-size: 13px; font-weight: 900; text-transform: uppercase; padding: 20px 24px; text-align: left; letter-spacing: 0.5px; }
+      .glass-table td { border-bottom: 1px solid ${tColor.border}; font-size: 14.5px; font-weight: 500; color: ${tColor.text}; padding: 20px 24px; text-align: left; vertical-align: middle; }
+      .web-input-override { height: 48px !important; background-color: ${tColor.input} !important; border: 1px solid ${tColor.border} !important; color: ${tColor.text} !important; border-radius: 12px !important; padding: 0 16px !important; font-size: 14.5px !important; outline: none !important; width: 100% !important; color-scheme: ${theme} !important; transition: all 0.3s ease; }
+      .web-input-override option { background-color: ${theme === 'dark' ? '#12161C' : '#FFF'} !important; color: ${tColor.text} !important; }
+      .modal-overlay { backdrop-filter: blur(12px); }
+      .horarios-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+      .chart-bar-col { transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); cursor: pointer; }
+      .chart-bar-col:hover { transform: translateY(-4px) scale(1.04); }
+    `}} />
+  );
+};
+
+// ==========================================
+// 🧩 INTERFACES DE TYPESCRIPT
+// ==========================================
+interface PortfolioItem { url: string; title: string; description: string; }
+interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; }
+interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; }
+interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; }
+interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
+interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
+interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
+interface ReportItem { id: string; date?: string; createdAt?: string; plate?: string; clientName?: string; service?: string; mechanicId?: string; mechanicName?: string; cost?: number; finalCost?: number | string; status?: string; mechanicNotes?: string; notes?: string; _empty?: boolean; }
+
+// ==========================================
+// 🚩 REPORTES DE CONTENIDO + DECLARACIÓN LEGAL DEL NEGOCIO
+// ==========================================
+interface ReportTarget { type: 'review' | 'portfolio' | 'service' | 'campaign' | 'business'; id: string; title: string; excerpt?: string; }
+
+const REPORT_REASONS = [
+  { key: 'copyright_spam', label: 'Infracción de Copyright o Spam' },
+  { key: 'offensive', label: 'Contenido inapropiado u ofensivo' },
+  { key: 'false_info', label: 'Información falsa o engañosa' },
+  { key: 'not_exists', label: 'El negocio no existe' },
+];
+
+// Casilla obligatoria antes de que el negocio publique imágenes, servicios o campañas
+const ContentTermsCheck = ({ value, onChange, tColor, brandColor }: { value: boolean; onChange: (v: boolean) => void; tColor: any; brandColor: string }) => (
+  <TouchableOpacity
+    activeOpacity={0.8}
+    onPress={() => onChange(!value)}
+    style={{ flexDirection: 'row', gap: 12, alignItems: 'flex-start', padding: 14, borderRadius: 12, borderWidth: 1, borderColor: value ? brandColor : tColor.border, backgroundColor: tColor.input, marginBottom: 16 }}
+  >
+    <View style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: value ? brandColor : tColor.muted, backgroundColor: value ? brandColor : 'transparent', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
+      {value ? <Feather name="check" size={14} color="#FFFFFF" /> : null}
+    </View>
+    <Text style={{ flex: 1, color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
+      <Text style={{ color: tColor.text, fontWeight: '800' }}>Declaro que soy titular de los derechos o cuento con autorización </Text>
+      de las imágenes y textos que publico, que no son ofensivos, ilegales ni engañosos, y que asumo toda la responsabilidad por este contenido frente a terceros. AutoFlow solo aloja lo que publican los negocios, no lo verifica y puede retirar el contenido que sea reportado.
+    </Text>
+  </TouchableOpacity>
+);
+
+export default function TenantDashboardScreen() {
+  const router = useRouter();
+  const { tenantId, view: viewParam, reaction: reactionParam } = useLocalSearchParams();
+  const { width } = useWindowDimensions();
+  const isMobile = width <= 850;
+
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const tColor = useMemo(() => ({
+    dark: { bg: '#05070C', card: 'rgba(18, 22, 28, 0.75)', text: '#FFFFFF', muted: '#94A3B8', border: 'rgba(255,255,255,0.08)', input: 'rgba(0, 0, 0, 0.4)', nav: 'rgba(5, 7, 12, 0.85)' },
+    light: { bg: '#F1F5F9', card: 'rgba(255, 255, 255, 0.85)', text: '#0F131A', muted: '#475569', border: 'rgba(0,0,0,0.1)', input: 'rgba(255, 255, 255, 0.6)', nav: 'rgba(241, 245, 249, 0.85)' }
+  })[theme], [theme]);
+
+  const urlPath = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.href : '';
+  const safeTenantId = String(tenantId || urlPath).toLowerCase();
+  
+  const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
+  const [clientDistanceMiles, setClientDistanceMiles] = useState<string | null>(null);
+  
+  const dbNiche = tenantInfo?.niche?.toLowerCase() || tenantInfo?.businessType?.toLowerCase() || '';
+  const isSpa = dbNiche === 'spa' || (!dbNiche && safeTenantId.includes('spa'));
+  const isBarbershop = dbNiche === 'barbershop' || (!dbNiche && safeTenantId.includes('barber'));
+  const isAutomotive = !isSpa && !isBarbershop; 
+
+  const brandColor = tenantInfo?.primaryColor || '#FF5E00';
+  const staffTerm = isAutomotive ? 'Mecánico' : (isBarbershop ? 'Barbero' : 'Especialista');
+
+  const bgImage = useMemo(() => {
+    if (isSpa) return 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?q=80&w=2000&auto=format&fit=crop'; 
+    if (isBarbershop) return 'https://images.unsplash.com/photo-1503951914875-452162b0f3f1?q=80&w=2000&auto=format&fit=crop';
+    return 'https://images.unsplash.com/photo-1613214149922-f1809c99b414?q=80&w=2000&auto=format&fit=crop';
+  }, [isSpa, isBarbershop]);
+
+  const [isMechanicAuth, setIsMechanicAuth] = useState(false);
+  const [mechanicPin, setMechanicPin] = useState('');
+  
+  const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad'>('today');
+  const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  const [todayOrders, setTodayOrders] = useState<any[]>([]);
+  const [upcomingOrders, setUpcomingOrders] = useState<any[]>([]);
+  const [staffList, setStaffList] = useState<StaffInfo[]>([]);
+  const [servicesList, setServicesList] = useState<ServiceInfo[]>([]);
+  const [reportsData, setReportsData] = useState<ReportItem[]>([]);
+  const [annualReportsData, setAnnualReportsData] = useState<ReportItem[]>([]);
+  const [showTrafficChart, setShowTrafficChart] = useState<boolean>(true);
+  const [hoveredMonthIdx, setHoveredMonthIdx] = useState<number | null>(null);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
+  const [cancellingOrder, setCancellingOrder] = useState<any | null>(null);
+  const [cancelReasonText, setCancelReasonText] = useState<string>('');
+  const [cancelOrigin, setCancelOrigin] = useState<'client' | 'staff'>('client');
+  const [isCancellingApt, setIsCancellingApt] = useState<boolean>(false);
+  const [confirmingAptId, setConfirmingAptId] = useState<string | null>(null);
+  const [sendingReminderAptId, setSendingReminderAptId] = useState<string | null>(null);
+
+  const [isCatalogModalVisible, setIsCatalogModalVisible] = useState(false);
+  const [catalogEditingId, setCatalogEditingId] = useState<string | null>(null);
+  const [catalogFormName, setCatalogFormName] = useState('');
+  const [catalogFormDesc, setCatalogFormDesc] = useState(''); 
+  const [catalogFormPrice, setCatalogFormPrice] = useState('');
+  const [catalogFormDuration, setCatalogFormDuration] = useState('30');
+  const [catalogFormFile, setCatalogFormFile] = useState<File | null>(null); 
+  const [catalogFormPreview, setCatalogFormPreview] = useState<string | null>(null); 
+  const catalogInputRef = useRef<HTMLInputElement>(null); 
+
+  const [newStaffName, setNewStaffName] = useState('');
+  const [selectedStaffRole, setSelectedStaffRole] = useState('');
+  const [customStaffRole, setCustomStaffRole] = useState('');
+  
+  const [finalCost, setFinalCost] = useState('');
+  const [exitMileage, setExitMileage] = useState('');
+  const [oldParts, setOldParts] = useState('');
+  const [newParts, setNewParts] = useState('');
+  const [mechanicNotes, setMechanicNotes] = useState('');
+  const [nextServiceTime, setNextServiceTime] = useState('');
+  const [assignedMechanicId, setAssignedMechanicId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [oldPartImage, setOldPartImage] = useState<File | null>(null);
+  const [oldPartPreview, setOldPartPreview] = useState<string | null>(null);
+  const [newPartImage, setNewPartImage] = useState<File | null>(null);
+  const [newPartPreview, setNewPartPreview] = useState<string | null>(null);
+  const oldFileInputRef = useRef<HTMLInputElement>(null);
+  const newFileInputRef = useRef<HTMLInputElement>(null);
+
+  const [clientVisits, setClientVisits] = useState<number | null>(null);
+  const [isCheckingLoyalty, setIsCheckingLoyalty] = useState(false);
+  const [rewardApplied, setRewardApplied] = useState(false);
+  const [applyReferralDiscount, setApplyReferralDiscount] = useState(false);
+  const [activeReferredBy, setActiveReferredBy] = useState<string | null>(null); 
+  
+  const [localLoyalty, setLocalLoyalty] = useState<LoyaltyConfig>({ isActive: false, visitsRequired: 10, rewardType: 'free_service', rewardValue: 100, referralActive: false, referralDiscountPercent: 20, reviews: [], campaigns: [] });
+  const [isSubmittingLoyalty, setIsSubmittingLoyalty] = useState(false);
+
+  // Campañas Push (public.push_campaigns + respaldo en config)
+  const [pushCampaignsList, setPushCampaignsList] = useState<PushCampaignItem[]>([]);
+  const [campaignTitle, setCampaignTitle] = useState('');
+  const [campaignMessage, setCampaignMessage] = useState('');
+  const [campaignAudience, setCampaignAudience] = useState('all_clients');
+  const [isSendingCampaign, setIsSendingCampaign] = useState(false);
+
+  // Reseñas y Reacciones Únicas por Usuario (1 Like/Dislike y 1 Reseña por Cliente)
+  const [reviewsList, setReviewsList] = useState<ReviewItem[]>([]);
+  const [isEditingClientReview, setIsEditingClientReview] = useState<boolean>(false);
+  // Reacción elegida desde la vista pública: se aplica sola cuando el cliente se verifica en Expediente
+  const [pendingReaction, setPendingReaction] = useState<'like' | 'dislike' | null>(null);
+
+  // Reportes de contenido y declaración del negocio
+  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
+  const [reportReason, setReportReason] = useState('');
+  const [reportDetails, setReportDetails] = useState('');
+  const [reportContact, setReportContact] = useState('');
+  const [isSendingReport, setIsSendingReport] = useState(false);
+  const [reportedKeys, setReportedKeys] = useState<string[]>([]);
+  const [acceptedContentTerms, setAcceptedContentTerms] = useState(false);
+  const [reviewRating, setReviewRating] = useState<number>(5);
+  const [reviewComment, setReviewComment] = useState<string>('');
+  const [isSubmittingReview, setIsSubmittingReview] = useState<boolean>(false);
+
+  // Reservas B2C
+  const [isBookingModalOpen, setIsBookingModalOpen] = useState(false);
+  const [selectedServiceType, setSelectedServiceType] = useState('');
+  const [selectedBookingStaff, setSelectedBookingStaff] = useState('');
+  const [isSearchingPlate, setIsSearchingPlate] = useState(false);
+  const [isPlateSearched, setIsPlateSearched] = useState(false);
+  const [clientName, setClientName] = useState('');
+  const [clientEmail, setClientEmail] = useState('');
+  const [clientPhone, setClientPhone] = useState('');
+  const [bookingCountryCode, setBookingCountryCode] = useState('+1');
+  const [referredByCountryCode, setReferredByCountryCode] = useState('+1');
+  const [appointmentDate, setAppointmentDate] = useState('');
+  const [appointmentTime, setAppointmentTime] = useState('');
+  const [searchPlate, setSearchPlate] = useState('');
+  const [carBrand, setCarBrand] = useState('');
+  const [carModel, setCarModel] = useState('');
+  const [carYear, setCarYear] = useState('');
+  const [carMileage, setCarMileage] = useState('');
+  const [quickNotes, setQuickNotes] = useState('');
+  const [availableTimes, setAvailableTimes] = useState<string[]>([]);
+  const [referredByPhone, setReferredByPhone] = useState('');
+  const [bookingClientCoupons, setBookingClientCoupons] = useState<number>(0);
+  const [isExistingClient, setIsExistingClient] = useState(false);
+
+  // Expediente
+  const [expedienteQuery, setExpedienteQuery] = useState('');
+  const [expedienteCountryCode, setExpedienteCountryCode] = useState('+1');
+  const [isSearchingExpediente, setIsSearchingExpediente] = useState(false);
+  const [clientExpedienteData, setClientExpedienteData] = useState<any | null>(null);
+  const [isExpedienteExpanded, setIsExpedienteExpanded] = useState(true);
+  const [expandedImage, setExpandedImage] = useState<{ path: string, alt: string } | null>(null);
+
+  const defaultHoursConfig = {
+    monday: { isOpen: true, open: '08:00', close: '18:00' },
+    tuesday: { isOpen: true, open: '08:00', close: '18:00' },
+    wednesday: { isOpen: true, open: '08:00', close: '18:00' },
+    thursday: { isOpen: true, open: '08:00', close: '18:00' },
+    friday: { isOpen: true, open: '08:00', close: '18:00' },
+    saturday: { isOpen: true, open: '09:00', close: '14:00' },
+    sunday: { isOpen: false, open: '00:00', close: '00:00' },
+  };
+  const [localHours, setLocalHours] = useState<any>(defaultHoursConfig);
+  const [isSubmittingConfig, setIsSubmittingConfig] = useState(false);
+
+  const daysOfWeekMap = [
+    { key: 'monday', label: 'Lunes' },
+    { key: 'tuesday', label: 'Martes' },
+    { key: 'wednesday', label: 'Miércoles' },
+    { key: 'thursday', label: 'Jueves' },
+    { key: 'friday', label: 'Viernes' },
+    { key: 'saturday', label: 'Sábado' },
+    { key: 'sunday', label: 'Domingo' }
+  ];
+
+  const [localPortfolio, setLocalPortfolio] = useState<PortfolioItem[]>([]);
+  const [isAddingPortfolio, setIsAddingPortfolio] = useState(false);
+  const [portfolioEditingIndex, setPortfolioEditingIndex] = useState<number | null>(null);
+  const [portfolioFormTitle, setPortfolioFormTitle] = useState(''); 
+  const [portfolioFormDesc, setPortfolioFormDesc] = useState('');
+  const [portfolioFormFile, setPortfolioFormFile] = useState<File | null>(null);
+  const [portfolioFormPreview, setPortfolioFormPreview] = useState<string | null>(null);
+  const portfolioInputRef = useRef<HTMLInputElement>(null);
+
+  const defaultStart = new Date();
+  defaultStart.setDate(defaultStart.getDate() - 30);
+  const [reportStartDate, setReportStartDate] = useState<string>(defaultStart.toISOString().split('T')[0] || '');
+  const [reportEndDate, setReportEndDate] = useState<string>(new Date().toISOString().split('T')[0] || '');
+  const [reportMechanic, setReportMechanic] = useState('');
+  const [reportPage, setReportPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+
+  const mechanicQuickNotes = isAutomotive 
+    ? ['Niveles OK', 'Frenos Desgastados', 'Fugas de Aceite', 'Requiere Alineación'] 
+    : isBarbershop
+      ? ['Requiere hidratación', 'Corte de puntas', 'Cuero cabelludo sensible', 'Aplicar tónico']
+      : ['Sin alergias', 'Requiere sesión extra', 'Piel sensible', 'Tratamiento completado'];
+    
+  const nextServiceOptions = isAutomotive 
+    ? ['3 Meses', '6 Meses', '1 Año', '5,000 Millas']
+    : ['1 Semana', '15 Días', '1 Mes', '2 Meses'];
+    
+  const clientQuickServices = isAutomotive 
+    ? ['Cambio de Aceite', 'Revisión General', 'Frenos', 'Ruidos', 'Llantas']
+    : isBarbershop
+      ? ['Corte de Cabello', 'Perfilado de Barba', 'Cejas', 'Corte de Niño', 'Colorimetría']
+      : ['Masaje Relajante', 'Corte Clásico', 'Facial', 'Coloración'];
+
+  const apiFetch = async (url: string, options: RequestInit = {}) => {
+    const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
+    const headerTenantId = Array.isArray(tenantId) ? tenantId[0] : (tenantId || '123e4567-e89b-12d3-a456-426614174000');
+    const headers = { 'Content-Type': 'application/json', 'x-tenant-id': headerTenantId, ...(options.headers || {}) };
+    return fetch(`${API_URL}${url}`, { ...options, headers });
+  };
+
+  const normalizeOrders = (orders: any[]) => {
+    const seenIds = new Set<string>();
+    return (orders || [])
+      .filter((o: any) => {
+        if (!o || o.status === 'cancelled') return false;
+        const oid = String(o.id || '');
+        if (oid && seenIds.has(oid)) return false;
+        if (oid) seenIds.add(oid);
+        return true;
+      })
+      .map((o: any) => {
+        let safeMeta = o.metadata;
+        if (typeof safeMeta === 'string') {
+          try { safeMeta = JSON.parse(safeMeta); } catch (e) { safeMeta = {}; }
+        }
+        let safeClientMeta = o.clientMetadata;
+        if (typeof safeClientMeta === 'string') {
+          try { safeClientMeta = JSON.parse(safeClientMeta); } catch (e) { safeClientMeta = {}; }
+        }
+        return { ...o, metadata: safeMeta || {}, clientMetadata: safeClientMeta || {} };
+      });
+  };
+
+  // 🛠️ Helper para unir citas de hoy + próximos días SIN duplicar IDs (porque filter=upcoming también incluye hoy)
+  const getMergedUniqueAppointments = (todayList: any[], upcomingList: any[]) => {
+    const seen = new Set<string>();
+    const result: any[] = [];
+    for (const item of [...(todayList || []), ...(upcomingList || [])]) {
+      if (!item || item.status === 'cancelled') continue;
+      const key = String(item.id || '');
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      result.push(item);
+    }
+    return result;
+  };
+
+  // 🔔 Función para disparar Notificación Push Nativa en el Navegador / Sistema Operativo (Localhost)
+  const triggerBrowserLocalNotification = (title: string, body: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'granted') {
+        new Notification(title, { body, icon: tenantInfo?.logoUrl || undefined });
+      } else if (Notification.permission !== 'denied') {
+        Notification.requestPermission().then((permission) => {
+          if (permission === 'granted') {
+            new Notification(title, { body, icon: tenantInfo?.logoUrl || undefined });
+          }
+        });
+      }
+    }
+  };
+
+  // 🌟 CARGAR CAMPAÑAS SIN ERRORES EN RED 🌟
+  const fetchPushCampaigns = async (currentTenantUuid?: string) => {
+    try {
+      const resInfo = await apiFetch('/api/tenants/info');
+      if (resInfo.ok) {
+        const dataInfo = await resInfo.json();
+        const parsedLoyalty = typeof dataInfo.tenant?.loyaltyConfig === 'string'
+          ? JSON.parse(dataInfo.tenant.loyaltyConfig)
+          : dataInfo.tenant?.loyaltyConfig;
+        if (Array.isArray(parsedLoyalty?.campaigns)) {
+          setPushCampaignsList(parsedLoyalty.campaigns);
+        }
+      }
+    } catch (e) {}
+  };
+
+  // 🌟 ENVIAR Y GUARDAR CAMPAÑA EN public.push_campaigns + RESPALDO AUTOMÁTICO EN /api/tenants/config 🌟
+  const handleSendPushCampaign = async () => {
+    if (!acceptedContentTerms) {
+      alert('Debes aceptar la declaración de contenido para poder publicar.');
+      return;
+    }
+    if (!campaignTitle.trim() || !campaignMessage.trim()) {
+      alert('Por favor ingresa un título y un mensaje para la campaña.');
+      return;
+    }
+    setIsSendingCampaign(true);
+    const targetTenant = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '123e4567-e89b-12d3-a456-426614174000'));
+    const nowIso = new Date().toISOString();
+    const cleanTitle = toTitleCase(campaignTitle.trim());
+    const cleanMessage = toTitleCase(campaignMessage.trim());
+
+    try {
+      const finalNewItem: PushCampaignItem = {
+        id: `cmp-${Date.now()}`,
+        tenant_id: String(targetTenant),
+        title: cleanTitle,
+        message: cleanMessage,
+        target_audience: campaignAudience,
+        is_active: true,
+        sent_at: nowIso
+      };
+
+      const updatedCampaigns = [finalNewItem, ...pushCampaignsList];
+      const updatedLoyaltyConfig: LoyaltyConfig = {
+        ...localLoyalty,
+        reviews: reviewsList,
+        campaigns: updatedCampaigns
+      };
+
+      // Guardar y sincronizar en PostgreSQL 18 a través de /api/tenants/config
+      const resConfig = await apiFetch('/api/tenants/config', {
+        method: 'PUT',
+        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
+      });
+
+      if (resConfig.ok) {
+        const dataConfig = await resConfig.json();
+        const savedLoyalty = typeof dataConfig.tenant?.loyaltyConfig === 'string'
+          ? JSON.parse(dataConfig.tenant.loyaltyConfig)
+          : dataConfig.tenant?.loyaltyConfig;
+        setPushCampaignsList(savedLoyalty?.campaigns || updatedCampaigns);
+        setLocalLoyalty(savedLoyalty || updatedLoyaltyConfig);
+        setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: savedLoyalty || updatedLoyaltyConfig } : prev));
+      } else {
+        setPushCampaignsList(updatedCampaigns);
+        setLocalLoyalty(updatedLoyaltyConfig);
+        setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
+      }
+
+      // Disparar notificación push en tiempo real en el navegador local
+      triggerBrowserLocalNotification(cleanTitle, cleanMessage);
+
+      setCampaignTitle('');
+      setCampaignMessage('');
+      alert('🚀 ¡Campaña ACTIVA enviada y registrada con éxito!');
+    } catch (e) {
+      alert('Error enviando la campaña.');
+    } finally {
+      setIsSendingCampaign(false);
+    }
+  };
+
+  // 🌟 ACTIVAR / INACTIVAR UNA CAMPAÑA DEL HISTORIAL 🌟
+  const handleToggleCampaignStatus = async (campaignId: string, currentStatus: boolean) => {
+    const nextStatus = !currentStatus;
+    const updatedCampaigns = pushCampaignsList.map((c) =>
+      c.id === campaignId ? { ...c, is_active: nextStatus } : c
+    );
+    setPushCampaignsList(updatedCampaigns);
+
+    const updatedLoyaltyConfig: LoyaltyConfig = {
+      ...localLoyalty,
+      reviews: reviewsList,
+      campaigns: updatedCampaigns
+    };
+    setLocalLoyalty(updatedLoyaltyConfig);
+    setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
+
+    try {
+      await apiFetch('/api/tenants/config', {
+        method: 'PUT',
+        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
+      });
+
+      if (nextStatus) {
+        const activatedCamp = updatedCampaigns.find((c) => c.id === campaignId);
+        if (activatedCamp) {
+          triggerBrowserLocalNotification(toTitleCase(activatedCamp.title), toTitleCase(activatedCamp.message));
+        }
+      }
+    } catch (e) {
+      console.error('Error cambiando estado de campaña:', e);
+    }
+  };
+
+  // 🌟 IDENTIFICADOR ÚNICO DEL CLIENTE EN EXPEDIENTE PARA PERMITIR SOLO 1 VOTO Y 1 RESEÑA POR USUARIO 🌟
+  const currentExpedienteClientKey = useMemo(() => {
+    if (!clientExpedienteData?.client) return '';
+    return String(
+      clientExpedienteData.client.id ||
+      cleanPhoneDigits(clientExpedienteData.client.phone) ||
+      clientExpedienteData.client.email ||
+      clientExpedienteData.client.name ||
+      ''
+    ).toLowerCase();
+  }, [clientExpedienteData]);
+
+  const currentClientExistingReview = useMemo(() => {
+    if (!currentExpedienteClientKey) return null;
+    const cNameLower = String(clientExpedienteData?.client?.name || '').toLowerCase();
+    return reviewsList.find((r: any) =>
+      String(r.clientKey || r.workOrderId || '').toLowerCase() === currentExpedienteClientKey ||
+      (cNameLower && String(r.clientName || '').toLowerCase() === cNameLower)
+    ) || null;
+  }, [reviewsList, currentExpedienteClientKey, clientExpedienteData]);
+
+  // 🌟 REACCIÓN DE 1 CLIC (👍 LIKE / 👎 DISLIKE) ÚNICA POR CLIENTE 🌟
+  const handleQuickClientReaction = async (reactionType: 'like' | 'dislike') => {
+    if (!currentExpedienteClientKey) return;
+    setIsSubmittingReview(true);
+    try {
+      const cName = toTitleCase(clientExpedienteData?.client?.name || 'Cliente Verificado');
+      const latestService = clientExpedienteData?.serviceHistory?.[0]?.service?.name || clientExpedienteData?.serviceHistory?.[0]?.serviceType || 'Cliente Verificado';
+
+      const updatedReview: ReviewItem = {
+        id: currentClientExistingReview?.id || `rev-${Date.now()}`,
+        clientKey: currentExpedienteClientKey,
+        clientName: cName,
+        rating: reactionType === 'like' ? 5 : 2,
+        reaction: reactionType,
+        comment: currentClientExistingReview?.comment ? toTitleCase(currentClientExistingReview.comment) : '',
+        serviceName: latestService,
+        createdAt: new Date().toISOString()
+      };
+
+      const filteredOthers = reviewsList.filter((r: any) =>
+        String(r.clientKey || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
+        String(r.clientName || '').toLowerCase() !== cName.toLowerCase()
+      );
+
+      const updatedReviews = [updatedReview, ...filteredOthers];
+      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: updatedReviews, campaigns: pushCampaignsList };
+
+      await apiFetch('/api/tenants/config', {
+        method: 'PUT',
+        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
+      });
+
+      setReviewsList(updatedReviews);
+      setLocalLoyalty(updatedLoyaltyConfig);
+      setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
+    } catch (e) {
+      alert('Error registrando tu reacción.');
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  // 🌟 GUARDAR RESEÑA ÚNICA POR CLIENTE (CON LETRA CAPITALIZADA AUTOMÁTICA) 🌟
+  const handleSaveUniqueClientReview = async () => {
+    if (!currentExpedienteClientKey) return;
+    setIsSubmittingReview(true);
+    try {
+      const cName = toTitleCase(clientExpedienteData?.client?.name || 'Cliente Verificado');
+      const latestService = clientExpedienteData?.serviceHistory?.[0]?.service?.name || clientExpedienteData?.serviceHistory?.[0]?.serviceType || 'Cliente Verificado';
+
+      const newReview: ReviewItem = {
+        id: currentClientExistingReview?.id || `rev-${Date.now()}`,
+        clientKey: currentExpedienteClientKey,
+        clientName: cName,
+        rating: reviewRating,
+        reaction: reviewRating >= 4 ? 'like' : 'dislike',
+        comment: toTitleCase(reviewComment.trim()),
+        serviceName: latestService,
+        createdAt: new Date().toISOString()
+      };
+
+      const filteredOthers = reviewsList.filter((r: any) =>
+        String(r.clientKey || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
+        String(r.clientName || '').toLowerCase() !== cName.toLowerCase()
+      );
+
+      const updatedReviews = [newReview, ...filteredOthers];
+      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: updatedReviews, campaigns: pushCampaignsList };
+
+      await apiFetch('/api/tenants/config', {
+        method: 'PUT',
+        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
+      });
+
+      setReviewsList(updatedReviews);
+      setLocalLoyalty(updatedLoyaltyConfig);
+      setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
+      setIsEditingClientReview(false);
+      alert('⭐ ¡Tu calificación oficial ha sido guardada!');
+    } catch (e) {
+      alert('Error guardando la reseña.');
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const fetchAgendaData = async () => {
+    try {
+      const resToday = await apiFetch('/api/appointments/today');
+      if (resToday.ok) { 
+        const data = await resToday.json(); 
+        if (data.success) setTodayOrders(normalizeOrders(data.appointments || [])); 
+      }
+      const resUpcoming = await apiFetch('/api/appointments/today?filter=upcoming');
+      if (resUpcoming.ok) { 
+        const data = await resUpcoming.json(); 
+        if (data.success) setUpcomingOrders(normalizeOrders(data.appointments || [])); 
+      }
+    } catch (err) { console.error("Error agenda:", err); }
+  };
+
+  const fetchTenantData = async () => {
+    try {
+      const resInfo = await apiFetch('/api/tenants/info');
+      if (resInfo.ok) {
+        const dataInfo = await resInfo.json();
+        if (dataInfo.success) {
+          let parsedLoyalty = dataInfo.tenant.loyaltyConfig;
+          if (typeof parsedLoyalty === 'string') {
+             try { parsedLoyalty = JSON.parse(parsedLoyalty); } catch (e) {}
+          }
+          let parsedHours = dataInfo.tenant.business_hours || dataInfo.tenant.businessHours;
+          if (typeof parsedHours === 'string') {
+             try { parsedHours = JSON.parse(parsedHours); } catch (e) {}
+          }
+          let parsedPortfolio = dataInfo.tenant.portfolio;
+          if (typeof parsedPortfolio === 'string') {
+             try { parsedPortfolio = JSON.parse(parsedPortfolio); } catch (e) {}
+          }
+
+          const updatedTenant = {
+            ...dataInfo.tenant,
+            loyaltyConfig: parsedLoyalty,
+            business_hours: parsedHours,
+            portfolio: parsedPortfolio
+          };
+
+          setTenantInfo(updatedTenant);
+          if (parsedHours) setLocalHours(parsedHours);
+          if (parsedPortfolio) setLocalPortfolio(parsedPortfolio);
+          if (parsedLoyalty) {
+            setLocalLoyalty(parsedLoyalty);
+            if (Array.isArray(parsedLoyalty.reviews)) {
+              setReviewsList(parsedLoyalty.reviews);
+            }
+            if (Array.isArray(parsedLoyalty.campaigns)) {
+              setPushCampaignsList(parsedLoyalty.campaigns);
+            }
+          }
+          if (dataInfo.tenant?.id) {
+            fetchPushCampaigns(dataInfo.tenant.id);
+          }
+        }
+      }
+      const resServices = await apiFetch('/api/services');
+      if (resServices.ok) {
+        const dataServices = await resServices.json();
+        if (dataServices.success && dataServices.services.length > 0) {
+          setServicesList(dataServices.services);
+          const firstActive = dataServices.services.find((s: any) => s.isActive !== false);
+          if (firstActive) setSelectedServiceType(firstActive.id);
+        }
+      }
+      fetchAgendaData();
+      
+      const resStaff = await apiFetch('/api/staff');
+      if (resStaff.ok) { 
+        const data = await resStaff.json(); 
+        if (data.success) {
+          const mappedStaff = data.staff.map((s: any) => ({ ...s, isActive: s.isActive ?? true }));
+          setStaffList(mappedStaff);
+        } 
+      } else {
+        setStaffList([{ id: 'stf-1', name: 'Admin Principal', role: 'Gerente / General', isActive: true }]);
+      }
+    } catch (err) { 
+      setStaffList([{ id: 'stf-1', name: 'Personal (Demo)', role: 'General', isActive: true }]);
+    }
+  };
+
+  useEffect(() => {
+    if (safeTenantId) fetchTenantData();
+  }, [safeTenantId]);
+
+  // 📍 CÁLCULO AUTOMÁTICO DE DISTANCIA EN MILLAS ENTRE EL CLIENTE Y EL NEGOCIO (HAVERSINE)
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof navigator !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const userLat = pos.coords.latitude;
+          const userLon = pos.coords.longitude;
+          const tLat = Number((tenantInfo as any)?.latitude || 34.1478); // Default Pasadena CA si no tiene coords
+          const tLon = Number((tenantInfo as any)?.longitude || -118.1445);
+          const toRad = (v: number) => (v * Math.PI) / 180;
+          const R = 3958.8; // Radio de la Tierra en millas
+          const dLat = toRad(tLat - userLat);
+          const dLon = toRad(tLon - userLon);
+          const a =
+            Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(userLat)) * Math.cos(toRad(tLat)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+          const miles = (R * c).toFixed(1);
+          setClientDistanceMiles(miles);
+        },
+        () => {
+          setClientDistanceMiles('2.4');
+        }
+      );
+    } else {
+      setClientDistanceMiles('2.4');
+    }
+  }, [tenantInfo]);
+
+  const loadReports = async () => {
+    try {
+      const queryParams = new URLSearchParams({ startDate: reportStartDate, endDate: reportEndDate });
+      if (reportMechanic) queryParams.append('mechanicId', reportMechanic);
+      const res = await apiFetch(`/api/work-orders/reports?${queryParams.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) { setReportsData(data.reports || []); setReportPage(1); }
+      }
+
+      const currentYear = new Date().getFullYear();
+      const annualParams = new URLSearchParams({ startDate: `${currentYear}-01-01`, endDate: `${currentYear}-12-31` });
+      if (reportMechanic) annualParams.append('mechanicId', reportMechanic);
+      const resAnnual = await apiFetch(`/api/work-orders/reports?${annualParams.toString()}`);
+      if (resAnnual.ok) {
+        const dataAnnual = await resAnnual.json();
+        if (dataAnnual.success) { setAnnualReportsData(dataAnnual.reports || []); }
+      }
+    } catch (err) { console.error("Error cargando reportes", err); }
+  };
+
+  useEffect(() => { if (agendaFilter === 'reports') loadReports(); }, [agendaFilter]);
+
+  const ratingSummary = useMemo(() => {
+    if (!reviewsList || reviewsList.length === 0) {
+      return { avg: '5.0', count: 0, likes: 0, dislikes: 0 };
+    }
+    const sum = reviewsList.reduce((acc, r) => acc + Number(r.rating || 5), 0);
+    const likes = reviewsList.filter((r) => r.reaction === 'like' || (!r.reaction && Number(r.rating) >= 4)).length;
+    const dislikes = reviewsList.filter((r) => r.reaction === 'dislike' || (!r.reaction && Number(r.rating) <= 2)).length;
+    return {
+      avg: (sum / reviewsList.length).toFixed(1),
+      count: reviewsList.length,
+      likes,
+      dislikes
+    };
+  }, [reviewsList]);
+
+  const monthlyTrafficStats = useMemo(() => {
+    const monthsNames = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const fullMonthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+    const sourceList = annualReportsData.length > 0 ? annualReportsData : reportsData;
+
+    const counts = Array(12).fill(0);
+    const revenues = Array(12).fill(0);
+    const monthClients: Record<number, string[]> = {};
+    const monthPromos: Record<number, number> = {};
+    for (let i = 0; i < 12; i++) {
+      monthClients[i] = [];
+      monthPromos[i] = 0;
+    }
+
+    let discountsCount = 0;
+
+    sourceList.forEach((r: any) => {
+      const rawDate = r.date || r.createdAt;
+      const hasPromo = getReportDiscountInfo(r, servicesList) !== null;
+      if (hasPromo) discountsCount += 1;
+
+      if (rawDate) {
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          const m = d.getMonth();
+          counts[m] += 1;
+          revenues[m] += Number(r.cost || r.finalCost || 0);
+          if (hasPromo) monthPromos[m] += 1;
+
+          const cName = toTitleCase(String(r.clientName || 'Cliente General').trim());
+          if (cName && !monthClients[m].includes(cName)) {
+            monthClients[m].push(cName);
+          }
+        }
+      }
+    });
+
+    const maxCount = Math.max(...counts, 1);
+    const currentMonthIdx = new Date().getMonth();
+
+    let lowestMonthIdx = 0;
+    let lowestVal = Infinity;
+    let highestMonthIdx = 0;
+    let highestVal = -1;
+
+    for (let i = 0; i <= currentMonthIdx; i++) {
+      if (counts[i] < lowestVal) {
+        lowestVal = counts[i];
+        lowestMonthIdx = i;
+      }
+      if (counts[i] > highestVal) {
+        highestVal = counts[i];
+        highestMonthIdx = i;
+      }
+    }
+
+    const items = monthsNames.map((shortName, idx) => {
+      const uniqueClientsList = monthClients[idx] || [];
+      const avgTicket = counts[idx] > 0 ? Math.round(revenues[idx] / counts[idx]) : 0;
+      return {
+        index: idx,
+        shortName,
+        fullName: fullMonthNames[idx],
+        count: counts[idx],
+        uniqueUsersCount: uniqueClientsList.length,
+        clientsList: uniqueClientsList,
+        promosUsed: monthPromos[idx] || 0,
+        revenue: revenues[idx],
+        avgTicket,
+        heightPct: Math.max(10, Math.round((counts[idx] / maxCount) * 100)),
+        isLowest: idx === lowestMonthIdx && idx <= currentMonthIdx,
+        isHighest: idx === highestMonthIdx && counts[idx] > 0
+      };
+    });
+
+    return {
+      items,
+      lowestMonthName: fullMonthNames[lowestMonthIdx],
+      lowestMonthCount: lowestVal === Infinity ? 0 : lowestVal,
+      highestMonthName: fullMonthNames[highestMonthIdx],
+      highestMonthCount: Math.max(0, highestVal),
+      discountsCount
+    };
+  }, [annualReportsData, reportsData, servicesList]);
+
+  const convertImageToWebp = (file: File): Promise<File> => { 
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader(); reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new window.Image(); 
+        img.src = event.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas'); let width = img.width; let height = img.height;
+          if (width > height) { if (width > 1200) { height = Math.round((height *= 1200 / width)); width = 1200; } } else { if (height > 1200) { width = Math.round((width *= 1200 / height)); height = 1200; } }
+          canvas.width = width; canvas.height = height; const ctx = canvas.getContext('2d'); ctx?.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+              if (!blob) return reject(new Error('Fallo compresión WebP'));
+              resolve(new File([blob], `${file.name.substring(0, file.name.lastIndexOf('.')) || file.name}.webp`, { type: 'image/webp' }));
+            }, 'image/webp', 0.8);
+        }; img.onerror = (error: any) => reject(error);
+      }; reader.onerror = (error: any) => reject(error);
+    });
+  };
+
+  const uploadImageToSupabase = async (file: File, folderName: string) => {
+    try {
+      const fileName = `${folderName}-${Date.now()}.webp`; 
+      const filePath = `${folderName}/${fileName}`;
+      const { error } = await supabase.storage.from('autoflow').upload(filePath, file, { upsert: true, contentType: 'image/webp' });
+      return error ? null : filePath; 
+    } catch (err) { return null; }
+  };
+
+  const handleSaveHours = async () => {
+    setIsSubmittingConfig(true);
+    try {
+      const res = await apiFetch('/api/tenants/config', { 
+        method: 'PUT', body: JSON.stringify({ business_hours: localHours }) 
+      });
+      if (res.ok) alert('✅ Horarios actualizados correctamente.');
+      else alert('Error guardando los horarios.');
+    } catch (e) { alert('Error de red.'); }
+    finally { setIsSubmittingConfig(false); }
+  };
+
+  const handleSaveLoyalty = async () => {
+    setIsSubmittingLoyalty(true);
+    try {
+      const payloadLoyalty = { ...localLoyalty, reviews: reviewsList, campaigns: pushCampaignsList };
+      const res = await apiFetch('/api/tenants/config', { 
+        method: 'PUT', body: JSON.stringify({ loyaltyConfig: payloadLoyalty }) 
+      });
+      if (res.ok) {
+        alert('✅ Programa de fidelización actualizado.');
+        setTenantInfo(prev => prev ? { ...prev, loyaltyConfig: payloadLoyalty } : null);
+      }
+      else alert('Error guardando configuración.');
+    } catch (e) { alert('Error de red.'); }
+    finally { setIsSubmittingLoyalty(false); }
+  };
+
+  const handlePortfolioImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      try {
+        const webpFile = await convertImageToWebp(e.target.files[0]);
+        setPortfolioFormFile(webpFile);
+        setPortfolioFormPreview(URL.createObjectURL(webpFile));
+      } catch (err) {
+        alert('Error procesando la imagen. Intenta con otra.');
+      }
+    }
+  };
+
+  const handleEditPortfolioItem = (idx: number) => {
+    const item = localPortfolio[idx];
+    setPortfolioEditingIndex(idx);
+    setPortfolioFormTitle(item.title || '');
+    setPortfolioFormDesc(item.description || '');
+    setPortfolioFormPreview(item.url); 
+    setPortfolioFormFile(null); 
+    setIsAddingPortfolio(true);
+  };
+
+  const handleSavePortfolioItem = async () => {
+    if (!acceptedContentTerms) {
+      alert('Debes aceptar la declaración de contenido para poder publicar.');
+      return;
+    }
+    if (!portfolioFormTitle) {
+      alert('Debes escribir un título para la imagen.');
+      return;
+    }
+    if (portfolioEditingIndex === null && !portfolioFormFile) {
+      alert('Debes seleccionar una imagen para un trabajo nuevo.');
+      return;
+    }
+
+    setIsSubmittingConfig(true);
+    try {
+      let finalUrl = portfolioEditingIndex !== null ? localPortfolio[portfolioEditingIndex].url : '';
+      
+      if (portfolioFormFile) {
+        const path = await uploadImageToSupabase(portfolioFormFile, 'portfolio');
+        if (!path) throw new Error('Fallo al subir a Supabase');
+        finalUrl = path;
+      }
+
+      const newItem: PortfolioItem = { 
+        url: finalUrl, 
+        title: toTitleCase(portfolioFormTitle), 
+        description: toTitleCase(portfolioFormDesc) 
+      };
+      
+      let updatedPortfolio = [...localPortfolio];
+      if (portfolioEditingIndex !== null) {
+        updatedPortfolio[portfolioEditingIndex] = newItem; 
+      } else {
+        updatedPortfolio.push(newItem); 
+      }
+
+      const res = await apiFetch('/api/tenants/config', { 
+        method: 'PUT', body: JSON.stringify({ portfolio: updatedPortfolio }) 
+      });
+      
+      if (res.ok) {
+        setLocalPortfolio(updatedPortfolio);
+        handleCancelPortfolioForm();
+      } else {
+        alert('Error guardando el ítem en la base de datos.');
+      }
+    } catch (err) { alert('Error de conexión.'); }
+    finally { setIsSubmittingConfig(false); }
+  };
+
+  const handleRemovePortfolioItem = async (indexToRemove: number) => {
+    const updatedPortfolio = localPortfolio.filter((_, idx) => idx !== indexToRemove);
+    setLocalPortfolio(updatedPortfolio);
+    await apiFetch('/api/tenants/config', { 
+      method: 'PUT', body: JSON.stringify({ portfolio: updatedPortfolio }) 
+    });
+  };
+
+  const handleCancelPortfolioForm = () => {
+    setIsAddingPortfolio(false);
+    setPortfolioEditingIndex(null);
+    setPortfolioFormTitle('');
+    setPortfolioFormDesc('');
+    setPortfolioFormFile(null);
+    setPortfolioFormPreview(null);
+  };
+
+  const handleCatalogImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      try {
+        const webpFile = await convertImageToWebp(e.target.files[0]);
+        setCatalogFormFile(webpFile);
+        setCatalogFormPreview(URL.createObjectURL(webpFile));
+      } catch (err) {
+        alert('Error procesando la imagen del catálogo.');
+      }
+    }
+  };
+
+  const handleEditCatalogService = (srv: ServiceInfo) => {
+    setCatalogEditingId(srv.id);
+    setCatalogFormName(srv.name);
+    setCatalogFormDesc(srv.description || '');
+    setCatalogFormPrice(formatCurrency(srv.price));
+    setCatalogFormDuration(String(srv.durationMinutes || 30));
+    setCatalogFormPreview(srv.imageUrl || null);
+    setCatalogFormFile(null);
+    setIsCatalogModalVisible(true);
+  };
+
+  const handleSaveCatalogService = async () => {
+    if (!acceptedContentTerms) {
+      alert('Debes aceptar la declaración de contenido para poder publicar.');
+      return;
+    }
+    if (!catalogFormName || !catalogFormPrice) { 
+      alert('Por favor, ingresa el nombre y el precio.'); 
+      return; 
+    }
+    setIsSubmitting(true);
+    try {
+      let finalImageUrl = catalogFormPreview && !catalogFormPreview.startsWith('blob:') ? catalogFormPreview : null;
+
+      if (catalogFormFile) {
+        const path = await uploadImageToSupabase(catalogFormFile, 'services');
+        if (path) finalImageUrl = path;
+      }
+
+      const cleanPrice = catalogFormPrice.replace(/[^0-9.]/g, '');
+      const method = catalogEditingId ? 'PUT' : 'POST';
+      const endpoint = catalogEditingId ? `/api/services/${catalogEditingId}` : '/api/services';
+      
+      const res = await apiFetch(endpoint, {
+        method, 
+        body: JSON.stringify({ 
+          name: toTitleCase(catalogFormName), 
+          description: toTitleCase(catalogFormDesc), 
+          price: cleanPrice, 
+          durationMinutes: Number(catalogFormDuration),
+          imageUrl: finalImageUrl 
+        })
+      });
+      
+      const data = await res.json();
+      if (data.success && data.service) {
+        if (catalogEditingId) { setServicesList(prev => prev.map(s => s.id === catalogEditingId ? data.service : s)); } 
+        else { setServicesList(prev => [...prev, data.service]); }
+        setIsCatalogModalVisible(false); 
+        setCatalogEditingId(null); 
+        setCatalogFormName(''); 
+        setCatalogFormDesc('');
+        setCatalogFormPrice(''); 
+        setCatalogFormDuration('30');
+        setCatalogFormFile(null);
+        setCatalogFormPreview(null);
+      } else { alert('Error del servidor: ' + data.message); }
+    } catch (error) { alert('Error de conexión al guardar el servicio.'); } 
+    finally { setIsSubmitting(false); }
+  };
+
+  // 🌟 MOTOR MULTITURNO: PERMITE AGENDAR N CITAS EN PARALELO SI HAY N ESTILISTAS ACTIVOS 🌟
+  // Devuelve la lista de estilistas que están LIBRES en una fecha y hora determinadas
+  const getFreeStaffForSlot = (dateStr: string, timeStr: string, serviceIdStr: string): StaffInfo[] => {
+    const activeMembers = staffList.filter(s => s.isActive !== false);
+    if (!dateStr || !timeStr || activeMembers.length === 0) return activeMembers;
+
+    const serviceSelected = servicesList.find(s => s.id === serviceIdStr);
+    const durationMin = serviceSelected?.durationMinutes || 30;
+    const slotStart = parseAppointmentWallClock(dateStr, timeStr);
+    const slotEnd = new Date(slotStart.getTime() + durationMin * 60000);
+
+    const dayAppointments = getMergedUniqueAppointments(todayOrders, upcomingOrders).filter(app => {
+      if (!app.appointmentDate) return false;
+      return app.appointmentDate.startsWith(dateStr);
+    });
+
+    const overlappingApps = dayAppointments.filter(app => {
+      const appStart = parseAppointmentWallClock(app);
+      const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
+      const appEnd = new Date(appStart.getTime() + appDuration * 60000);
+      return slotStart < appEnd && slotEnd > appStart;
+    });
+
+    // Estilistas explícitamente ocupados en esa franja
+    const busyStaffIds = overlappingApps
+      .map(app => app.staffId || app.metadata?.assignedStaffId)
+      .filter(Boolean);
+
+    // Citas sin estilista específico asignado consumen 1 silla libre cada una
+    const unassignedOverlappingCount = overlappingApps.filter(
+      app => !app.staffId && !app.metadata?.assignedStaffId
+    ).length;
+
+    const explicitlyFreeStaff = activeMembers.filter(stf => !busyStaffIds.includes(stf.id));
+    if (unassignedOverlappingCount > 0) {
+      return explicitlyFreeStaff.slice(unassignedOverlappingCount);
+    }
+    return explicitlyFreeStaff;
+  };
+
+  useEffect(() => {
+    if (!appointmentDate || !selectedServiceType) {
+      setAvailableTimes([]);
+      return;
+    }
+
+    const serviceSelected = servicesList.find(s => s.id === selectedServiceType);
+    const durationMin = serviceSelected?.durationMinutes || 30;
+    const activeMembers = staffList.filter(s => s.isActive !== false);
+
+    const dayAppointments = getMergedUniqueAppointments(todayOrders, upcomingOrders).filter(app => {
+      if (!app.appointmentDate) return false;
+      return app.appointmentDate.startsWith(appointmentDate);
+    });
+
+    const [year, month, day] = appointmentDate.split('-').map(Number);
+    const dateObj = new Date(year, month - 1, day);
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const selectedDayName = dayNames[dateObj.getDay()];
+
+    let openHour = 8;
+    let closeHour = 18;
+    let isOpen = true;
+
+    const currentHours = tenantInfo?.business_hours || tenantInfo?.businessHours || localHours;
+
+    if (currentHours && currentHours[selectedDayName]) {
+      const dayConfig = currentHours[selectedDayName];
+      isOpen = dayConfig.isOpen !== false; 
+      if (!isOpen) {
+        setAvailableTimes([]);
+        setAppointmentTime('');
+        return;
+      }
+      if (dayConfig.open) openHour = parseInt(dayConfig.open.split(':')[0], 10);
+      if (dayConfig.close) closeHour = parseInt(dayConfig.close.split(':')[0], 10);
+    } else if (currentHours && Object.keys(currentHours).length > 0) {
+      isOpen = false;
+      setAvailableTimes([]);
+      setAppointmentTime('');
+      return;
+    }
+
+    const slots: string[] = [];
+    const now = new Date();
+    // ⏳ REGLA DE NEGOCIO: Mínimo 3 horas de anticipación para agendar un servicio y proteger la agenda del negocio
+    const minBookingTime = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+
+    for (let h = openHour; h < closeHour; h++) {
+      for (let m = 0; m < 60; m += 30) {
+        const timeString = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+        const slotStart = parseAppointmentWallClock(appointmentDate, timeString);
+        const slotEnd = new Date(slotStart.getTime() + durationMin * 60000);
+
+        if (slotStart < minBookingTime) continue;
+
+        if (selectedBookingStaff) {
+          // 1. El cliente eligió un estilista específico: solo revisamos si ESE estilista está ocupado
+          const isThisStaffBusy = dayAppointments.some(app => {
+            const appStaff = app.staffId || app.metadata?.assignedStaffId;
+            if (appStaff !== selectedBookingStaff) return false;
+            const appStart = parseAppointmentWallClock(app);
+            const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
+            const appEnd = new Date(appStart.getTime() + appDuration * 60000);
+            return slotStart < appEnd && slotEnd > appStart;
+          });
+
+          if (!isThisStaffBusy) {
+            slots.push(timeString);
+          }
+        } else if (activeMembers.length > 0) {
+          // 2. Eligió "Cualquiera disponible": si tienes 3 estilistas, permite hasta 3 citas en paralelo
+          const freeMembers = getFreeStaffForSlot(appointmentDate, timeString, selectedServiceType);
+          if (freeMembers.length > 0) {
+            slots.push(timeString);
+          }
+        } else {
+          // 3. Fallback si aún no ha registrado estilistas (1 cita por turno)
+          const isOverlap = dayAppointments.some(app => {
+            const appStart = parseAppointmentWallClock(app);
+            const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
+            const appEnd = new Date(appStart.getTime() + appDuration * 60000);
+            return slotStart < appEnd && slotEnd > appStart;
+          });
+          if (!isOverlap) {
+            slots.push(timeString);
+          }
+        }
+      }
+    }
+    
+    setAvailableTimes(slots);
+    if (appointmentTime && !slots.includes(appointmentTime)) setAppointmentTime('');
+  }, [appointmentDate, selectedServiceType, selectedBookingStaff, todayOrders, upcomingOrders, servicesList, localHours, tenantInfo, staffList]);
+
+  const pendingReferralsByPhone = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    getMergedUniqueAppointments(todayOrders, upcomingOrders).forEach((o: any) => {
+      const ref = cleanPhoneDigits(o.metadata?.referredBy || o.metadata?.preferences?.referredBy);
+      if (ref && ref.length >= 7) {
+        if (!map[ref]) map[ref] = [];
+        const cName = toTitleCase(o.clientName || 'Un amigo');
+        if (!map[ref].includes(cName)) map[ref].push(cName);
+      }
+    });
+    return map;
+  }, [todayOrders, upcomingOrders]);
+
+  useEffect(() => {
+    if (!isBookingModalOpen) return;
+    const cleanPhone = cleanPhoneDigits(clientPhone);
+    const cleanEmail = clientEmail.trim().toLowerCase();
+    const query = cleanEmail.includes('@') ? cleanEmail : (cleanPhone.length >= 7 ? cleanPhone : '');
+    
+    if (!query) {
+      setBookingClientCoupons(0);
+      setIsExistingClient(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiFetch(`/api/clients/history/${query}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.client) {
+            let meta = data.client.metadata;
+            if (typeof meta === 'string') {
+              try { meta = JSON.parse(meta); } catch (e) { meta = {}; }
+            }
+            const dbCoupons = Number(meta?.earnedReferralDiscounts || 0);
+            const cPhoneClean = cleanPhoneDigits(data.client.phone || clientPhone);
+            const livePending = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+            setBookingClientCoupons(Math.max(0, dbCoupons + livePending));
+
+            const hasHistory = (data.serviceHistory && data.serviceHistory.length > 0) || Number(data.client.loyaltyVisits || 0) > 0;
+            setIsExistingClient(hasHistory);
+            if (hasHistory) setReferredByPhone('');
+          } else {
+            const livePending = cleanPhone && pendingReferralsByPhone[cleanPhone] ? pendingReferralsByPhone[cleanPhone].length : 0;
+            setBookingClientCoupons(livePending);
+            setIsExistingClient(false);
+          }
+        } else {
+          const livePending = cleanPhone && pendingReferralsByPhone[cleanPhone] ? pendingReferralsByPhone[cleanPhone].length : 0;
+          setBookingClientCoupons(livePending);
+          setIsExistingClient(false);
+        }
+      } catch (e) {}
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [clientEmail, clientPhone, isBookingModalOpen, pendingReferralsByPhone]);
+
+  const availableRoles = useMemo(() => {
+    if (isAutomotive) return ['Mecánico General', 'Especialista en Frenos', 'Electricista Automotriz', 'Técnico de Suspensión', 'Jefe de Taller'];
+    if (isSpa) return ['Masajista Profesional', 'Cosmetóloga', 'Esteticista', 'Terapeuta Corporal', 'Especialista en Spa'];
+    if (isBarbershop) return ['Barbero Senior', 'Estilista', 'Especialista en Barba', 'Colorista', 'Barbero Master'];
+    return ['Especialista', 'Técnico', 'Asistente', 'Gerente'];
+  }, [isAutomotive, isSpa, isBarbershop]);
+
+  const activeStaffList = useMemo(() => staffList.filter(s => s.isActive !== false), [staffList]);
+  const activeCatalogServices = useMemo(() => servicesList.filter(s => s.isActive !== false), [servicesList]);
+  
+  const paginatedReports = useMemo(() => {
+    if (isPrinting) return reportsData;
+    const start = (reportPage - 1) * ITEMS_PER_PAGE;
+    const sliced = reportsData.slice(start, start + ITEMS_PER_PAGE);
+    const padded: any[] = [...sliced];
+    if (reportsData.length > 0 && !isPrinting) {
+      while (padded.length < ITEMS_PER_PAGE) padded.push({ _empty: true, id: `empty-${padded.length}` });
+    }
+    return padded;
+  }, [reportsData, reportPage, isPrinting]);
+
+  const totalRevenue = useMemo(() => reportsData.reduce((acc, curr: any) => acc + (Number(curr.cost || curr.finalCost) || 0), 0), [reportsData]);
+  const totalPages = Math.ceil(reportsData.length / ITEMS_PER_PAGE) || 1;
+
+  const handleImageChange = async (e: React.ChangeEvent<HTMLInputElement>, type: 'old' | 'new') => {
+    if (e.target.files && e.target.files[0]) {
+      const rawFile = e.target.files[0];
+      try {
+        const webpFile = await convertImageToWebp(rawFile);
+        const url = URL.createObjectURL(webpFile);
+        if (type === 'old') { setOldPartImage(webpFile); setOldPartPreview(url); } else { setNewPartImage(webpFile); setNewPartPreview(url); }
+      } catch (err) { alert('Error procesando la imagen.'); }
+    }
+  };
+
+  const handleOpenPOS = async (order: any) => {
+    let safeOrder = { ...order };
+    if (typeof safeOrder.metadata === 'string') {
+       try { safeOrder.metadata = JSON.parse(safeOrder.metadata); } catch(e){}
+    }
+    if (typeof safeOrder.clientMetadata === 'string') {
+       try { safeOrder.clientMetadata = JSON.parse(safeOrder.clientMetadata); } catch(e){}
+    }
+    
+    setSelectedOrder(safeOrder);
+    
+    if (safeOrder.service?.price) {
+      setFinalCost(`$ ${Number(safeOrder.service.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+    } else if (safeOrder.estimatedCost) {
+      setFinalCost(`$ ${Number(safeOrder.estimatedCost).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+    } else {
+      setFinalCost('');
+    }
+
+    setClientVisits(null);
+    setRewardApplied(false);
+    setApplyReferralDiscount(false);
+    setActiveReferredBy(null);
+    setAssignedMechanicId(safeOrder.staffId || safeOrder.metadata?.assignedStaffId || ''); 
+    
+    if (tenantInfo?.loyaltyConfig?.isActive && safeOrder.clientEmail) {
+      setIsCheckingLoyalty(true);
+      try {
+        const res = await apiFetch(`/api/clients/history/${safeOrder.clientEmail}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.client) {
+            const visitsFromWallet = data.client.loyaltyVisits;
+            const closedVisits = visitsFromWallet !== undefined ? visitsFromWallet : (data.serviceHistory ? data.serviceHistory.length : 0);
+            setClientVisits(closedVisits);
+
+            let parsedClientMeta = data.client.metadata;
+            if (typeof parsedClientMeta === 'string') {
+              try { parsedClientMeta = JSON.parse(parsedClientMeta); } catch (e) { parsedClientMeta = {}; }
+            }
+            setSelectedOrder((prev: any) => prev ? { ...prev, clientMetadata: parsedClientMeta || {} } : prev);
+          }
+        }
+      } catch (err) {
+        console.error("Error verificando fidelidad:", err);
+      } finally {
+        setIsCheckingLoyalty(false);
+      }
+    }
+
+    const refPhone = safeOrder.metadata?.referredBy || safeOrder.metadata?.preferences?.referredBy || '';
+    if (refPhone && refPhone.trim() !== '') {
+      setActiveReferredBy(refPhone.trim());
+    }
+  };
+
+  const handleApplyLoyaltyReward = () => {
+    if (!tenantInfo?.loyaltyConfig) return;
+    
+    if (tenantInfo.loyaltyConfig.rewardType === 'free_service') {
+      setFinalCost('$ 0.00');
+      setMechanicNotes(prev => `🎉 PREMIO DE FIDELIDAD APLICADO (Servicio Gratis). ${prev}`.trim());
+    } else if (tenantInfo.loyaltyConfig.rewardType === 'discount') {
+      let basePrice = 0;
+      if (selectedOrder?.service?.price) {
+        basePrice = Number(selectedOrder.service.price);
+      } else {
+        basePrice = Number(finalCost.replace(/[^0-9.]/g, ''));
+      }
+      
+      const discount = tenantInfo.loyaltyConfig.rewardValue || 50; 
+      const newVal = basePrice - (basePrice * (discount / 100));
+      
+      setFinalCost(`$ ${newVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+      setMechanicNotes(prev => `🎉 PREMIO DE FIDELIDAD APLICADO (${discount}% Descuento). ${prev}`.trim());
+    }
+    
+    setRewardApplied(true);
+    alert('¡Recompensa de visitas aplicada con éxito al total!');
+  };
+
+  const toggleReferralDiscount = (val: boolean) => {
+    setApplyReferralDiscount(val);
+    if (!tenantInfo?.loyaltyConfig) return;
+
+    let basePrice = 0;
+    if (selectedOrder?.service?.price) {
+       basePrice = Number(selectedOrder.service.price);
+    } else if (selectedOrder?.estimatedCost) {
+       basePrice = Number(selectedOrder.estimatedCost);
+    } else {
+       basePrice = Number(finalCost.replace(/[^0-9.]/g, ''));
+    }
+
+    if (val) {
+      const discount = tenantInfo.loyaltyConfig.referralDiscountPercent || 20; 
+      const newVal = basePrice - (basePrice * (discount / 100));
+      setFinalCost(`$ ${newVal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+      setMechanicNotes(prev => `🏆 DESCUENTO POR REFERIR APLICADO (${discount}%). ${prev}`.trim());
+    } else {
+      setFinalCost(`$ ${basePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+      setMechanicNotes(prev => prev.replace(new RegExp(`(🤝|🏆) DESCUENTO (POR VENIR RECOMENDADO|DE REFERIDO APLICADO|POR REFERIR APLICADO) \\(\\d+%\\)\\. `), ''));
+    }
+  };
+
+  const handleCompleteWorkOrder = async () => {
+    if (!assignedMechanicId) { alert("Asigne al personal responsable."); return; }
+    setIsSubmitting(true);
+    try {
+      let oldImageUrl = await (oldPartImage ? uploadImageToSupabase(oldPartImage, 'old') : null);
+      let newImageUrl = await (newPartImage ? uploadImageToSupabase(newPartImage, 'new') : null);
+      const cleanCost = finalCost.replace(/[^0-9.]/g, '');
+
+      const payload = { 
+        finalCost: cleanCost, exitMileage, oldParts: toTitleCase(oldParts), newParts: toTitleCase(newParts), mechanicNotes: toTitleCase(mechanicNotes), nextServiceDate: nextServiceTime, 
+        staffId: assignedMechanicId, oldPartImageUrl: oldImageUrl, newPartImageUrl: newImageUrl,
+        rewardApplied: rewardApplied, 
+        referralDiscountApplied: applyReferralDiscount 
+      };
+      
+      const res = await apiFetch(`/api/appointments/${selectedOrder.id}/complete`, { method: 'PUT', body: JSON.stringify(payload) });
+      if(res.ok){
+         alert('✅ Orden cerrada con éxito.');
+         setSelectedOrder(null); setOldPartImage(null); setOldPartPreview(null); setNewPartImage(null); setNewPartPreview(null); setOldParts(''); setNewParts(''); setMechanicNotes(''); setClientVisits(null); setRewardApplied(false); setApplyReferralDiscount(false); setActiveReferredBy(null);
+         fetchAgendaData();
+      } else { alert('Error del servidor al guardar la orden.'); }
+    } catch (error) { alert('Error al cerrar orden.'); } finally { setIsSubmitting(false); }
+  };
+
+  // 🌟 CANCELAR CITA, LIBERAR EL ESPACIO EN LA AGENDA Y ENVIAR TELEGRAM + NOTIFICACIÓN PUSH 🌟
+  const openCancelAppointmentModal = (orderObj: any, origin: 'client' | 'staff') => {
+    setCancellingOrder(orderObj);
+    setCancelOrigin(origin);
+    setCancelReasonText('');
+  };
+
+  const handleConfirmCancelAppointment = async () => {
+    if (!cancellingOrder?.id) return;
+    setIsCancellingApt(true);
+    try {
+      const reasonClean = cancelReasonText.trim()
+        ? toTitleCase(cancelReasonText.trim())
+        : (cancelOrigin === 'client' ? 'Cancelada por el cliente desde Expediente' : 'Cancelada desde el Portal Interno');
+
+      // 1. Llamar al endpoint de cancelación en el backend (que envía Telegram + Push Expo + libera BD)
+      let backendOk = false;
+      try {
+        const resCancel = await apiFetch(`/api/appointments/${cancellingOrder.id}/cancel`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            reason: reasonClean,
+            cancelledBy: cancelOrigin,
+            clientName: cancellingOrder.clientName || clientExpedienteData?.client?.name || 'Cliente',
+            clientPhone: cancellingOrder.clientPhone || clientExpedienteData?.client?.phone || '',
+            serviceName: cancellingOrder.service?.name || cancellingOrder.serviceType || 'Servicio',
+            appointmentDate: cancellingOrder.appointmentDate || cancellingOrder.date || '',
+            time: cancellingOrder.time || ''
+          })
+        });
+        if (resCancel.ok) backendOk = true;
+      } catch (e) {}
+
+      // 2. Remover inmediatamente de todayOrders y upcomingOrders en memoria para liberar el espacio al instante
+      setTodayOrders((prev) => prev.filter((o) => o.id !== cancellingOrder.id));
+      setUpcomingOrders((prev) => prev.filter((o) => o.id !== cancellingOrder.id));
+      if (selectedOrder?.id === cancellingOrder.id) {
+        setSelectedOrder(null);
+      }
+
+      // 3. Disparar Notificación Push local en el navegador / sistema operativo
+      const datePretty = (cancellingOrder.appointmentDate || cancellingOrder.date)
+        ? new Date(cancellingOrder.appointmentDate || cancellingOrder.date).toLocaleDateString('es-ES')
+        : 'Hoy';
+      const timePretty = cancellingOrder.time || '';
+      const pushTitle = `❌ Cita Cancelada — Turno Liberado (${timePretty || datePretty})`;
+      const pushBody = `La cita de ${toTitleCase(cancellingOrder.clientName || clientExpedienteData?.client?.name || 'Cliente')} (${toTitleCase(cancellingOrder.service?.name || cancellingOrder.serviceType || 'Servicio')}) fue cancelada. ¡El espacio de las ${timePretty || datePretty} ya está disponible nuevamente!`;
+      triggerBrowserLocalNotification(pushTitle, pushBody);
+
+      setCancellingOrder(null);
+      setCancelReasonText('');
+      fetchAgendaData();
+      alert('✅ Cita cancelada con éxito. El espacio quedó libre en la agenda y se envió la alerta por Telegram y Notificación Push.');
+    } catch (error) {
+      alert('Error al cancelar la cita.');
+    } finally {
+      setIsCancellingApt(false);
+    }
+  };
+
+  // 🕒 Calcula cuántas horas faltan para la cita (para políticas de 6h recordatorio y 3h límite de cancelación)
+  const getHoursUntilAppointment = (orderObj: any): number => {
+    const rawDate = orderObj?.appointmentDate || orderObj?.date;
+    if (!rawDate) return 24;
+    const datePart = String(rawDate).split('T')[0];
+    const timePart = orderObj?.time || (String(rawDate).includes('T') ? String(rawDate).split('T')[1].substring(0, 5) : '12:00');
+    const localTarget = new Date(`${datePart}T${timePart}:00`);
+    const targetTime = !isNaN(localTarget.getTime()) ? localTarget.getTime() : new Date(rawDate).getTime();
+    return Number(((targetTime - Date.now()) / (1000 * 60 * 60)).toFixed(1));
+  };
+
+  // ✅ CONFIRMAR ASISTENCIA A LA CITA (6 HORAS ANTES) Y ENVIAR TELEGRAM + NOTIFICACIÓN PUSH
+  const handleConfirmAttendance = async (orderObj: any, confirmedBy: 'client' | 'staff' = 'client') => {
+    if (!orderObj?.id) return;
+    setConfirmingAptId(orderObj.id);
+    try {
+      const cName = toTitleCase(orderObj.clientName || clientExpedienteData?.client?.name || 'Cliente');
+      const sName = toTitleCase(orderObj.service?.name || orderObj.serviceType || 'Servicio General');
+      const timeStr = orderObj.time || 'Hora programada';
+
+      await apiFetch(`/api/appointments/${orderObj.id}/confirm`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          confirmedBy,
+          clientName: cName,
+          clientPhone: orderObj.clientPhone || clientExpedienteData?.client?.phone || '',
+          serviceName: sName,
+          appointmentDate: orderObj.appointmentDate || orderObj.date || '',
+          time: timeStr
+        })
+      });
+
+      const markConfirmed = (list: any[]) =>
+        list.map((o) =>
+          o.id === orderObj.id
+            ? {
+                ...o,
+                status: 'confirmed',
+                metadata: { ...(o.metadata || {}), attendanceConfirmed: true, confirmedAt: new Date().toISOString() }
+              }
+            : o
+        );
+
+      setTodayOrders(markConfirmed);
+      setUpcomingOrders(markConfirmed);
+
+      triggerBrowserLocalNotification(
+        `✅ Asistencia Confirmada (${timeStr})`,
+        `${cName} confirmó su asistencia para ${sName} a las ${timeStr}. ¡Todo listo en agenda!`
+      );
+
+      fetchAgendaData();
+      alert(`✅ ¡Asistencia confirmada! Se notificó al negocio por Telegram y Notificación Push.`);
+    } catch (e) {
+      alert('Error al confirmar la asistencia.');
+    } finally {
+      setConfirmingAptId(null);
+    }
+  };
+
+  // 🔔 ENVIAR RECORDATORIO DE 6 HORAS (SOLICITAR CONFIRMACIÓN O CANCELACIÓN A TIEMPO)
+  const handleSendSixHourReminder = async (orderObj: any) => {
+    if (!orderObj?.id) return;
+    setSendingReminderAptId(orderObj.id);
+    try {
+      const cName = toTitleCase(orderObj.clientName || 'Cliente');
+      const sName = toTitleCase(orderObj.service?.name || orderObj.serviceType || 'Servicio General');
+      const timeStr = orderObj.time || 'hoy';
+
+      await apiFetch(`/api/appointments/${orderObj.id}/remind`, {
+        method: 'POST',
+        body: JSON.stringify({
+          clientName: cName,
+          clientPhone: orderObj.clientPhone || '',
+          serviceName: sName,
+          appointmentDate: orderObj.appointmentDate || orderObj.date || '',
+          time: timeStr
+        })
+      });
+
+      triggerBrowserLocalNotification(
+        `⏰ Recordatorio 6h antes — ${tenantInfo?.name || 'AutoFlow'}`,
+        `Hola ${cName}, te recordamos tu cita de ${sName} a las ${timeStr}. Confirma tu asistencia o cancela con al menos 3h de anticipación en tu Expediente.`
+      );
+
+      const markReminded = (list: any[]) =>
+        list.map((o) =>
+          o.id === orderObj.id
+            ? { ...o, metadata: { ...(o.metadata || {}), reminder6hSent: true, reminderSentAt: new Date().toISOString() } }
+            : o
+        );
+      setTodayOrders(markReminded);
+      setUpcomingOrders(markReminded);
+
+      alert(`🔔 Recordatorio de 6 horas enviado a ${cName} por Telegram y Notificación Push.`);
+    } catch (e) {
+      alert('Error enviando el recordatorio.');
+    } finally {
+      setSendingReminderAptId(null);
+    }
+  };
+
+  const handleSearchExpediente = async () => {
+    if (!expedienteQuery) return;
+    setIsSearchingExpediente(true); setClientExpedienteData(null); setIsEditingClientReview(false);
+    try {
+      const res = await apiFetch(`/api/clients/history/${expedienteQuery.trim()}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          let safeClient = { ...data.client };
+          if (typeof safeClient.metadata === 'string') {
+             try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch(e){}
+          }
+          setClientExpedienteData({ ...data, client: safeClient });
+          setIsExpedienteExpanded(false); 
+        } else { alert('No se encontró historial para esta búsqueda.'); }
+      } else {
+        alert('No se encontró historial para esta búsqueda.');
+      }
+    } catch (err) { alert('Error de red.'); } finally { setIsSearchingExpediente(false); }
+  };
+
+  // 🌟 Aplica la reacción pendiente (👍/👎) una vez el cliente fue verificado en Expediente 🌟
+  useEffect(() => {
+    if (!pendingReaction || !clientExpedienteData?.client || !currentExpedienteClientKey) return;
+    const reaction = pendingReaction;
+    setPendingReaction(null);
+    const hasVisits = Array.isArray(clientExpedienteData.serviceHistory) && clientExpedienteData.serviceHistory.length > 0;
+    if (!hasVisits) {
+      alert('Para calificar necesitas al menos un servicio completado. ¡Te esperamos pronto!');
+      return;
+    }
+    (async () => {
+      await handleQuickClientReaction(reaction);
+      alert(reaction === 'like' ? '👍 ¡Gracias! Registramos tu Me gustó.' : '👎 Gracias por tu opinión. Trabajaremos para mejorar.');
+    })();
+  }, [pendingReaction, clientExpedienteData, currentExpedienteClientKey]);
+
+  const handleSearchVehicle = async () => {
+    if (!searchPlate) return;
+    setIsSearchingPlate(true);
+    try {
+      const res = await apiFetch(`/api/clients/vehicle/${searchPlate}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.vehicle) {
+          setCarBrand(data.vehicle.brand || ''); setCarModel(data.vehicle.model || ''); setCarYear(data.vehicle.year || ''); setCarMileage(data.vehicle.currentMileage || ''); 
+          if (data.client) { setClientName(toTitleCase(data.client.name || '')); setClientEmail(data.client.email || ''); setClientPhone(data.client.phone ? data.client.phone.replace(/^\+\d+\s*/, '') : ''); }
+          setIsPlateSearched(true);
+        } else { setIsPlateSearched(true); }
+      }
+    } catch (error) { setIsPlateSearched(true); } finally { setIsSearchingPlate(false); }
+  };
+
+  const handleBookFromExpediente = () => {
+    if (!clientExpedienteData) return;
+    if (clientExpedienteData.client) {
+      setClientName(toTitleCase(clientExpedienteData.client.name || ''));
+      setClientEmail(clientExpedienteData.client.email || '');
+      setClientPhone(clientExpedienteData.client.phone ? clientExpedienteData.client.phone.replace(/^\+\d+\s*/, '') : '');
+      
+      const dbEarned = Number(clientExpedienteData.client.metadata?.earnedReferralDiscounts || 0);
+      const cPhone = cleanPhoneDigits(clientExpedienteData.client.phone);
+      const liveEarned = cPhone && pendingReferralsByPhone[cPhone] ? pendingReferralsByPhone[cPhone].length : 0;
+      const totalEarned = Math.max(0, dbEarned + liveEarned);
+
+      setBookingClientCoupons(totalEarned);
+      setIsExistingClient((clientExpedienteData.serviceHistory && clientExpedienteData.serviceHistory.length > 0) || Number(clientExpedienteData.client.loyaltyVisits || 0) > 0);
+      if (totalEarned > 0) {
+        setQuickNotes(`(Aplica Descuento de Referidor - ${totalEarned} pendientes) `);
+      }
+    }
+    if (clientExpedienteData.vehicle) {
+      setSearchPlate(clientExpedienteData.vehicle.plate || '');
+      setCarBrand(clientExpedienteData.vehicle.brand || '');
+      setCarModel(clientExpedienteData.vehicle.model || '');
+      setCarYear(clientExpedienteData.vehicle.year || '');
+      setCarMileage(clientExpedienteData.vehicle.currentMileage || '');
+    }
+    setIsPlateSearched(true); setIsBookingModalOpen(true);
+  };
+
+  const handleBookService = async () => {
+    setIsSubmitting(true);
+    try {
+      const combinedDateTime = appointmentDate && appointmentTime ? `${appointmentDate}T${appointmentTime}:00Z` : new Date().toISOString();
+      
+      // 🌟 AUTO-ASIGNACIÓN DE ESTILISTA LIBRE SI ELIGIÓ "CUALQUIERA DISPONIBLE" 🌟
+      let finalAssignedStaffId = selectedBookingStaff || null;
+      if (!finalAssignedStaffId && appointmentDate && appointmentTime) {
+        const freeMembersNow = getFreeStaffForSlot(appointmentDate, appointmentTime, selectedServiceType);
+        if (freeMembersNow.length > 0) {
+          finalAssignedStaffId = freeMembersNow[0].id;
+        }
+      }
+      const assignedStaffObj = staffList.find(s => s.id === finalAssignedStaffId);
+
+      let metadataObj: any = {};
+      const formattedReferredBy = referredByPhone ? `${referredByCountryCode} ${referredByPhone.trim()}` : '';
+      if (isAutomotive) {
+        metadataObj = { carPlate: searchPlate, carBrand: toTitleCase(carBrand), carModel: toTitleCase(carModel), carYear, carMileage };
+        if (formattedReferredBy && !isExistingClient) metadataObj.referredBy = formattedReferredBy;
+      } else {
+        if (formattedReferredBy && !isExistingClient) metadataObj.referredBy = formattedReferredBy;
+      }
+      if (appointmentDate) metadataObj.localDate = appointmentDate;
+      if (appointmentTime) metadataObj.localTime = appointmentTime;
+      if (finalAssignedStaffId) {
+        metadataObj.assignedStaffId = finalAssignedStaffId;
+        if (assignedStaffObj) metadataObj.assignedStaffName = toTitleCase(assignedStaffObj.name);
+      }
+        
+      const formattedPhone = clientPhone.startsWith('+') ? clientPhone : `${bookingCountryCode} ${clientPhone.trim()}`;
+      const response = await apiFetch('/api/appointments', {
+        method: 'POST', 
+        body: JSON.stringify({ 
+          clientName: toTitleCase(clientName), 
+          clientEmail, 
+          clientPhone: formattedPhone, 
+          serviceId: selectedServiceType, 
+          staffId: finalAssignedStaffId, 
+          appointmentDate: combinedDateTime, 
+          notes: toTitleCase(quickNotes), 
+          metadata: JSON.stringify(metadataObj)
+        })
+      });
+      if (response.ok) { alert(`¡Cita confirmada!`); setIsBookingModalOpen(false); setIsPlateSearched(false); setReferredByPhone(''); fetchAgendaData(); }
+      else { alert('Error del servidor al confirmar cita.'); }
+    } catch (error) { alert('Error agendando cita.'); } finally { setIsSubmitting(false); }
+  };
+
+  const exportToCSV = () => {
+    if (Platform.OS === 'web') {
+      const headers = ["Fecha", "Identificador", "Beneficio / Promo", "Cliente", "Servicio", "Personal", "Total Cobrado"];
+      const csvRows = reportsData.map(r => {
+        const promoInfo = getReportDiscountInfo(r, servicesList);
+        return `${r.date || r.createdAt || ''},${isAutomotive ? r.plate : (r.id ? r.id.slice(0,6).toUpperCase() : '')},${promoInfo ? promoInfo.label : 'Tarifa Regular'},${r.clientName || ''},${r.service || ''},${r.mechanicName || ''},$${r.cost || r.finalCost || 0}`;
+      });
+      const csvContent = "data:text/csv;charset=utf-8," + headers.join(",") + "\n" + csvRows.join("\n");
+      const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a"); link.href = url; link.setAttribute("download", `Reporte_AutoFlow_${reportStartDate}_al_${reportEndDate}.csv`);
+      document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
+    }
+  };
+
+  const exportToPDF = () => {
+    if (Platform.OS === 'web') {
+      setIsPrinting(true);
+      setTimeout(() => { window.print(); setIsPrinting(false); }, 800); 
+    } else { alert('Optimizado para Web.'); }
+  };
+
+  const handleAddStaff = async () => {
+    if (!newStaffName || (!selectedStaffRole && !customStaffRole)) return;
+    const finalRole = selectedStaffRole === 'custom' ? toTitleCase(customStaffRole.trim()) : selectedStaffRole;
+    const finalName = toTitleCase(newStaffName.trim());
+    try {
+      const res = await apiFetch('/api/staff', { method: 'POST', body: JSON.stringify({ name: finalName, role: finalRole }) });
+      if (res.ok) {
+        const data = await res.json();
+        setStaffList([...staffList, data.member || { id: Date.now().toString(), name: finalName, role: finalRole, isActive: true }]);
+        setNewStaffName(''); setSelectedStaffRole(''); setCustomStaffRole('');
+      }
+    } catch (err) { alert('Error guardando staff'); }
+  };
+
+  const toggleStaffStatus = async (id: string, currentStatus: boolean) => {
+    try {
+      const nextStatus = !currentStatus;
+      await apiFetch(`/api/staff/${id}`, { method: 'PUT', body: JSON.stringify({ isActive: nextStatus }) });
+      setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
+    } catch (err) { console.error(err); }
+  };
+
+  const handleToggleServiceStatus = async (id: string, currentStatus: boolean) => {
+    try {
+      const nextStatus = !currentStatus;
+      await apiFetch(`/api/services/${id}`, { method: 'PUT', body: JSON.stringify({ isActive: nextStatus }) });
+      setServicesList(servicesList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
+    } catch (err) { console.error('Error:', err); }
+  };
+
+  const handleNavigate = (view: 'servicios' | 'expediente' | 'mecanico') => { setActiveView(view); setIsMobileMenuOpen(false); if (view !== 'expediente') setPendingReaction(null); };
+  const startReactionFlow = (type: 'like' | 'dislike') => { setPendingReaction(type); handleNavigate('expediente'); };
+
+  // Llegada desde el directorio: /{tenantId}?view=expediente&reaction=like|dislike
+  useEffect(() => {
+    const v = Array.isArray(viewParam) ? viewParam[0] : viewParam;
+    const r = Array.isArray(reactionParam) ? reactionParam[0] : reactionParam;
+    if (v === 'expediente') setActiveView('expediente');
+    if (r === 'like' || r === 'dislike') setPendingReaction(r);
+  }, [viewParam, reactionParam]);
+
+  // 🚩 Reportar contenido: abre el modal / cierra / envía al backend (que avisa por Telegram)
+  const openReport = (target: ReportTarget) => {
+    setReportReason('');
+    setReportDetails('');
+    setReportContact('');
+    setReportTarget(target);
+  };
+  const closeReport = () => { setReportTarget(null); };
+
+  const handleSubmitReport = async () => {
+    if (!reportTarget) return;
+    if (!reportReason) { alert('Selecciona el motivo del reporte.'); return; }
+    setIsSendingReport(true);
+    try {
+      const reasonObj = REPORT_REASONS.find((r) => r.key === reportReason);
+      const res = await apiFetch('/api/reports', {
+        method: 'POST',
+        body: JSON.stringify({
+          tenantId: tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '')),
+          tenantName: tenantInfo?.name || '',
+          targetType: reportTarget.type,
+          targetId: reportTarget.id,
+          targetTitle: reportTarget.title,
+          targetExcerpt: reportTarget.excerpt || '',
+          reason: reportReason,
+          reasonLabel: reasonObj?.label || reportReason,
+          details: reportDetails.trim(),
+          reporterContact: reportContact.trim(),
+          pageUrl: Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.href : '',
+          createdAt: new Date().toISOString()
+        })
+      });
+      if (res.ok) {
+        setReportedKeys((prev) => [...prev, `${reportTarget.type}:${reportTarget.id}`]);
+        closeReport();
+        alert('✅ Gracias. Recibimos tu reporte y nuestro equipo lo revisará.');
+      } else {
+        alert('No pudimos enviar el reporte. Intenta de nuevo en unos minutos.');
+      }
+    } catch (e) {
+      alert('Error de red al enviar el reporte.');
+    } finally {
+      setIsSendingReport(false);
+    }
+  };
+
+  const renderReportButton = (target: ReportTarget, compact = false, extraStyle: any = {}) => {
+    const already = reportedKeys.includes(`${target.type}:${target.id}`);
+    return (
+      <TouchableOpacity
+        disabled={already}
+        onPress={() => openReport(target)}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        accessibilityLabel="Reportar contenido"
+        style={[{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, opacity: already ? 0.6 : 1 }, compact ? { width: 28, height: 28, borderRadius: 14 } : {}, extraStyle]}
+      >
+        <Feather name="flag" size={compact ? 13 : 14} color={already ? '#10B981' : tColor.muted} />
+        {!compact ? (
+          <Text style={{ color: already ? '#10B981' : tColor.muted, fontSize: 12.5, fontWeight: '700' }}>
+            {already ? 'Reporte enviado' : 'Reportar publicación'}
+          </Text>
+        ) : null}
+      </TouchableOpacity>
+    );
+  };
+  const activeOrdersList = useMemo(() => {
+    const allUnique = getMergedUniqueAppointments(todayOrders, upcomingOrders);
+    const nowLocal = new Date();
+    const todayLocalStr = `${nowLocal.getFullYear()}-${String(nowLocal.getMonth() + 1).padStart(2, '0')}-${String(nowLocal.getDate()).padStart(2, '0')}`;
+    if (agendaFilter === 'today') {
+      return allUnique.filter((o: any) => {
+        const dStr = o.metadata?.localDate || (o.appointmentDate ? String(o.appointmentDate).split('T')[0] : '');
+        return dStr === todayLocalStr;
+      });
+    }
+    if (agendaFilter === 'upcoming') {
+      return allUnique.filter((o: any) => {
+        const dStr = o.metadata?.localDate || (o.appointmentDate ? String(o.appointmentDate).split('T')[0] : '');
+        return dStr >= todayLocalStr;
+      });
+    }
+    return todayOrders;
+  }, [agendaFilter, todayOrders, upcomingOrders]);
+
+  const selectedOrderPhoneClean = cleanPhoneDigits(selectedOrder?.clientPhone);
+  const selectedOrderEarnedCoupons = Number(selectedOrder?.clientMetadata?.earnedReferralDiscounts || 0);
+  const selectedOrderLiveReferrals = selectedOrderPhoneClean ? (pendingReferralsByPhone[selectedOrderPhoneClean] || []) : [];
+  const totalAvailableReferralCouponsPOS = Math.max(0, selectedOrderEarnedCoupons + selectedOrderLiveReferrals.length);
+
+  const activeMonthTooltipData = hoveredMonthIdx !== null ? monthlyTrafficStats.items[hoveredMonthIdx] : null;
+
+  return (
+    <View style={[styles.root, { backgroundColor: tColor.bg }]}>
+      <Image key={`${bgImage}-${theme}`} source={{ uri: bgImage }} style={[StyleSheet.absoluteFill, { width: '100%', height: '100%', opacity: theme === 'dark' ? 0.15 : 0.05 } as any]} resizeMode="cover" />
+      <WebStyles theme={theme} tColor={tColor} brandColor={brandColor} />
+
+      {/* 🌟 MENÚ SUPERIOR CON BADGE DE ESTRELLAS + LIKES/DISLIKES 🌟 */}
+      <View style={[styles.header, { 
+        position: Platform.OS === 'web' ? ('sticky' as any) : 'relative', top: 0, zIndex: 200,
+        backgroundColor: tColor.nav, backdropFilter: Platform.OS === 'web' ? 'blur(16px)' : 'none',
+        paddingHorizontal: Platform.OS === 'web' ? 40 : 20, paddingTop: Platform.OS === 'web' ? 20 : 0, paddingBottom: 20,
+        borderBottomWidth: 1, borderBottomColor: tColor.border, display: isPrinting ? 'none' : 'flex'
+      }]}>
+        
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          {tenantInfo?.logoUrl ? (
+             <View style={{ width: 40, height: 40, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: '#000' }}>
+               <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo.name || 'Logo'} />
+             </View>
+          ) : (
+             <View style={{ backgroundColor: brandColor, width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }}>
+               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>{tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}</Text>
+             </View>
+          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <Text style={{ fontSize: 20, fontWeight: '900', color: tColor.text }}>{tenantInfo?.name || 'AutoFlow'}</Text>
+            <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Ionicons name="star" size={12} color="#F59E0B" />
+              <Text style={{ color: '#F59E0B', fontSize: 12, fontWeight: '900' }}>{ratingSummary.avg}</Text>
+              <View style={{ width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.15)' }} />
+              <Feather name="thumbs-up" size={11} color="#10B981" />
+              <Text style={{ color: '#10B981', fontSize: 11, fontWeight: '900' }}>{ratingSummary.likes}</Text>
+              {ratingSummary.dislikes > 0 ? (
+                <>
+                  <Feather name="thumbs-down" size={11} color="#EF4444" />
+                  <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
+                </>
+              ) : null}
+            </View>
+            {clientDistanceMiles ? (
+              <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                <Feather name="navigation" size={11} color="#60A5FA" />
+                <Text style={{ color: tColor.text, fontSize: 11, fontWeight: '800' }}>A {clientDistanceMiles} mi de ti</Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {isMobile ? (
+            <TouchableOpacity style={{ padding: 10, backgroundColor: tColor.border, borderRadius: 10 }} onPress={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
+              <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={20} color={tColor.text} />
+            </TouchableOpacity>
+          ) : (
+            <View style={{ flexDirection: 'row', gap: 20 }}>
+              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('servicios')}>
+                <Feather name="calendar" size={15} color={activeView === 'servicios' ? brandColor : tColor.muted} />
+                <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: '800' }}>Reservas</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('expediente')}>
+                <Feather name="file-text" size={15} color={activeView === 'expediente' ? brandColor : tColor.muted} />
+                <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: '800' }}>Expediente</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('mecanico')}>
+                <Feather name="sliders" size={15} color={activeView === 'mecanico' ? brandColor : tColor.muted} />
+                <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: '800' }}>Portal Interno</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+          <TouchableOpacity onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 42, height: 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: 12 }}>
+            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={18} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, flexDirection: 'row', gap: 8 }]} onPress={() => {
+            if (router.canGoBack()) {
+              router.back();
+            } else {
+              router.push(`/?category=${dbNiche}`);
+            }
+          }}>
+            <Feather name="arrow-left" size={16} color={tColor.text} />
+            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Volver</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {isMobile && isMobileMenuOpen ? (
+        <View style={{ position: 'absolute', top: 80, left: 20, right: 20, backgroundColor: tColor.card, zIndex: 190, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: tColor.border, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.2, shadowRadius: 20 }}>
+          <TouchableOpacity style={{ paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('servicios')}>
+            <Feather name="calendar" size={18} color={activeView === 'servicios' ? brandColor : tColor.text} />
+            <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Reservas</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={{ paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('expediente')}>
+            <Feather name="file-text" size={18} color={activeView === 'expediente' ? brandColor : tColor.text} />
+            <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Expediente</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={{ paddingVertical: 16, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('mecanico')}>
+            <Feather name="sliders" size={18} color={activeView === 'mecanico' ? brandColor : tColor.text} />
+            <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Portal Interno</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+
+      <ScrollView contentContainerStyle={[styles.contentArea, { paddingTop: 20 }]} showsVerticalScrollIndicator={false}>
+
+        {/* ============================================================== */}
+        {/* VISTA 1: B2C SERVICIOS, PORTAFOLIO Y RESEÑAS VERIFICADAS       */}
+        {/* ============================================================== */}
+        {activeView === 'servicios' ? (
+          <View>
+            {/* 🌟 BANNER EN VIVO DE CAMPAÑA PUSH ACTIVA (SOLO SE MUESTRA SI ESTÁ ACTIVA) 🌟 */}
+            {pushCampaignsList.filter(c => c.is_active !== false).slice(0, 1).map((activeCamp) => (
+              <View key={`${activeCamp.id}-banner`} style={{ backgroundColor: 'rgba(255, 94, 0, 0.12)', borderWidth: 1, borderColor: brandColor, borderRadius: 16, padding: 18, marginBottom: 28, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', gap: 12 }}>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <View style={{ backgroundColor: brandColor, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>📢 PROMO ACTIVA</Text>
+                    </View>
+                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16 }}>{toTitleCase(activeCamp.title)}</Text>
+                  </View>
+                  <Text style={{ color: tColor.muted, fontSize: 13 }}>{toTitleCase(activeCamp.message)}</Text>
+                </View>
+                {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 10, paddingHorizontal: 16 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
+                  <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>Aprovechar Ahora →</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+
+            <View style={{ marginBottom: 48, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-end', gap: 16 }}>
+              <View>
+                <Text style={{ fontSize: 32, fontWeight: '900', color: tColor.text, marginBottom: 12 }}>Servicios <Text style={{ color: brandColor }}>Premium</Text></Text>
+                <Text style={{ color: tColor.muted }}>Reserva tu cita en línea en tiempo real con cualquiera de nuestros profesionales disponibles.</Text>
+              </View>
+              <View style={{ alignItems: isMobile ? 'flex-start' : 'flex-end', gap: 10 }}>
+                {clientDistanceMiles ? (
+                  <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.14)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.45)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Feather name="navigation" size={13} color="#60A5FA" />
+                    <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '900' }}>
+                      Estás a {clientDistanceMiles} millas de {tenantInfo?.name || 'este negocio'}
+                    </Text>
+                  </View>
+                ) : null}
+                <TouchableOpacity 
+                  onPress={() => handleNavigate('expediente')}
+                  style={{ backgroundColor: tColor.card, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 14 }}
+                >
+                  <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: `${brandColor}18`, borderWidth: 1, borderColor: `${brandColor}40`, alignItems: 'center', justifyContent: 'center' }}>
+                    <Feather name="award" size={20} color={brandColor} />
+                  </View>
+                  <View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <Ionicons name="star" size={14} color="#F59E0B" />
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{ratingSummary.avg}</Text>
+                      </View>
+                      <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.4)', backgroundColor: 'rgba(16, 185, 129, 0.1)' }}>
+                        <Feather name="thumbs-up" size={13} color="#10B981" />
+                        <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 13 }}>{ratingSummary.likes}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}>
+                        <Feather name="thumbs-down" size={13} color="#EF4444" />
+                        <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>{ratingSummary.dislikes}</Text>
+                      </TouchableOpacity>
+                      <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: 'bold' }}>({ratingSummary.count})</Text>
+                    </View>
+                    <Text style={{ color: brandColor, fontSize: 11, fontWeight: 'bold', marginTop: 3 }}>¿Ya nos visitaste? Toca 👍 o 👎 para calificar →</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <View style={styles.bentoGrid}>
+              {activeCatalogServices.length > 0 ? activeCatalogServices.map((srv, idx) => (
+                <View key={`${srv.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden' }]}>
+                  {srv.imageUrl ? (
+                    <TouchableOpacity style={{ width: '100%', height: 200, backgroundColor: tColor.input, borderBottomWidth: 1, borderColor: tColor.border }} onPress={() => setExpandedImage({ path: srv.imageUrl!, alt: srv.name })}>
+                       <PrivateSupabaseImage path={srv.imageUrl} alt={srv.name} />
+                    </TouchableOpacity>
+                  ) : null}
+                  {renderReportButton({ type: 'service', id: srv.id, title: srv.name, excerpt: String(srv.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
+                  <View style={{ padding: 32 }}>
+                    <Text style={{ fontSize: 20, fontWeight: '800', color: tColor.text, marginBottom: 12 }}>{toTitleCase(srv.name)}</Text>
+                    {srv.description ? (
+                      <Text style={{ color: tColor.muted, marginBottom: 24, lineHeight: 22 }}>{toTitleCase(srv.description)}</Text>
+                    ) : (
+                      <Text style={{ color: tColor.muted, marginBottom: 24 }}>⏱️ {srv.durationMinutes || 30} minutos</Text>
+                    )}
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: tColor.border, paddingTop: 20 }}>
+                      <Text style={{ fontSize: 24, fontWeight: '900', color: brandColor }}>${srv.price}</Text>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={() => { setSelectedServiceType(srv.id); setIsBookingModalOpen(true); setIsPlateSearched(false); }}><Text style={styles.primaryButtonText}>Reservar Cita</Text></TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              )) : (<View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>El catálogo no tiene servicios activos.</Text></View>)}
+            </View>
+
+            {localPortfolio.length > 0 ? (
+              <View style={{ marginTop: 60, marginBottom: 20 }}>
+                <Text style={{ fontSize: 28, fontWeight: '900', color: tColor.text, marginBottom: 24 }}>Nuestros <Text style={{ color: brandColor }}>Trabajos</Text></Text>
+                <ResponsiveCarousel
+                  data={localPortfolio}
+                  gap={24}
+                  minItemWidth={280}
+                  maxCols={4}
+                  tColor={tColor}
+                  brandColor={brandColor}
+                  arrowTop="34%"
+                  renderItem={(item, idx, itemWidth) => (
+                    <View style={{ flex: 1, borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: tColor.card }}>
+                      <TouchableOpacity style={{ width: '100%', height: Math.min(340, Math.max(240, Math.round(itemWidth * 0.9))), backgroundColor: tColor.input }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
+                        <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx + 1}`} />
+                      </TouchableOpacity>
+                      {renderReportButton({ type: 'portfolio', id: item.url, title: item.title, excerpt: String(item.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
+                      <View style={{ padding: 20 }}>
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 18, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
+                        {item.description ? (
+                          <Text style={{ color: tColor.muted, fontSize: 14, marginBottom: 12 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
+                        ) : null}
+                      </View>
+                    </View>
+                  )}
+                />
+              </View>
+            ) : null}
+
+            {/* 🌟 SECCIÓN PÚBLICA DE REACCIONES (👍/👎) Y RESEÑAS DE CLIENTES VERIFICADOS 🌟 */}
+            <View style={{ marginTop: 48, marginBottom: 40 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
+                <View>
+                  <Text style={{ fontSize: 26, fontWeight: '900', color: tColor.text }}>
+                    Opiniones y Reacciones <Text style={{ color: brandColor }}>Verificadas</Text>
+                  </Text>
+                  <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>
+                    👍 {ratingSummary.likes} Me gusta  •  👎 {ratingSummary.dislikes} No me gusta  •  ⭐ Promedio {ratingSummary.avg} ({ratingSummary.count} clientes verificados)
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
+                    <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.12)' }}>
+                      <Text style={{ fontSize: 14 }}>👍</Text>
+                      <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12 }}>Me gustó</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: '#EF4444', backgroundColor: 'rgba(239, 68, 68, 0.12)' }}>
+                      <Text style={{ fontSize: 14 }}>👎</Text>
+                      <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 12 }}>No me gustó</Text>
+                    </TouchableOpacity>
+                    <Text style={{ color: tColor.muted, fontSize: 11.5, flexShrink: 1 }}>🔒 Solo clientes con un servicio completado pueden calificar.</Text>
+                  </View>
+                </View>
+              </View>
+
+              {reviewsList.length === 0 ? (
+                <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 28, alignItems: 'center' }]}>
+                  <Text style={{ fontSize: 32, marginBottom: 8 }}>👍</Text>
+                  <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 16 }}>Aún no hay valoraciones registradas</Text>
+                  <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4, textAlign: 'center' }}>
+                    Los clientes que completan su servicio pueden dar 👍 Like o dejar una reseña única directamente desde su Expediente.
+                  </Text>
+                </View>
+              ) : (
+                <ResponsiveCarousel
+                  data={[...reviewsList].sort((x, y) => new Date(y.createdAt).getTime() - new Date(x.createdAt).getTime())}
+                  gap={20}
+                  minItemWidth={300}
+                  maxItemWidth={460}
+                  maxCols={3}
+                  tColor={tColor}
+                  brandColor={brandColor}
+                  arrowTop="38%"
+                  renderItem={(rev) => {
+                    const isLike = rev.reaction === 'like' || (!rev.reaction && Number(rev.rating) >= 4);
+                    return (
+                        <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, flex: 1, padding: 24, justifyContent: 'space-between' }]}>
+                          <View>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                <View style={{ backgroundColor: isLike ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: isLike ? '#10B981' : '#EF4444' }}>
+                                  <Text style={{ color: isLike ? '#10B981' : '#EF4444', fontSize: 11, fontWeight: '900' }}>
+                                    {isLike ? '👍 Me gustó' : '👎 Por mejorar'}
+                                  </Text>
+                                </View>
+                                <Text style={{ color: '#F59E0B', fontSize: 13, letterSpacing: 1 }}>
+                                  {'★'.repeat(rev.rating)}
+                                </Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                <Text style={{ color: tColor.muted, fontSize: 11 }}>
+                                  {new Date(rev.createdAt).toLocaleDateString('es-ES')}
+                                </Text>
+                                {renderReportButton({ type: 'review', id: rev.id, title: `Reseña de ${rev.clientName}`, excerpt: String(rev.comment || '').slice(0, 200) }, true)}
+                              </View>
+                            </View>
+                            {rev.comment ? (
+                              <Text style={{ color: tColor.text, fontSize: 14, lineHeight: 20, fontStyle: 'italic', marginBottom: 16 }}>
+                                "{toTitleCase(rev.comment)}"
+                              </Text>
+                            ) : (
+                              <Text style={{ color: tColor.muted, fontSize: 13, fontStyle: 'italic', marginBottom: 16 }}>
+                                {isLike ? 'El cliente recomendó este negocio con un 👍.' : 'El cliente calificó este negocio sin dejar comentario.'}
+                              </Text>
+                            )}
+                          </View>
+                          <View style={{ borderTopWidth: 1, borderTopColor: tColor.border, paddingTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13 }}>👤 {toTitleCase(rev.clientName)}</Text>
+                            {rev.serviceName ? (
+                              <Text style={{ color: brandColor, fontSize: 11, fontWeight: 'bold' }}>✨ {toTitleCase(rev.serviceName)}</Text>
+                            ) : null}
+                          </View>
+                        </View>
+                    );
+                  }}
+                />
+              )}
+            </View>
+
+            {/* 🚩 PIE LEGAL: REPORTAR PUBLICACIÓN */}
+            <View style={{ borderTopWidth: 1, borderTopColor: tColor.border, paddingTop: 20, paddingBottom: 12, alignItems: 'center', gap: 8 }}>
+              {renderReportButton({ type: 'business', id: tenantInfo?.id || String(safeTenantId), title: tenantInfo?.name || 'Negocio' })}
+              <Text style={{ color: tColor.muted, fontSize: 11, textAlign: 'center', maxWidth: 560, lineHeight: 16 }}>
+                AutoFlow aloja contenido publicado por los negocios y no verifica su titularidad. Si crees que algo infringe tus derechos o es inapropiado, repórtalo y lo revisaremos.
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {/* ============================================================== */}
+        {/* VISTA 2: EXPEDIENTE CLIENTE (1 SOLA RESEÑA Y 1 LIKE POR CLIENTE)*/}
+        {/* ============================================================== */}
+        {activeView === 'expediente' ? (
+          <View style={{ flex: 1 }}>
+            <View style={{ paddingTop: 10, paddingBottom: 16, alignItems: 'center' }}>
+              <View style={{ width: '100%', maxWidth: 800 }}>
+                {(!clientExpedienteData || isExpedienteExpanded) ? (
+                  <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, width: '100%', padding: isMobile ? 20 : 32 }]}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                      <Text style={{ fontSize: isMobile ? 20 : 26, fontWeight: '900', color: tColor.text }}>
+                        <Text style={{ fontSize: isMobile ? 24 : 32 }}>📋 </Text> Expediente
+                      </Text>
+                      {clientExpedienteData ? (
+                        <TouchableOpacity onPress={() => setIsExpedienteExpanded(false)}>
+                          <Text style={{ color: tColor.muted, fontWeight: 'bold', fontSize: 24 }}>✕</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                    
+                    <Text style={{ color: tColor.muted, marginBottom: 20 }}>
+                      {isAutomotive ? 'Ingresa la placa para consultar el historial.' : 'Ingresa el Teléfono o ID para consultar historial.'}
+                    </Text>
+
+                    {pendingReaction ? (
+                      <View style={{ backgroundColor: pendingReaction === 'like' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: pendingReaction === 'like' ? '#10B981' : '#EF4444', borderRadius: 12, padding: 14, marginBottom: 20, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                        <Text style={{ fontSize: 22 }}>{pendingReaction === 'like' ? '👍' : '👎'}</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13 }}>Casi listo: verifica que eres cliente</Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 2, lineHeight: 17 }}>
+                            {isAutomotive ? 'Ingresa tu placa' : 'Ingresa tu teléfono o ID'} y registraremos tu {pendingReaction === 'like' ? 'Me gustó' : 'No me gustó'} automáticamente.
+                          </Text>
+                        </View>
+                        <TouchableOpacity onPress={() => setPendingReaction(null)}>
+                          <Text style={{ color: tColor.muted, fontWeight: 'bold', fontSize: 12 }}>Cancelar</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                    
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12, width: '100%' }}>
+                      {isAutomotive ? (
+                        <TextInput 
+                          style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1, textAlign: 'center', fontSize: 18, fontWeight: 'bold' }]} 
+                          placeholder="Placa (Ej: JNT776)" 
+                          placeholderTextColor={tColor.muted} 
+                          value={expedienteQuery} 
+                          onChangeText={text => setExpedienteQuery(text.toUpperCase())} 
+                        />
+                      ) : (
+                        <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                          <CountryCodeSelector value={expedienteCountryCode} onChange={setExpedienteCountryCode} tColor={tColor} width={115} />
+                          <TextInput 
+                            style={{ flex: 1, color: tColor.text, paddingHorizontal: 16, fontSize: 18, fontWeight: 'bold', textAlign: 'center', outlineStyle: 'none' } as any} 
+                            placeholder="Teléfono o ID" 
+                            placeholderTextColor={tColor.muted} 
+                            value={expedienteQuery} 
+                            onChangeText={text => setExpedienteQuery(text.toUpperCase())} 
+                          />
+                        </View>
+                      )}
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }, isMobile ? { height: 48 } : {}]} onPress={handleSearchExpediente as any} disabled={isSearchingExpediente}>
+                        <Text style={styles.primaryButtonText}>{isSearchingExpediente ? 'Buscando...' : '🔍 Consultar'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : null}
+
+                {(clientExpedienteData && !isExpedienteExpanded) ? (
+                  <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', padding: 16, borderLeftWidth: 4, borderLeftColor: brandColor, gap: 16 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                      <View style={[styles.plateBadge, { backgroundColor: brandColor }]}>
+                        <Text style={styles.plateText}>{isAutomotive ? clientExpedienteData.vehicle?.plate : 'VIP'}</Text>
+                      </View>
+                      <View>
+                        <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 15 }}>{toTitleCase(clientExpedienteData.client?.name || 'General')}</Text>
+                        <Text style={{ color: tColor.muted, fontSize: 13 }}>📞 {expedienteCountryCode} {clientExpedienteData.client?.phone?.replace(/^\+\d+\s*/, '') || 'N/A'}</Text>
+                      </View>
+                    </View>
+
+                    <View style={{ flexDirection: 'row', gap: 12, width: isMobile ? '100%' : 'auto' }}>
+                      <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={() => setIsExpedienteExpanded(true)}>
+                        <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>🔍 Otra Búsqueda</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingHorizontal: 16, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={handleBookFromExpediente}>
+                        <Text style={styles.primaryButtonText}>📅 Agendar Cita</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : null}
+              </View>
+            </View>
+
+            {clientExpedienteData ? (
+              <View style={{ maxWidth: 800, alignSelf: 'center', width: '100%', paddingTop: 8, paddingBottom: 60, gap: 16 }}>
+                
+                {/* 🌟 TARJETA ÚNICA DE OPINIÓN POR USUARIO (CON LETRA CAPITALIZADA AUTOMÁTICA) 🌟 */}
+                {clientExpedienteData.serviceHistory && clientExpedienteData.serviceHistory.length > 0 ? (() => {
+                  const isLiked = currentClientExistingReview && (currentClientExistingReview.reaction === 'like' || (!currentClientExistingReview.reaction && Number(currentClientExistingReview.rating) >= 4));
+                  const isDisliked = currentClientExistingReview && (currentClientExistingReview.reaction === 'dislike' || (!currentClientExistingReview.reaction && Number(currentClientExistingReview.rating) <= 2));
+
+                  return (
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 20 }]}>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', gap: 14 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16 }}>
+                            ⭐ Tu Calificación Oficial como Cliente
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4 }}>
+                            {currentClientExistingReview
+                              ? 'Ya registraste tu reacción para este negocio (1 calificación permitida por cliente).'
+                              : '¿Qué te pareció nuestro servicio? Reacciona en 1 clic sin escribir nada o deja un comentario opcional:'}
+                          </Text>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <TouchableOpacity
+                            disabled={isSubmittingReview}
+                            onPress={() => handleQuickClientReaction('like')}
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 6,
+                              paddingVertical: 10,
+                              paddingHorizontal: 14,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: isLiked ? '#10B981' : tColor.border,
+                              backgroundColor: isLiked ? 'rgba(16, 185, 129, 0.2)' : tColor.input
+                            }}
+                          >
+                            <Text style={{ fontSize: 15 }}>👍</Text>
+                            <Text style={{ color: isLiked ? '#10B981' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                              {isLiked ? 'Me gustó ✓' : 'Me gustó'}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            disabled={isSubmittingReview}
+                            onPress={() => handleQuickClientReaction('dislike')}
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 6,
+                              paddingVertical: 10,
+                              paddingHorizontal: 14,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: isDisliked ? '#EF4444' : tColor.border,
+                              backgroundColor: isDisliked ? 'rgba(239, 68, 68, 0.2)' : tColor.input
+                            }}
+                          >
+                            <Text style={{ fontSize: 15 }}>👎</Text>
+                            <Text style={{ color: isDisliked ? '#EF4444' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                              {isDisliked ? 'No me gustó ✓' : 'No me gustó'}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            onPress={() => {
+                              if (isEditingClientReview) {
+                                setIsEditingClientReview(false);
+                              } else {
+                                setReviewRating(currentClientExistingReview?.rating || 5);
+                                setReviewComment(currentClientExistingReview?.comment ? toTitleCase(currentClientExistingReview.comment) : '');
+                                setIsEditingClientReview(true);
+                              }
+                            }}
+                            style={{
+                              paddingVertical: 10,
+                              paddingHorizontal: 14,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: '#F59E0B',
+                              backgroundColor: 'rgba(245, 158, 11, 0.12)'
+                            }}
+                          >
+                            <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 12 }}>
+                              {currentClientExistingReview?.comment ? '✏️ Editar mi reseña' : '💬 Dejar Reseña (Opcional)'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      {currentClientExistingReview?.comment && !isEditingClientReview ? (
+                        <View style={{ marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                          <Text style={{ color: '#F59E0B', fontSize: 13, fontWeight: 'bold', marginBottom: 4 }}>
+                            {'★'.repeat(currentClientExistingReview.rating)}{'☆'.repeat(Math.max(0, 5 - currentClientExistingReview.rating))}
+                          </Text>
+                          <Text style={{ color: tColor.text, fontSize: 14, fontStyle: 'italic', fontWeight: '500' }}>
+                            "{toTitleCase(currentClientExistingReview.comment)}"
+                          </Text>
+                        </View>
+                      ) : null}
+
+                      {isEditingClientReview ? (
+                        <View style={{ marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                          <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <TouchableOpacity
+                                key={star}
+                                onPress={() => setReviewRating(star)}
+                                style={{
+                                  paddingVertical: 6,
+                                  paddingHorizontal: 12,
+                                  borderRadius: 8,
+                                  borderWidth: 1,
+                                  borderColor: reviewRating >= star ? '#F59E0B' : tColor.border,
+                                  backgroundColor: reviewRating >= star ? 'rgba(245, 158, 11, 0.2)' : 'transparent'
+                                }}
+                              >
+                                <Text style={{ color: reviewRating >= star ? '#F59E0B' : tColor.muted, fontWeight: '900' }}>{star} ★</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 65, marginBottom: 12 }]}
+                            placeholder="Escribe Tu Comentario (Ej: Recomiendo El Servicio Me Encanta)..."
+                            placeholderTextColor={tColor.muted}
+                            multiline
+                            value={reviewComment}
+                            onChangeText={(text) => setReviewComment(toTitleCase(text))}
+                          />
+                          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 10 }}>
+                            <TouchableOpacity
+                              style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingVertical: 8, paddingHorizontal: 14 }]}
+                              onPress={() => setIsEditingClientReview(false)}
+                            >
+                              <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: 12 }]}>Cancelar</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 8, paddingHorizontal: 16 }]}
+                              onPress={handleSaveUniqueClientReview}
+                              disabled={isSubmittingReview}
+                            >
+                              <Text style={[styles.primaryButtonText, { fontSize: 12 }]}>{isSubmittingReview ? 'Guardando...' : '💾 Guardar Mi Reseña'}</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : null}
+                    </View>
+                  );
+                })() : null}
+
+                {/* 🌟 BANNER DE PREMIO POR REFERIR EN EL EXPEDIENTE 🌟 */}
+                {(() => {
+                  const dbCoupons = Number(clientExpedienteData.client?.metadata?.earnedReferralDiscounts || 0);
+                  const expPhoneClean = cleanPhoneDigits(clientExpedienteData.client?.phone);
+                  const liveRefs = expPhoneClean ? (pendingReferralsByPhone[expPhoneClean] || []) : [];
+                  const totalCoupons = Math.max(0, dbCoupons + liveRefs.length);
+                  const refNames = liveRefs.length > 0 ? liveRefs.join(', ') : (clientExpedienteData.client?.metadata?.lastReferred || 'tus amigos');
+
+                  return (tenantInfo?.loyaltyConfig?.referralActive && totalCoupons > 0) ? (
+                    <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: 24, borderRadius: 16, borderWidth: 1, borderColor: '#3B82F6' }}>
+                       <Text style={{ color: '#3B82F6', fontWeight: '900', fontSize: 18, marginBottom: 8 }}>🏆 ¡Premio por Referir Ganado! </Text>
+                       <Text style={{ color: tColor.text, fontSize: 14, fontWeight: 'bold', lineHeight: 22 }}>
+                         ¡Te has ganado un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento gracias a que referiste a {refNames}! Tienes {totalCoupons} cupón(es) listo(s) para usar en tu cita.
+                       </Text>
+                       <Text style={{ color: '#3B82F6', fontSize: 13, fontWeight: 'bold', marginTop: 8 }}>
+                         💡 Tu {staffTerm.toLowerCase()} ya lo ve en el sistema, ¡solo recuérdale aplicarlo al momento de pagar!
+                       </Text>
+                    </View>
+                  ) : null;
+                })()}
+
+                {/* 🌟 BANNER DE MOTIVACIÓN Y REFERIDOS EN EL EXPEDIENTE 🌟 */}
+                {(tenantInfo?.loyaltyConfig?.isActive && clientExpedienteData.client) ? (
+                  <View style={{ backgroundColor: tColor.input, padding: 24, borderRadius: 16, borderWidth: 1, borderColor: brandColor }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
+                      <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 18 }}>Plan de Incentivos VIP 🎁</Text>
+                      <Text style={{ color: brandColor, fontWeight: '900', fontSize: 18 }}>
+                        {clientExpedienteData.client.loyaltyVisits || 0} / {tenantInfo.loyaltyConfig.visitsRequired || 10}
+                      </Text>
+                    </View>
+                    
+                    <View style={{ width: '100%', height: 12, backgroundColor: tColor.border, borderRadius: 6, overflow: 'hidden', marginBottom: 16 }}>
+                      <View style={{ 
+                        width: `${Math.min(100, ((clientExpedienteData.client.loyaltyVisits || 0) / (tenantInfo.loyaltyConfig.visitsRequired || 10)) * 100)}%`, 
+                        height: '100%', 
+                        backgroundColor: (clientExpedienteData.client.loyaltyVisits || 0) >= (tenantInfo.loyaltyConfig.visitsRequired || 10) ? '#FFD700' : brandColor 
+                      }} />
+                    </View>
+                    
+                    <Text style={{ color: tColor.text, fontSize: 14, fontWeight: 'bold' }}>
+                      {(clientExpedienteData.client.loyaltyVisits || 0) >= (tenantInfo.loyaltyConfig.visitsRequired || 10) 
+                        ? '🎉 ¡Felicidades! Tienes una recompensa lista para canjear en esta visita.'
+                        : `¡Ya casi! Solo te faltan ${Math.max(0, (tenantInfo.loyaltyConfig.visitsRequired || 10) - (clientExpedienteData.client.loyaltyVisits || 0))} visitas para desbloquear tu recompensa.`}
+                    </Text>
+
+                    {tenantInfo.loyaltyConfig.referralActive ? (
+                      <View style={{ marginTop: 20, paddingTop: 16, borderTopWidth: 1, borderTopColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                        <Text style={{ fontSize: 24 }}>🤝</Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: '#10B981', fontWeight: 'bold', fontSize: 14 }}>¿Quieres ganar un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento y sumar puntos más rápido?</Text>
+                          <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>
+                            Dile a tus amigos nuevos que ingresen tu número telefónico ({clientExpedienteData.client.phone ? clientExpedienteData.client.phone : 'tu número registrado'}) al agendar su primera cita. ¡Tú recibirás un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento en tu corte y +1 visita acumulada!
+                          </Text>
+                        </View>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+
+                {/* 🌟 CITAS PROGRAMADAS ACTIVAS DEL CLIENTE (CON OPCIÓN DE CANCELAR Y LIBERAR TURNO) 🌟 */}
+                {(() => {
+                  const expPhoneClean = cleanPhoneDigits(clientExpedienteData.client?.phone || expedienteQuery);
+                  const expEmailClean = String(clientExpedienteData.client?.email || '').trim().toLowerCase();
+                  const expPlateUpper = String(clientExpedienteData.vehicle?.plate || expedienteQuery || '').trim().toUpperCase();
+
+                  const clientActiveAppointments = getMergedUniqueAppointments(todayOrders, upcomingOrders).filter((ord) => {
+                    if (ord.status === 'cancelled' || ord.status === 'completed') return false;
+                    const ordPhone = cleanPhoneDigits(ord.clientPhone);
+                    const ordEmail = String(ord.clientEmail || '').trim().toLowerCase();
+                    const ordPlate = String(ord.plate || ord.metadata?.carPlate || '').trim().toUpperCase();
+                    if (expPhoneClean.length >= 7 && ordPhone === expPhoneClean) return true;
+                    if (expEmailClean && ordEmail === expEmailClean) return true;
+                    if (isAutomotive && expPlateUpper && ordPlate === expPlateUpper) return true;
+                    return false;
+                  });
+
+                  if (clientActiveAppointments.length === 0) return null;
+
+                  return (
+                    <View style={{ gap: 12, marginTop: 8, marginBottom: 8 }}>
+                      <Text style={{ fontSize: 20, fontWeight: '900', color: tColor.text }}>
+                        📅 Tus Citas Programadas ({clientActiveAppointments.length})
+                      </Text>
+                      <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                        <Feather name="clock" size={18} color="#3B82F6" />
+                        <Text style={{ color: tColor.muted, fontSize: 12, flex: 1, lineHeight: 18 }}>
+                          <Text style={{ color: tColor.text, fontWeight: '900' }}>Política de Reserva y Recordatorio (6h / 3h): </Text>
+                          Te enviamos un recordatorio <Text style={{ color: '#3B82F6', fontWeight: '800' }}>6 horas antes</Text> de tu turno para que confirmes tu asistencia en 1 clic. Si necesitas cancelar, hazlo con al menos <Text style={{ color: brandColor, fontWeight: '800' }}>3 horas de anticipación</Text> para liberar el espacio.
+                        </Text>
+                      </View>
+
+                      {clientActiveAppointments.map((aptItem, aptIdx) => {
+                        const stfId = aptItem.staffId || aptItem.metadata?.assignedStaffId;
+                        const stfObj = staffList.find((s) => s.id === stfId);
+                        const stfName = stfObj?.name || aptItem.metadata?.assignedStaffName;
+                        const aptDateObj = aptItem.appointmentDate ? parseAppointmentWallClock(aptItem) : null;
+                        const dateStr = aptDateObj ? aptDateObj.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' }) : 'Programada';
+                        const isAttendanceConfirmed = aptItem.status === 'confirmed' || aptItem.metadata?.attendanceConfirmed === true;
+                        const hoursLeft = getHoursUntilAppointment(aptItem);
+                        const isReminderWindow = hoursLeft > 0 && hoursLeft <= 6 && !isAttendanceConfirmed;
+
+                        return (
+                          <View
+                            key={`${aptItem.id}-${aptIdx}`}
+                            style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: isAttendanceConfirmed ? '#10B981' : (isReminderWindow ? '#F59E0B' : brandColor), borderWidth: 1.5, padding: 20, gap: 14 }]}
+                          >
+                            {isReminderWindow ? (
+                              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 10, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                <Feather name="bell" size={16} color="#F59E0B" />
+                                <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
+                                  ⏰ Faltan {hoursLeft}h para tu cita. ¿Confirmas tu asistencia o prefieres liberar el espacio?
+                                </Text>
+                              </View>
+                            ) : null}
+
+                            <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', gap: 16 }}>
+                              <View style={{ flex: 1 }}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+                                  <View style={{ backgroundColor: isAttendanceConfirmed ? 'rgba(16, 185, 129, 0.2)' : 'rgba(59, 130, 246, 0.15)', borderWidth: 1, borderColor: isAttendanceConfirmed ? '#10B981' : '#3B82F6', paddingHorizontal: 10, paddingVertical: 3, borderRadius: 8 }}>
+                                    <Text style={{ color: isAttendanceConfirmed ? '#10B981' : '#3B82F6', fontSize: 11, fontWeight: '900' }}>
+                                      {isAttendanceConfirmed ? '✅ ASISTENCIA CONFIRMADA' : '🕒 PENDIENTE DE CONFIRMAR'}
+                                    </Text>
+                                  </View>
+                                  <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>
+                                    🗓️ {toTitleCase(dateStr)}  •  🕒 {aptItem.time || 'Hora confirmada'}
+                                  </Text>
+                                </View>
+                                <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 17, marginBottom: 4 }}>
+                                  ✨ {toTitleCase(aptItem.service?.name || aptItem.serviceType || 'Servicio General')}
+                                </Text>
+                                {stfName ? (
+                                  <Text style={{ color: brandColor, fontSize: 12.5, fontWeight: '800' }}>
+                                    👤 {staffTerm}: {toTitleCase(stfName)}
+                                  </Text>
+                                ) : null}
+                              </View>
+
+                              <View style={{ flexDirection: 'row', gap: 10, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
+                                {!isAttendanceConfirmed ? (
+                                  <TouchableOpacity
+                                    disabled={confirmingAptId === aptItem.id}
+                                    onPress={() => handleConfirmAttendance(aptItem, 'client')}
+                                    style={{ backgroundColor: '#10B981', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 6, flex: isMobile ? 1 : undefined, justifyContent: 'center' }}
+                                  >
+                                    <Feather name="check-circle" size={15} color="#FFFFFF" />
+                                    <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13 }}>
+                                      {confirmingAptId === aptItem.id ? 'Confirmando...' : 'Confirmar Asistencia'}
+                                    </Text>
+                                  </TouchableOpacity>
+                                ) : null}
+
+                                <TouchableOpacity
+                                  onPress={() => openCancelAppointmentModal(aptItem, 'client')}
+                                  style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: '#EF4444', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 6, flex: isMobile ? 1 : undefined, justifyContent: 'center' }}
+                                >
+                                  <Feather name="x-circle" size={15} color="#EF4444" />
+                                  <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>
+                                    {hoursLeft > 0 && hoursLeft < 3 ? 'Cancelar (< 3h)' : 'Cancelar Cita'}
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  );
+                })()}
+
+                <Text style={{ fontSize: 20, fontWeight: '900', color: tColor.text, marginTop: 8 }}>Historial de Visitas</Text>
+
+                {clientExpedienteData.serviceHistory.length === 0 ? (
+                  <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>No registra órdenes cerradas.</Text></View>
+                ) : (
+                  (() => {
+                    const sortedHistory = [...clientExpedienteData.serviceHistory].sort((a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+                    
+                    return sortedHistory.map((wo: any, idx: number) => (
+                      <View key={`${wo.id || 'wo'}-${idx}`} style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', borderBottomWidth: 1, borderColor: tColor.border, paddingBottom: 12, marginBottom: 16 }}>
+                          <Text style={styles.activeStatusBadge}>Visita #{sortedHistory.length - idx}</Text>
+                          <Text style={{ color: tColor.muted, fontWeight: 'bold' }}>{new Date(wo.createdAt).toLocaleDateString('es-ES')}</Text>
+                        </View>
+                        
+                        <View style={{ flexDirection: 'row', gap: 16, flexWrap: 'wrap' } as any}>
+                          <View style={{ flex: 1, minWidth: 150 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Servicio Realizado</Text>
+                            <Text style={{ fontSize: 18, fontWeight: 'bold', color: tColor.text }}>{toTitleCase(wo.service?.name || wo.serviceType || 'Servicio General')}</Text>
+                          </View>
+                          <View style={{ flex: 1, minWidth: 120 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Costo Pagado</Text>
+                            <Text style={{ fontSize: 22, fontWeight: '900', color: brandColor }}>${Number(wo.finalCost || 0).toLocaleString('en-US')}</Text>
+                          </View>
+                        </View>
+
+                        {(wo.notes || wo.mechanicNotes || wo.oldParts || wo.newParts) ? (
+                          <View style={{ marginTop: 16, backgroundColor: tColor.input, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: tColor.border }}>
+                            <Text style={{ fontSize: 12, color: brandColor, fontWeight: 'bold', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 1 }}>
+                              {isAutomotive ? '🛠️ Detalles del Trabajo' : '✨ Detalle del Servicio'}
+                            </Text>
+                            
+                            {wo.oldParts ? (
+                              <View style={{ marginBottom: 6 }}>
+                                <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>
+                                  {isAutomotive ? 'Estado Inicial:' : 'Detalles Iniciales:'}
+                                </Text>
+                                <Text style={{ color: tColor.text, fontSize: 14 }}>{toTitleCase(wo.oldParts)}</Text>
+                              </View>
+                            ) : null}
+                            
+                            {wo.newParts ? (
+                              <View style={{ marginBottom: 6 }}>
+                                <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>Resultado:</Text>
+                                <Text style={{ color: tColor.text, fontSize: 14 }}>{toTitleCase(wo.newParts)}</Text>
+                              </View>
+                            ) : null}
+                            
+                            {(wo.mechanicNotes || wo.notes) ? (
+                              <View style={{ marginBottom: 2 }}>
+                                <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>
+                                  {isAutomotive ? 'Notas Técnicas:' : 'Notas del Profesional:'}
+                                </Text>
+                                <Text style={{ color: tColor.text, fontSize: 14 }}>{toTitleCase(wo.mechanicNotes || wo.notes)}</Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        ) : null}
+                        
+                        {(Platform.OS === 'web' && (wo.oldPartImageUrl || wo.newPartImageUrl)) ? (
+                          <View style={{ flexDirection: 'row', gap: 16, marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderColor: tColor.border }}>
+                            {wo.oldPartImageUrl ? (
+                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }} onPress={() => setExpandedImage({ path: wo.oldPartImageUrl, alt: 'Evidencia (Antes)' })}>
+                                <Text style={{ color: brandColor, fontWeight: 'bold', fontSize: 13 }}>📸 Ver Foto (Antes)</Text>
+                              </TouchableOpacity>
+                            ) : null}
+                            {wo.newPartImageUrl ? (
+                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }} onPress={() => setExpandedImage({ path: wo.newPartImageUrl, alt: 'Evidencia (Después)' })}>
+                                <Text style={{ color: brandColor, fontWeight: 'bold', fontSize: 13 }}>📸 Ver Foto (Después)</Text>
+                              </TouchableOpacity>
+                            ) : null}
+                          </View>
+                        ) : null}
+                      </View>
+                    ));
+                  })()
+                )}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {/* ============================================================== */}
+        {/* VISTA 3: PORTAL INTERNO B2B                                    */}
+        {/* ============================================================== */}
+        {activeView === 'mecanico' ? (
+          <View>
+            {!isMechanicAuth ? (
+              <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 500, alignSelf: 'center', width: '100%', alignItems: 'center' }]}>
+                <Text style={{ fontSize: 48, marginBottom: 16 }}>🔒</Text>
+                <Text style={{ fontSize: 26, fontWeight: '900', color: tColor.text, marginBottom: 8 }}>Acceso Operativo</Text>
+                <Text style={{ color: tColor.muted, marginBottom: 32 }}>Personal de {tenantInfo?.name} (PIN: 1234).</Text>
+                <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, marginBottom: 16, width: '100%' }]} placeholder="PIN" placeholderTextColor={tColor.muted} secureTextEntry keyboardType="numeric" value={mechanicPin} onChangeText={setMechanicPin} />
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, width: '100%' }]} onPress={() => { if (mechanicPin === '1234') setIsMechanicAuth(true); else alert('PIN Incorrecto'); }}><Text style={styles.primaryButtonText}>Ingresar</Text></TouchableOpacity>
+              </View>
+            ) : (
+              <View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 32 }}>
+                  <View style={[styles.tabsContainer, { backgroundColor: tColor.card, marginBottom: 0, paddingRight: 20 }]}>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'today' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('today')}><Feather name="check-square" size={15} color={agendaFilter === 'today' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'today' ? '#FFFFFF' : tColor.muted }]}>Órdenes</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'upcoming' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('upcoming')}><Feather name="calendar" size={15} color={agendaFilter === 'upcoming' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'upcoming' ? '#FFFFFF' : tColor.muted }]}>Próximos</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'reports' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('reports')}><Feather name="bar-chart-2" size={15} color={agendaFilter === 'reports' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'reports' ? '#FFFFFF' : tColor.muted }]}>Reportes</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'staff' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('staff')}><Feather name="users" size={15} color={agendaFilter === 'staff' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'staff' ? '#FFFFFF' : tColor.muted }]}>Personal</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'catalogo' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('catalogo')}><Feather name="tag" size={15} color={agendaFilter === 'catalogo' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'catalogo' ? '#FFFFFF' : tColor.muted }]}>Catálogo</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'horarios' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('horarios')}><Feather name="clock" size={15} color={agendaFilter === 'horarios' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'horarios' ? '#FFFFFF' : tColor.muted }]}>Horarios</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'portafolio' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('portafolio')}><Feather name="image" size={15} color={agendaFilter === 'portafolio' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'portafolio' ? '#FFFFFF' : tColor.muted }]}>Portafolio</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'fidelidad' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('fidelidad')}><Feather name="gift" size={15} color={agendaFilter === 'fidelidad' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'fidelidad' ? '#FFFFFF' : tColor.muted }]}>Fidelidad</Text></TouchableOpacity>
+                  </View>
+                </ScrollView>
+
+                {agendaFilter === 'horarios' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24 }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0 }]}>Horarios de Atención</Text>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={handleSaveHours} disabled={isSubmittingConfig}>
+                        <Text style={styles.primaryButtonText}>{isSubmittingConfig ? 'Guardando...' : '💾 Guardar Horarios'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={{ color: tColor.muted, marginBottom: 24 }}>Apaga los días que no trabajes y ajusta tus horas de apertura y cierre.</Text>
+                    {Platform.OS === 'web' ? (
+                      <div className="horarios-grid">
+                        {daysOfWeekMap.map((dayObj) => {
+                          const conf = localHours[dayObj.key] || { isOpen: true, open: '08:00', close: '18:00' };
+                          return (
+                            <View key={dayObj.key} style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24, opacity: conf.isOpen ? 1 : 0.5 }]}>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                                <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>{dayObj.label}</Text>
+                                <Switch 
+                                  value={conf.isOpen} 
+                                  onValueChange={(val) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, isOpen: val } })}
+                                  trackColor={{ false: '#3e3e3e', true: brandColor }}
+                                />
+                              </View>
+                              {conf.isOpen ? (
+                                <View style={{ flexDirection: 'row', gap: 12 }}>
+                                  <View style={{ flex: 1 }}>
+                                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Apertura</Text>
+                                    <input type="time" className="web-input-override" value={conf.open} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, open: e.target.value } })} />
+                                  </View>
+                                  <View style={{ flex: 1 }}>
+                                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Cierre</Text>
+                                    <input type="time" className="web-input-override" value={conf.close} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, close: e.target.value } })} />
+                                  </View>
+                                </View>
+                              ) : (
+                                <Text style={{ color: tColor.muted, textAlign: 'center', fontWeight: 'bold', marginTop: 10 }}>CERRADO</Text>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <Text style={{ color: tColor.text }}>Gestión de horas optimizada para versión web.</Text>
+                    )}
+                  </View>
+                ) : null}
+
+                {/* 🌟 PESTAÑA FIDELIDAD + CAMPAÑAS PUSH (CON CAPITALIZACIÓN Y RESPALDO CONFIG) 🌟 */}
+                {agendaFilter === 'fidelidad' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24 }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0 }]}>Programas de Retención</Text>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={handleSaveLoyalty} disabled={isSubmittingLoyalty}>
+                        <Text style={styles.primaryButtonText}>{isSubmittingLoyalty ? 'Guardando...' : '💾 Guardar Reglas'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={{ color: tColor.muted, marginBottom: 24 }}>Atrae nuevos clientes y retén a los que ya tienes con estas herramientas automatizadas.</Text>
+                    
+                    <View style={styles.bentoGrid}>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, paddingBottom: 24, borderBottomWidth: 1, borderBottomColor: tColor.border }}>
+                          <View style={{ flex: 1, paddingRight: 16 }}>
+                            <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>1. Fidelización por Visitas 🎁</Text>
+                            <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>Alerta al cobrar cuando el cliente alcanza la meta de visitas.</Text>
+                          </View>
+                          <Switch 
+                            value={localLoyalty.isActive} 
+                            onValueChange={(val) => setLocalLoyalty({ ...localLoyalty, isActive: val })}
+                            trackColor={{ false: '#3e3e3e', true: brandColor }}
+                          />
+                        </View>
+
+                        <View style={{ opacity: localLoyalty.isActive ? 1 : 0.5, pointerEvents: localLoyalty.isActive ? 'auto' : 'none' }}>
+                          <View style={{ marginBottom: 20 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Visitas Requeridas para el Premio</Text>
+                            <TextInput 
+                              style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
+                              placeholder="Ej: 10" 
+                              keyboardType="numeric"
+                              placeholderTextColor={tColor.muted} 
+                              value={String(localLoyalty.visitsRequired)} 
+                              onChangeText={t => setLocalLoyalty({ ...localLoyalty, visitsRequired: Number(t.replace(/\D/g, '')) || 0 })} 
+                            />
+                          </View>
+
+                          <View style={{ marginBottom: 20 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Tipo de Recompensa</Text>
+                            {Platform.OS === 'web' ? (
+                              <select className="web-input-override" value={localLoyalty.rewardType} onChange={e => setLocalLoyalty({ ...localLoyalty, rewardType: e.target.value as any })}>
+                                <option value="free_service">Servicio Gratis (100% Descuento)</option>
+                                <option value="discount">Porcentaje de Descuento</option>
+                              </select>
+                            ) : (
+                              <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={localLoyalty.rewardType} editable={false} />
+                            )}
+                          </View>
+
+                          {localLoyalty.rewardType === 'discount' ? (
+                            <View style={{ marginBottom: 20 }}>
+                              <Text style={[styles.inputLabel, { color: tColor.muted }]}>Porcentaje de Descuento (%)</Text>
+                              <TextInput 
+                                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
+                                placeholder="Ej: 50" 
+                                keyboardType="numeric"
+                                placeholderTextColor={tColor.muted} 
+                                value={String(localLoyalty.rewardValue)} 
+                                onChangeText={t => setLocalLoyalty({ ...localLoyalty, rewardValue: Number(t.replace(/\D/g, '')) || 0 })} 
+                              />
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24, paddingBottom: 24, borderBottomWidth: 1, borderBottomColor: tColor.border }}>
+                          <View style={{ flex: 1, paddingRight: 16 }}>
+                            <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>2. Programa de Referidos 🤝</Text>
+                            <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>El cliente que refiere a un amigo nuevo gana un cupón de descuento y +1 Visita.</Text>
+                          </View>
+                          <Switch 
+                            value={localLoyalty.referralActive || false} 
+                            onValueChange={(val) => setLocalLoyalty({ ...localLoyalty, referralActive: val })}
+                            trackColor={{ false: '#3e3e3e', true: brandColor }}
+                          />
+                        </View>
+
+                        <View style={{ opacity: localLoyalty.referralActive ? 1 : 0.5, pointerEvents: localLoyalty.referralActive ? 'auto' : 'none' }}>
+                           <View style={{ marginBottom: 20 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Descuento para el Cliente que Refiere (%)</Text>
+                            <TextInput 
+                              style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
+                              placeholder="Ej: 20" 
+                              keyboardType="numeric"
+                              placeholderTextColor={tColor.muted} 
+                              value={String(localLoyalty.referralDiscountPercent || 20)} 
+                              onChangeText={t => setLocalLoyalty({ ...localLoyalty, referralDiscountPercent: Number(t.replace(/\D/g, '')) || 0 })} 
+                            />
+                            <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 8, fontStyle: 'italic' }}>
+                               Cuando el amigo referido asista a su cita, el cliente que lo recomendó recibirá este porcentaje de descuento para su propio servicio.
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* 🌟 3. CAMPAÑAS PUSH Y REACTIVACIÓN 🌟 */}
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, marginTop: 28 }]}>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', marginBottom: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, gap: 12 }}>
+                        <View>
+                          <Text style={{ color: tColor.text, fontSize: 20, fontWeight: '900' }}>3. Campañas Push y Difusión de Retención 📢</Text>
+                          <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>
+                            Lanza campañas promocionales en tus meses bajos (Tabla: <Text style={{ color: brandColor, fontWeight: 'bold' }}>public.push_campaigns</Text>).
+                          </Text>
+                        </View>
+                        <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: '#10B981', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 }}>
+                          <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '900' }}>📊 Mes sugerido: {monthlyTrafficStats.lowestMonthName}</Text>
+                        </View>
+                      </View>
+
+                      <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 10 }]}>⚡ Plantillas Inteligentes (1 Clic):</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
+                        <TouchableOpacity
+                          style={[styles.chip, { backgroundColor: tColor.input, borderColor: brandColor }]}
+                          onPress={() => {
+                            setCampaignTitle(toTitleCase(`🔥 Promo Especial De ${monthlyTrafficStats.lowestMonthName}`));
+                            setCampaignAudience('all_clients');
+                            setCampaignMessage(toTitleCase(`¡Agenda Tu Cita Esta Semana En ${tenantInfo?.name || 'Nuestro Local'} Y Recibe Un Beneficio Especial O Trae A Un Amigo Para Ganar Un ${localLoyalty.referralDiscountPercent || 20}% De Descuento!`));
+                          }}
+                        >
+                          <Text style={{ color: brandColor, fontSize: 12, fontWeight: 'bold' }}>+ Activar Mes Bajo ({monthlyTrafficStats.lowestMonthName})</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.chip, { backgroundColor: tColor.input, borderColor: '#3B82F6' }]}
+                          onPress={() => {
+                            setCampaignTitle(toTitleCase('🏆 ¡Tienes Un Cupón De Referido Esperando!'));
+                            setCampaignAudience('coupon_holders');
+                            setCampaignMessage(toTitleCase(`¡Hola! Tienes Un Cupón De ${localLoyalty.referralDiscountPercent || 20}% De Descuento Disponible Por Haber Recomendado A Tus Amigos. Agenda Tu Cita Hoy Y Redímelo.`));
+                          }}
+                        >
+                          <Text style={{ color: '#3B82F6', fontSize: 12, fontWeight: 'bold' }}>+ Recordar Cupones Sin Usar</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.chip, { backgroundColor: tColor.input, borderColor: '#10B981' }]}
+                          onPress={() => {
+                            setCampaignTitle(toTitleCase('🎁 ¡Te Extrañamos! Suma Visitas A Tu Tarjeta VIP'));
+                            setCampaignAudience('inactive_30d');
+                            setCampaignMessage(toTitleCase(`Hace Más De 30 Días No Nos Visitas. ¡Reserva Tu Turno En Línea Y Sigue Sumando Puntos Para Tu Premio De Fidelidad!`));
+                          }}
+                        >
+                          <Text style={{ color: '#10B981', fontSize: 12, fontWeight: 'bold' }}>+ Reactivar Inactivos (+30 días)</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 16 }}>
+                        <View style={{ flex: 2 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Título de la Campaña (title)</Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder="Ej: 🔥 20% Off Esta Semana"
+                            placeholderTextColor={tColor.muted}
+                            value={campaignTitle}
+                            onChangeText={(t) => setCampaignTitle(toTitleCase(t))}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Audiencia Objetivo (target_audience)</Text>
+                          {Platform.OS === 'web' ? (
+                            <select className="web-input-override" value={campaignAudience} onChange={(e) => setCampaignAudience(e.target.value)}>
+                              <option value="all_clients">👥 Todos los Clientes</option>
+                              <option value="inactive_30d">⏳ Inactivos (+30 días)</option>
+                              <option value="coupon_holders">🏆 Con Cupones de Referido</option>
+                              <option value="vip_loyalty">🎁 Clientes VIP (Fidelidad)</option>
+                            </select>
+                          ) : (
+                            <TextInput
+                              style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                              value={campaignAudience}
+                              onChangeText={setCampaignAudience}
+                            />
+                          )}
+                        </View>
+                      </View>
+
+                      <View style={{ marginBottom: 20 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Mensaje de la Campaña (message)</Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 80 }]}
+                          placeholder="Escribe El Mensaje Promocional..."
+                          placeholderTextColor={tColor.muted}
+                          multiline
+                          value={campaignMessage}
+                          onChangeText={(t) => setCampaignMessage(toTitleCase(t))}
+                        />
+                      </View>
+
+                      <ContentTermsCheck value={acceptedContentTerms} onChange={setAcceptedContentTerms} tColor={tColor} brandColor={brandColor} />
+
+                      <TouchableOpacity
+                        style={[styles.primaryButton, { backgroundColor: brandColor, alignSelf: isMobile ? 'stretch' : 'flex-start', paddingHorizontal: 28 }]}
+                        onPress={handleSendPushCampaign}
+                        disabled={isSendingCampaign}
+                      >
+                        <Text style={styles.primaryButtonText}>{isSendingCampaign ? 'Enviando campaña...' : '🚀 Lanzar y Registrar Campaña Push'}</Text>
+                      </TouchableOpacity>
+
+                      <View style={{ marginTop: 28, paddingTop: 20, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15, marginBottom: 12 }}>
+                          📋 Historial de Campañas Enviadas ({pushCampaignsList.length})
+                        </Text>
+                        {pushCampaignsList.length === 0 ? (
+                          <Text style={{ color: tColor.muted, fontSize: 13, fontStyle: 'italic' }}>
+                            Aún no has enviado campañas desde este panel.
+                          </Text>
+                        ) : (
+                          <View style={{ gap: 10 }}>
+                            {pushCampaignsList.slice(0, 10).map((cmp, cmpIdx) => {
+                              const isCampActive = cmp.is_active !== false;
+                              return (
+                                <View 
+                                  key={`${cmp.id}-${cmpIdx}`} 
+                                  style={{ 
+                                    backgroundColor: tColor.input, 
+                                    padding: 16, 
+                                    borderRadius: 12, 
+                                    borderWidth: 1, 
+                                    borderColor: isCampActive ? tColor.border : 'rgba(239, 68, 68, 0.25)', 
+                                    opacity: isCampActive ? 1 : 0.6,
+                                    flexDirection: isMobile ? 'column' : 'row', 
+                                    justifyContent: 'space-between', 
+                                    alignItems: isMobile ? 'flex-start' : 'center', 
+                                    gap: 12 
+                                  }}
+                                >
+                                  <View style={{ flex: 1 }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                      <Text style={[{ color: tColor.text, fontWeight: '900', fontSize: 14 }, !isCampActive ? { textDecorationLine: 'line-through' } : {}]}>
+                                        {toTitleCase(cmp.title)}
+                                      </Text>
+                                      <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                                        <Text style={{ color: '#3B82F6', fontSize: 10, fontWeight: 'bold' }}>{cmp.target_audience}</Text>
+                                      </View>
+                                      <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: 'bold' }}>
+                                        🕒 {cmp.sent_at ? new Date(cmp.sent_at).toLocaleDateString('es-ES') : 'Enviada'}
+                                      </Text>
+                                    </View>
+                                    <Text style={{ color: tColor.muted, fontSize: 12.5 }}>{toTitleCase(cmp.message)}</Text>
+                                  </View>
+
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                    {isCampActive ? (
+                                      <TouchableOpacity
+                                        style={{ backgroundColor: 'rgba(245, 158, 11, 0.15)', borderWidth: 1, borderColor: '#F59E0B', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10 }}
+                                        onPress={() => triggerBrowserLocalNotification(toTitleCase(cmp.title), toTitleCase(cmp.message))}
+                                      >
+                                        <Text style={{ color: '#F59E0B', fontSize: 11, fontWeight: '900' }}>🔔 Probar Push</Text>
+                                      </TouchableOpacity>
+                                    ) : null}
+
+                                    <TouchableOpacity
+                                      style={isCampActive ? styles.activeStatusBadge : styles.inactiveStatusBadge}
+                                      onPress={() => handleToggleCampaignStatus(cmp.id, isCampActive)}
+                                    >
+                                      <Text style={isCampActive ? styles.activeStatusText : styles.inactiveStatusText}>
+                                        {isCampActive ? 'ACTIVA' : 'INACTIVA'}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
+
+                {agendaFilter === 'portafolio' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24 }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0 }]}>Portafolio Visual</Text>
+                      {!isAddingPortfolio ? (
+                        <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={() => setIsAddingPortfolio(true)}>
+                          <Text style={styles.primaryButtonText}>+ Agregar Trabajo</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                    <Text style={{ color: tColor.muted, marginBottom: 24 }}>Sube imágenes de tus mejores trabajos y ponles un título atractivo.</Text>
+
+                    {isAddingPortfolio ? (
+                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 600 }]}>
+                        <Text style={{ fontSize: 20, fontWeight: 'bold', color: tColor.text, marginBottom: 20 }}>
+                          {portfolioEditingIndex !== null ? 'Editar Trabajo' : 'Nuevo Trabajo'}
+                        </Text>
+                        
+                        <View style={{ marginBottom: 20 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Foto del Trabajo {portfolioEditingIndex !== null && '(Opcional cambiar)'}</Text>
+                          {!portfolioFormPreview ? (
+                            <View style={{ marginTop: 8 }}>
+                              {Platform.OS === 'web' ? (
+                                <>
+                                  <input type="file" ref={portfolioInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handlePortfolioImageSelect} />
+                                  <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => portfolioInputRef.current?.click()}>
+                                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
+                                    <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Click para subir imagen</Text>
+                                  </TouchableOpacity>
+                                </>
+                              ) : null}
+                            </View>
+                          ) : (
+                            <View style={{ position: 'relative', width: '100%', height: 200, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
+                              {portfolioFormPreview.startsWith('blob:') ? (
+                                Platform.OS === 'web' ? <img src={portfolioFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null
+                              ) : (
+                                <PrivateSupabaseImage path={portfolioFormPreview} alt="Preview" />
+                              )}
+                              <TouchableOpacity style={{ position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 16, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }} onPress={() => { setPortfolioFormPreview(null); setPortfolioFormFile(null); }}>
+                                <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
+                              </TouchableOpacity>
+                            </View>
+                          )}
+                        </View>
+
+                        <View style={{ marginBottom: 16 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Título del Trabajo</Text>
+                          <TextInput 
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
+                            placeholder="Ej: Fade + Barba" 
+                            placeholderTextColor={tColor.muted} 
+                            value={portfolioFormTitle} 
+                            onChangeText={t => setPortfolioFormTitle(toTitleCase(t))} 
+                          />
+                        </View>
+                        
+                        <View style={{ marginBottom: 24 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Descripción Detallada (Opcional)</Text>
+                          <TextInput 
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 60 }]} 
+                            placeholder="Ej: Incluye Vapor De Ozono Y Toalla Caliente..." 
+                            placeholderTextColor={tColor.muted} 
+                            multiline
+                            value={portfolioFormDesc} 
+                            onChangeText={t => setPortfolioFormDesc(toTitleCase(t))} 
+                          />
+                        </View>
+
+                        <ContentTermsCheck value={acceptedContentTerms} onChange={setAcceptedContentTerms} tColor={tColor} brandColor={brandColor} />
+
+                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                           <TouchableOpacity style={[styles.secondaryButton, { flex: 1, backgroundColor: tColor.input, borderColor: tColor.border }]} onPress={handleCancelPortfolioForm}>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Cancelar</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity style={[styles.primaryButton, { flex: 1, backgroundColor: brandColor }]} onPress={handleSavePortfolioItem} disabled={isSubmittingConfig}>
+                            <Text style={styles.primaryButtonText}>{isSubmittingConfig ? 'Guardando...' : '💾 Guardar'}</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={styles.bentoGrid}>
+                        {localPortfolio.length === 0 ? (
+                          <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, width: '100%', alignItems: 'center', padding: 48 }]}>
+                            <Text style={{ fontSize: 48, marginBottom: 16 }}>📸</Text>
+                            <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>Aún no tienes fotos en tu portafolio.</Text>
+                          </View>
+                        ) : (
+                          localPortfolio.map((item, idx) => (
+                            <View key={idx} style={{ position: 'relative', width: isMobile ? '100%' : 250, borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: tColor.card }}>
+                              <TouchableOpacity style={{ width: '100%', height: 280, backgroundColor: tColor.input }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
+                                <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx}`} />
+                              </TouchableOpacity>
+                              <View style={{ padding: 16 }}>
+                                <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
+                                {item.description ? (
+                                  <Text style={{ color: tColor.muted, fontSize: 13, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
+                                ) : null}
+                              </View>
+
+                              <TouchableOpacity style={{ position: 'absolute', top: 12, right: 56, backgroundColor: tColor.input, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: tColor.border }} onPress={() => handleEditPortfolioItem(idx)}>
+                                <Text style={{ fontSize: 14 }}>✏️</Text>
+                              </TouchableOpacity>
+
+                              <TouchableOpacity style={{ position: 'absolute', top: 12, right: 12, backgroundColor: 'rgba(239, 68, 68, 0.9)', width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#FFF' }} onPress={() => handleRemovePortfolioItem(idx)}>
+                                <Text style={{ color: '#FFF', fontWeight: 'bold' }}>✕</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ))
+                        )}
+                      </View>
+                    )}
+                  </View>
+                ) : null}
+
+                {agendaFilter === 'catalogo' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text }]}>Gestión de Catálogo</Text>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={() => { 
+                        setCatalogEditingId(null); 
+                        setCatalogFormName(''); 
+                        setCatalogFormDesc('');
+                        setCatalogFormPrice(''); 
+                        setCatalogFormDuration('30'); 
+                        setCatalogFormPreview(null);
+                        setCatalogFormFile(null);
+                        setIsCatalogModalVisible(true); 
+                      }}>
+                        <Text style={styles.primaryButtonText}>+ Nuevo Servicio</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.bentoGrid}>
+                      {servicesList.length === 0 ? (
+                        <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, width: '100%', alignItems: 'center', padding: 48 }]}>
+                          <Text style={{ fontSize: 48, marginBottom: 16 }}>📋</Text>
+                          <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>Tu catálogo está vacío</Text>
+                        </View>
+                      ) : (
+                        servicesList.map((srv, idx) => (
+                          <View key={`${srv.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320, padding: 0, overflow: 'hidden' }, srv.isActive === false ? { opacity: 0.5 } : {}]}>
+                            {srv.imageUrl ? (
+                              <TouchableOpacity style={{ width: '100%', height: 180, backgroundColor: tColor.input, borderBottomWidth: 1, borderColor: tColor.border }} onPress={() => setExpandedImage({ path: srv.imageUrl!, alt: srv.name })}>
+                                <PrivateSupabaseImage path={srv.imageUrl} alt={srv.name} />
+                              </TouchableOpacity>
+                            ) : null}
+                            <View style={{ padding: 24 }}>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                                <Text style={[styles.cardTitle, { color: tColor.text, marginBottom: 8 }, srv.isActive === false ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(srv.name)}</Text>
+                                <TouchableOpacity style={srv.isActive !== false ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => handleToggleServiceStatus(srv.id, srv.isActive !== false)}>
+                                  <Text style={srv.isActive !== false ? styles.activeStatusText : styles.inactiveStatusText}>{srv.isActive !== false ? 'ACTIVO' : 'INACTIVO'}</Text>
+                                </TouchableOpacity>
+                              </View>
+                              
+                              {srv.description ? (
+                                <Text style={{ color: tColor.muted, marginBottom: 16, lineHeight: 22 }}>{toTitleCase(srv.description)}</Text>
+                              ) : (
+                                <Text style={{ color: tColor.muted, marginBottom: 16 }}>⏱️ {srv.durationMinutes || 30} minutos</Text>
+                              )}
+                              
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 'auto', borderTopWidth: 1, borderColor: tColor.border, paddingTop: 16 }}>
+                                <Text style={{ fontSize: 24, fontWeight: '900', color: brandColor }}>${srv.price}</Text>
+                                <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border }]} onPress={() => handleEditCatalogService(srv)}>
+                                  <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Editar</Text>
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          </View>
+                        ))
+                      )}
+                    </View>
+                  </View>
+                ) : null}
+
+                {(agendaFilter === 'today' || agendaFilter === 'upcoming') ? (
+                  <View style={styles.bentoGrid}>
+                    {activeOrdersList.length === 0 ? (
+                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>No hay órdenes programadas.</Text></View>
+                    ) : (
+                      activeOrdersList.map((order, idx) => {
+                        const orderPhoneClean = cleanPhoneDigits(order.clientPhone);
+                        const earnedInDb = Number(order.clientMetadata?.earnedReferralDiscounts || 0);
+                        const liveReferredFriends = orderPhoneClean ? (pendingReferralsByPhone[orderPhoneClean] || []) : [];
+                        const totalReferrerCoupons = Math.max(0, earnedInDb + liveReferredFriends.length);
+
+                        return (
+                          <View key={`${order.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
+                            <View style={styles.orderHeader}>
+                              {isAutomotive ? (
+                                <View style={[styles.plateBadge, { backgroundColor: brandColor }]}><Text style={styles.plateText}>{order.plate || order.metadata?.carPlate || 'N/A'}</Text></View>
+                              ) : (
+                                <View style={[styles.plateBadge, { backgroundColor: brandColor }]}><Text style={styles.plateText}>🎫 Turno {idx + 1}</Text></View>
+                              )}
+                              <View style={[styles.statusBadge, { backgroundColor: tColor.input }]}><Text style={[styles.statusDot, { color: brandColor }]}>●</Text><Text style={{ color: tColor.text, fontSize: 12, fontWeight: 'bold' }}>{formatWallClockTime12h(order)}</Text></View>
+                            </View>
+                            
+                            <View style={styles.orderDetails}>
+                              {((order.metadata?.referredBy && order.metadata.referredBy.trim() !== '') || (order.metadata?.preferences?.referredBy && order.metadata.preferences.referredBy.trim() !== '')) ? (
+                                <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, alignSelf: 'flex-start', marginBottom: 12, borderWidth: 1, borderColor: '#10B981' }}>
+                                  <Text style={{ color: '#10B981', fontSize: 11, fontWeight: '900', marginBottom: 2 }}>🤝 RECOMENDADO POR: {order.metadata.referredBy || order.metadata.preferences.referredBy}</Text>
+                                  <Text style={{ color: tColor.text, fontSize: 10 }}>Al cerrar esta orden se acreditará el {tenantInfo?.loyaltyConfig?.referralDiscountPercent || 20}% de descuento al referidor.</Text>
+                                </View>
+                              ) : null}
+
+                              {(totalReferrerCoupons > 0) ? (
+                                <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, alignSelf: 'flex-start', marginBottom: 12, borderWidth: 1, borderColor: '#3B82F6' }}>
+                                  <Text style={{ color: '#3B82F6', fontSize: 11, fontWeight: '900', marginBottom: 2 }}>
+                                    🏆 CUPÓN POR REFERIR ({totalReferrerCoupons} disp.){liveReferredFriends.length > 0 ? ` — Refirió a: ${liveReferredFriends.join(', ')}` : ''}
+                                  </Text>
+                                  <Text style={{ color: tColor.text, fontSize: 10 }}>¡Este cliente recomendó a un amigo! Aplica su {tenantInfo?.loyaltyConfig?.referralDiscountPercent || 20}% de descuento al cobrar.</Text>
+                                </View>
+                              ) : null}
+
+                              {isAutomotive ? (
+                                <>
+                                  <Text style={{ fontSize: 20, fontWeight: '800', color: tColor.text, marginBottom: 4 }}>{toTitleCase(order.metadata?.carBrand || order.brand || '')} {toTitleCase(order.metadata?.carModel || order.model || '')}</Text>
+                                  <Text style={{ fontSize: 14, color: tColor.muted }}>Cliente: <Text style={{ fontWeight: 'bold', color: tColor.text }}>{toTitleCase(order.clientName || '')}</Text></Text>
+                                </>
+                              ) : (
+                                <>
+                                  <Text style={{ fontSize: 20, fontWeight: '800', color: tColor.text, marginBottom: 4 }}>{toTitleCase(order.clientName || 'Cliente')}</Text>
+                                  <Text style={{ fontSize: 14, color: tColor.muted }}>Contacto: <Text style={{ fontWeight: 'bold', color: tColor.text }}>{order.clientPhone || order.clientEmail || 'N/A'}</Text></Text>
+                                </>
+                              )}
+                            </View>
+
+                            <View style={[styles.serviceBox, { backgroundColor: tColor.input, borderColor: tColor.border }]}>
+                              <Text style={{ color: tColor.text, fontSize: 14, fontWeight: '700' }}>✨ {toTitleCase(order.service?.name || order.serviceType || 'Servicio General')}</Text>
+                              {(() => {
+                                const stfId = order.staffId || order.metadata?.assignedStaffId;
+                                const stfObj = staffList.find(s => s.id === stfId);
+                                const stfName = stfObj?.name || order.metadata?.assignedStaffName;
+                                return stfName ? (
+                                  <Text style={{ color: brandColor, fontSize: 12, fontWeight: '800', marginTop: 6 }}>
+                                    👤 {staffTerm}: {toTitleCase(stfName)}
+                                  </Text>
+                                ) : (
+                                  <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '600', marginTop: 6 }}>
+                                    👤 {staffTerm}: Cualquiera disponible
+                                  </Text>
+                                );
+                              })()}
+                            </View>
+                            {/* Estado de confirmación de asistencia (6h antes) */}
+                            {(() => {
+                              const isConfirmed = order.status === 'confirmed' || order.metadata?.attendanceConfirmed === true;
+                              return (
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: isConfirmed ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)', borderWidth: 1, borderColor: isConfirmed ? '#10B981' : 'rgba(245, 158, 11, 0.4)' }}>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                    <Feather name={isConfirmed ? 'check-circle' : 'clock'} size={13} color={isConfirmed ? '#10B981' : '#F59E0B'} />
+                                    <Text style={{ color: isConfirmed ? '#10B981' : '#F59E0B', fontSize: 11.5, fontWeight: '900' }}>
+                                      {isConfirmed ? 'Asistencia Confirmada' : 'Sin confirmar (Aviso 6h)'}
+                                    </Text>
+                                  </View>
+                                  {!isConfirmed ? (
+                                    <TouchableOpacity
+                                      disabled={sendingReminderAptId === order.id}
+                                      onPress={() => handleSendSixHourReminder(order)}
+                                      style={{ backgroundColor: 'rgba(245, 158, 11, 0.2)', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6 }}
+                                    >
+                                      <Text style={{ color: '#F59E0B', fontSize: 10.5, fontWeight: '900' }}>
+                                        {sendingReminderAptId === order.id ? 'Enviando...' : '🔔 Recordar 6h'}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  ) : null}
+                                </View>
+                              );
+                            })()}
+
+                            <View style={{ flexDirection: 'row', gap: 10, marginTop: 'auto' }}>
+                              <TouchableOpacity
+                                style={[styles.primaryButton, { backgroundColor: brandColor, flex: 1 }]}
+                                onPress={() => handleOpenPOS(order)}
+                              >
+                                <Text style={styles.primaryButtonText}>📋 Completar Orden</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: '#EF4444', paddingHorizontal: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 }}
+                                onPress={() => openCancelAppointmentModal(order, 'staff')}
+                              >
+                                <Feather name="x-circle" size={15} color="#EF4444" />
+                                <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>Cancelar</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
+                  </View>
+                ) : null}
+
+                {agendaFilter === 'reports' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24, display: isPrinting ? 'none' : 'flex' }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0 }]}>Facturación y Analítica de Tráfico</Text>
+                      <TouchableOpacity 
+                        style={[styles.secondaryButton, { backgroundColor: showTrafficChart ? brandColor : tColor.input, borderColor: showTrafficChart ? brandColor : tColor.border, paddingVertical: 10, paddingHorizontal: 18 }]} 
+                        onPress={() => setShowTrafficChart(!showTrafficChart)}
+                      >
+                        <Text style={[styles.secondaryButtonText, { color: showTrafficChart ? '#FFF' : tColor.text, fontSize: 13 }]}>
+                          {showTrafficChart ? '📊 Ocultar Gráfica de Tráfico' : '📈 Ver Gráfica de Tráfico y Campañas'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    
+                    <View style={[styles.bentoGrid, { marginBottom: 32, display: isPrinting ? 'none' : 'flex' }]}>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: brandColor, padding: 24 }]}>
+                        <Text style={[styles.kpiLabel, { color: tColor.muted }]}>TOTAL DE INGRESOS</Text>
+                        <Text style={[styles.kpiValue, { color: tColor.text }]}>${totalRevenue.toLocaleString('en-US')}</Text>
+                      </View>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24 }]}>
+                        <Text style={[styles.kpiLabel, { color: tColor.muted }]}>SERVICIOS COMPLETADOS</Text>
+                        <Text style={[styles.kpiValue, { color: tColor.text }]}>{reportsData.length}</Text>
+                      </View>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: '#3B82F6', padding: 24 }]}>
+                        <Text style={[styles.kpiLabel, { color: tColor.muted }]}>PROMOS / REFERIDOS APLICADOS</Text>
+                        <Text style={[styles.kpiValue, { color: '#3B82F6' }]}>
+                          {reportsData.filter(r => getReportDiscountInfo(r, servicesList) !== null).length}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {(showTrafficChart && !isPrinting) ? (
+                      <View style={[styles.bentoGrid, { marginBottom: 32 }]}>
+                        <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, flex: 2, minWidth: isMobile ? '100%' : 540, padding: 24 }]}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+                            <View style={{ flex: 1, minWidth: 240 }}>
+                              <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>📈 Tráfico Mensual y Recaudo ({new Date().getFullYear()})</Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 2 }}>
+                                💡 Pasa el mouse (o toca una barra) para ver los clientes atendidos y el recaudo detallado.
+                              </Text>
+                            </View>
+                            <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#10B981' }} />
+                                <Text style={{ color: tColor.muted, fontSize: 11 }}>Mes Pico</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: brandColor }} />
+                                <Text style={{ color: tColor.muted, fontSize: 11 }}>Estándar</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#EF4444' }} />
+                                <Text style={{ color: tColor.muted, fontSize: 11 }}>Mes Bajo</Text>
+                              </View>
+                            </View>
+                          </View>
+
+                          <View style={{ 
+                            minHeight: 78, 
+                            backgroundColor: activeMonthTooltipData ? (theme === 'dark' ? 'rgba(15, 23, 42, 0.95)' : '#FFFFFF') : tColor.input, 
+                            borderRadius: 14, 
+                            paddingVertical: 12, 
+                            paddingHorizontal: 16, 
+                            marginBottom: 16, 
+                            borderWidth: 1, 
+                            borderColor: activeMonthTooltipData ? brandColor : tColor.border,
+                            flexDirection: isMobile ? 'column' : 'row',
+                            justifyContent: 'space-between',
+                            alignItems: isMobile ? 'flex-start' : 'center',
+                            gap: 12,
+                            overflow: 'hidden'
+                          }}>
+                            {activeMonthTooltipData ? (
+                              <>
+                                <View style={{ flex: 1, minWidth: 200 }}>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                    <Text style={{ color: brandColor, fontWeight: '900', fontSize: 15, textTransform: 'uppercase' }}>
+                                      📅 {activeMonthTooltipData.fullName} {new Date().getFullYear()}
+                                    </Text>
+                                    {activeMonthTooltipData.isLowest ? (
+                                      <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#EF4444' }}>
+                                        <Text style={{ color: '#EF4444', fontSize: 10, fontWeight: '900' }}>⚠️ MES MÁS BAJO</Text>
+                                      </View>
+                                    ) : null}
+                                    {activeMonthTooltipData.isHighest ? (
+                                      <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#10B981' }}>
+                                        <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>🔥 RÉCORD DE TRÁFICO</Text>
+                                      </View>
+                                    ) : null}
+                                  </View>
+
+                                  <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '600', flexShrink: 1 }} numberOfLines={2}>
+                                    👥 <Text style={{ fontWeight: '900' }}>{activeMonthTooltipData.uniqueUsersCount} cliente(s) único(s)</Text> ({activeMonthTooltipData.count} servicios):{' '}
+                                    <Text style={{ color: tColor.muted }}>
+                                      {activeMonthTooltipData.clientsList.length > 0 
+                                        ? (activeMonthTooltipData.clientsList.slice(0, 4).join(', ') + (activeMonthTooltipData.clientsList.length > 4 ? ` y +${activeMonthTooltipData.clientsList.length - 4} más` : ''))
+                                        : 'Sin clientes registrados en este mes'}
+                                    </Text>
+                                  </Text>
+                                </View>
+
+                                <View style={{ flexDirection: 'row', gap: 18, alignItems: 'center', borderLeftWidth: isMobile ? 0 : 1, borderLeftColor: tColor.border, paddingLeft: isMobile ? 0 : 16, flexWrap: 'wrap' }}>
+                                  <View>
+                                    <Text style={{ color: tColor.muted, fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>Recaudo del Mes</Text>
+                                    <Text style={{ color: '#10B981', fontSize: 20, fontWeight: '900' }}>
+                                      ${activeMonthTooltipData.revenue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </Text>
+                                  </View>
+                                  <View>
+                                    <Text style={{ color: tColor.muted, fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>Ticket Prom.</Text>
+                                    <Text style={{ color: tColor.text, fontSize: 15, fontWeight: '800' }}>
+                                      ${activeMonthTooltipData.avgTicket}
+                                    </Text>
+                                  </View>
+                                  {activeMonthTooltipData.promosUsed > 0 ? (
+                                    <View>
+                                      <Text style={{ color: '#3B82F6', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>Promos</Text>
+                                      <Text style={{ color: '#3B82F6', fontSize: 15, fontWeight: '900' }}>
+                                        🏆 {activeMonthTooltipData.promosUsed}
+                                      </Text>
+                                    </View>
+                                  ) : null}
+                                </View>
+                              </>
+                            ) : (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                                <Text style={{ fontSize: 20 }}>👆</Text>
+                                <Text style={{ color: tColor.muted, fontSize: 12.5, fontWeight: '600', flex: 1, flexWrap: 'wrap', lineHeight: 18 }}>
+                                  Pasa el cursor sobre cualquiera de los 12 meses abajo para inspeccionar el <Text style={{ color: tColor.text, fontWeight: 'bold' }}>recaudo ($)</Text>, <Text style={{ color: tColor.text, fontWeight: 'bold' }}>usuarios atendidos</Text> y <Text style={{ color: tColor.text, fontWeight: 'bold' }}>ticket promedio</Text>.
+                                </Text>
+                              </View>
+                            )}
+                          </View>
+
+                          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                            <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', height: 215, minWidth: 560, width: '100%', paddingTop: 36, paddingBottom: 8, gap: 10, borderBottomWidth: 1, borderColor: tColor.border }}>
+                              {monthlyTrafficStats.items.map((m) => {
+                                const isHovered = hoveredMonthIdx === m.index;
+                                const barColor = m.isLowest ? '#EF4444' : (m.isHighest ? '#10B981' : (m.count > 0 ? brandColor : tColor.border));
+
+                                return (
+                                  <TouchableOpacity
+                                    key={m.shortName}
+                                    activeOpacity={0.85}
+                                    onPress={() => setHoveredMonthIdx(isHovered ? null : m.index)}
+                                    {...(Platform.OS === 'web' ? {
+                                      onMouseEnter: () => setHoveredMonthIdx(m.index),
+                                      onMouseLeave: () => setHoveredMonthIdx(null),
+                                      className: 'chart-bar-col'
+                                    } : {}) as any}
+                                    style={{ flex: 1, alignItems: 'center', height: '100%', justifyContent: 'flex-end', minWidth: 40, position: 'relative' }}
+                                  >
+                                    {isHovered ? (
+                                      <View style={{ 
+                                        position: 'absolute', 
+                                        top: -30, 
+                                        backgroundColor: '#0F172A', 
+                                        paddingHorizontal: 7, 
+                                        paddingVertical: 3, 
+                                        borderRadius: 6, 
+                                        borderWidth: 1, 
+                                        borderColor: barColor,
+                                        zIndex: 30,
+                                        alignItems: 'center'
+                                      }}>
+                                        <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>${m.revenue}</Text>
+                                        <Text style={{ color: '#FFF', fontSize: 9, fontWeight: 'bold' }}>👥 {m.uniqueUsersCount}</Text>
+                                      </View>
+                                    ) : (
+                                      <View style={{ alignItems: 'center', marginBottom: 4 }}>
+                                        <Text style={{ color: m.count > 0 ? tColor.text : tColor.muted, fontSize: 10.5, fontWeight: '900' }}>
+                                          {m.count > 0 ? `$${m.revenue}` : '0'}
+                                        </Text>
+                                        <Text style={{ color: tColor.muted, fontSize: 9, fontWeight: 'bold' }}>
+                                          👥 {m.uniqueUsersCount}
+                                        </Text>
+                                      </View>
+                                    )}
+
+                                    <View 
+                                      style={{ 
+                                        width: isHovered ? '88%' : '72%', 
+                                        maxWidth: 34,
+                                        height: `${m.heightPct}%`, 
+                                        backgroundColor: barColor, 
+                                        borderRadius: 8,
+                                        opacity: isHovered ? 1 : (m.count > 0 ? 0.9 : 0.3),
+                                        borderWidth: isHovered ? 2 : 0,
+                                        borderColor: '#FFFFFF'
+                                      }} 
+                                    />
+
+                                    <Text style={{ 
+                                      color: isHovered ? brandColor : (m.isLowest ? '#EF4444' : tColor.muted), 
+                                      fontSize: 11.5, 
+                                      fontWeight: isHovered || m.isLowest || m.isHighest ? '900' : 'bold', 
+                                      marginTop: 8 
+                                    }}>
+                                      {m.shortName}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          </ScrollView>
+                        </View>
+
+                        <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, flex: 1, minWidth: isMobile ? '100%' : 300, padding: 24, justifyContent: 'space-between' }]}>
+                          <View>
+                            <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, alignSelf: 'flex-start', marginBottom: 12, borderWidth: 1, borderColor: '#EF4444' }}>
+                              <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: '900' }}>💡 ALERTA DE TRÁFICO PARA EL DUEÑO</Text>
+                            </View>
+                            <Text style={{ color: tColor.text, fontSize: 17, fontWeight: '900', marginBottom: 8 }}>
+                              Mes con menor flujo: <Text style={{ color: '#EF4444' }}>{monthlyTrafficStats.lowestMonthName}</Text> ({monthlyTrafficStats.lowestMonthCount} servicios)
+                            </Text>
+                            <Text style={{ color: tColor.muted, fontSize: 13, lineHeight: 20, marginBottom: 16 }}>
+                              {monthlyTrafficStats.highestMonthCount > 0 
+                                ? `Tu mes más fuerte es ${monthlyTrafficStats.highestMonthName} (${monthlyTrafficStats.highestMonthCount} servicios). Para levantar las ventas en ${monthlyTrafficStats.lowestMonthName}, activa una campaña:`
+                                : `A medida que cierres órdenes, aquí verás qué mes cae el tráfico para activar promociones inteligentes:`}
+                            </Text>
+
+                            <View style={{ backgroundColor: tColor.input, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: tColor.border, marginBottom: 16 }}>
+                              <Text style={{ color: '#10B981', fontSize: 12, fontWeight: 'bold', marginBottom: 4 }}>🚀 Campañas sugeridas:</Text>
+                              <Text style={{ color: tColor.text, fontSize: 12, lineHeight: 18 }}>
+                                • Subir el bono de referidos al <Text style={{ fontWeight: 'bold' }}>25% o 30%</Text> durante {monthlyTrafficStats.lowestMonthName}.{'\n'}
+                                • Lanzar una campaña en <Text style={{ fontWeight: 'bold' }}>push_campaigns</Text> a tus clientes inactivos.
+                              </Text>
+                            </View>
+                          </View>
+
+                          <TouchableOpacity 
+                            style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 12 }]} 
+                            onPress={() => {
+                              setCampaignTitle(toTitleCase(`🔥 Promo Especial De ${monthlyTrafficStats.lowestMonthName}`));
+                              setCampaignAudience('all_clients');
+                              setCampaignMessage(toTitleCase(`¡Reserva Tu Cita En ${tenantInfo?.name || 'Nuestro Local'} Este Mes Y Aprovecha Nuestros Beneficios VIP Y Descuentos Por Referir Amigos!`));
+                              setAgendaFilter('fidelidad');
+                            }}
+                          >
+                            <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>🎁 Crear Campaña en Fidelidad</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : null}
+
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24, marginBottom: 32, flexDirection: isMobile ? 'column' : 'row', gap: 16, alignItems: isMobile ? 'stretch' : 'flex-end', zIndex: 10, display: isPrinting ? 'none' : 'flex' }]}>
+                      <View style={styles.filterGroup}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Desde:</Text>
+                        {Platform.OS === 'web' ? (
+                          <input type="date" className="web-input-override" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} />
+                        ) : (
+                          <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={reportStartDate} onChangeText={setReportStartDate} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} />
+                        )}
+                      </View>
+                      <View style={styles.filterGroup}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hasta:</Text>
+                        {Platform.OS === 'web' ? (
+                          <input type="date" className="web-input-override" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} />
+                        ) : (
+                          <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={reportEndDate} onChangeText={setReportEndDate} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} />
+                        )}
+                      </View>
+                      <View style={styles.filterGroup}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Filtrar Personal:</Text>
+                        {Platform.OS === 'web' ? (
+                          <select className="web-input-override" value={reportMechanic} onChange={(e) => setReportMechanic(e.target.value)}>
+                            <option value="">Todo el personal</option>
+                            {staffList.map((m, idx) => <option key={`${m.id}-${idx}`} value={m.id}>{m.name}</option>)}
+                          </select>
+                        ) : (
+                          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                            <TouchableOpacity style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border }, !reportMechanic ? { backgroundColor: brandColor, borderColor: brandColor } : {}]} onPress={() => setReportMechanic('')}><Text style={[styles.chipText, { color: tColor.muted }, !reportMechanic ? styles.activeChipText : {}]}>Todos</Text></TouchableOpacity>
+                            {staffList.map((m, idx) => (
+                              <TouchableOpacity key={`${m.id}-${idx}`} style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border }, reportMechanic === m.id ? { backgroundColor: brandColor, borderColor: brandColor } : {}]} onPress={() => setReportMechanic(m.id)}>
+                                <Text style={[styles.chipText, { color: tColor.muted }, reportMechanic === m.id ? styles.activeChipText : {}]}>{m.name}</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </ScrollView>
+                        )}
+                      </View>
+                      
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, height: 48, paddingHorizontal: 24, justifyContent: 'center' }]} onPress={() => { setReportPage(1); loadReports(); }}>
+                        <Text style={styles.primaryButtonText}>🔍 Filtrar</Text>
+                      </TouchableOpacity>
+                      
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12 }}>
+                        <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, height: 48, paddingHorizontal: 16 }]} onPress={exportToCSV}>
+                          <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>📥 CSV</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.primaryButton, { height: 48, backgroundColor: brandColor, paddingHorizontal: 16 }]} onPress={exportToPDF}>
+                          <Text style={styles.primaryButtonText}>🖨️ PDF</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+
+                    {(isPrinting && Platform.OS === 'web') ? (
+                       <View style={{ marginBottom: 20, paddingBottom: 20, borderBottomWidth: 2, borderColor: '#000' }}>
+                         <Text style={{ fontSize: 24, fontWeight: 'bold', color: '#000' }}>Reporte de Servicios Oficial</Text>
+                         <Text style={{ fontSize: 14, color: '#333', marginTop: 8 }}>Periodo: {new Date(reportStartDate).toLocaleDateString('es-ES')} al {new Date(reportEndDate).toLocaleDateString('es-ES')}</Text>
+                         <Text style={{ fontSize: 14, color: '#333' }}>Personal: {reportMechanic ? staffList.find(m => m.id === reportMechanic)?.name : 'Todos'}</Text>
+                         <View style={{ flexDirection: 'row', gap: 32, marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderColor: '#CCC' }}>
+                            <Text style={{ fontWeight: 'bold', color: '#000' }}>Total de Ingresos: ${totalRevenue.toLocaleString('en-US')}</Text>
+                            <Text style={{ fontWeight: 'bold', color: '#000' }}>Servicios: {reportsData.length}</Text>
+                         </View>
+                       </View>
+                    ) : null}
+
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden', minHeight: 500 }, isPrinting ? { backgroundColor: 'transparent', borderWidth: 0, overflow: 'visible', minHeight: 'auto' } : {}]}>
+                      {Platform.OS === 'web' ? (
+                        <div className="table-responsive">
+                          <table className="glass-table">
+                            <thead>
+                              <tr>
+                                <th>FECHA</th>
+                                <th>{isAutomotive ? 'PLACA / PROMO' : 'ID REF / BENEFICIO'}</th>
+                                <th>CLIENTE</th>
+                                <th>SERVICIO</th>
+                                <th>PERSONAL</th>
+                                <th>VALOR ($)</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {reportsData.length > 0 ? (
+                                paginatedReports.map((r: any, i: number) => {
+                                  if (r._empty) {
+                                    return (
+                                      <tr key={`empty-${i}`} className="empty-row">
+                                        <td className="text-transparent">-</td>
+                                        <td className="text-transparent">-</td>
+                                        <td className="text-transparent">-</td>
+                                        <td className="text-transparent">-</td>
+                                        <td className="text-transparent">-</td>
+                                        <td className="text-transparent">-</td>
+                                      </tr>
+                                    );
+                                  }
+
+                                  const discountBadge = getReportDiscountInfo(r, servicesList);
+
+                                  return (
+                                    <tr key={`${r.id || 'row'}-${i}`}>
+                                      <td>{r.date ? new Date(r.date).toLocaleDateString('es-ES') : (r.createdAt ? new Date(r.createdAt).toLocaleDateString('es-ES') : 'N/A')}</td>
+                                      <td>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-start' }}>
+                                          <strong>{isAutomotive ? (r.plate || 'N/A') : (r.id ? r.id.slice(0,6).toUpperCase() : 'N/A')}</strong>
+                                          {discountBadge ? (
+                                            <span style={{ 
+                                              backgroundColor: discountBadge.bg, 
+                                              color: discountBadge.color, 
+                                              border: `1px solid ${discountBadge.color}`, 
+                                              padding: '2px 8px', 
+                                              borderRadius: '6px', 
+                                              fontSize: '11px', 
+                                              fontWeight: 900,
+                                              letterSpacing: '0.3px'
+                                            }}>
+                                              {discountBadge.label}
+                                            </span>
+                                          ) : (
+                                            <span style={{ color: tColor.muted, fontSize: '11px' }}>Tarifa Regular</span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td>{toTitleCase(r.clientName || '')}</td>
+                                      <td>{toTitleCase(r.service || '')}</td>
+                                      <td className="text-muted" style={{ color: tColor.muted }}>{toTitleCase(r.mechanicName || 'Especialista')}</td>
+                                      <td className="text-accent" style={{ color: discountBadge ? '#FFD700' : brandColor, fontWeight: 900 }}>
+                                        ${Number(r.cost || r.finalCost || 0).toLocaleString('en-US')}
+                                      </td>
+                                    </tr>
+                                  );
+                                })
+                              ) : (
+                                <tr><td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: tColor.muted, fontWeight: 'bold', fontSize: '15px' }}>No hay registros en estas fechas.</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <Text style={{ color: tColor.text, padding: 20 }}>Visualización optimizada para Web.</Text>
+                      )}
+
+                      {!isPrinting ? (
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 24, borderTopWidth: 1, borderTopColor: tColor.border, backgroundColor: theme === 'dark' ? '#12161C' : '#E2E8F0', position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border }, reportPage === 1 ? { opacity: 0.5 } : {}]} disabled={reportPage === 1} onPress={() => setReportPage(p => Math.max(1, p - 1))}>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Anterior</Text>
+                          </TouchableOpacity>
+                          <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 14 }}>Página {reportPage} de {totalPages}</Text>
+                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border }, reportPage === totalPages ? { opacity: 0.5 } : {}]} disabled={reportPage === totalPages} onPress={() => setReportPage(p => Math.min(totalPages, p + 1))}>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Siguiente</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : null}
+                    </View>
+                  </View>
+                ) : null}
+
+                {agendaFilter === 'staff' ? (
+                  <View>
+                    <Text style={[styles.sectionTitle, { color: tColor.text }]}>Gestión de Equipo / Staff</Text>
+                    <View style={styles.bentoGrid}>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
+                        <Text style={[styles.cardTitle, { color: tColor.text }]}>➕ Registrar Miembro</Text>
+                        
+                        <View style={{ flexDirection: 'column', gap: 16 } as any}>
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Nombre Completo</Text>
+                            <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej: Andy Perez" placeholderTextColor={tColor.muted} value={newStaffName} onChangeText={text => setNewStaffName(toTitleCase(text))} />
+                          </View>
+                          
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Especialidad / Cargo</Text>
+                            {Platform.OS === 'web' ? (
+                              <select className="web-input-override" value={selectedStaffRole} onChange={e => setSelectedStaffRole(e.target.value)}>
+                                <option value="" disabled>Seleccione especialidad acorde al negocio</option>
+                                {availableRoles.map((role, idx) => <option key={`${role}-${idx}`} value={role}>{role}</option>)}
+                                <option value="custom">Otro (Personalizado)...</option>
+                              </select>
+                            ) : (
+                              <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej: Especialista General" placeholderTextColor={tColor.muted} value={selectedStaffRole} onChangeText={text => setSelectedStaffRole(toTitleCase(text))} />
+                            )}
+                          </View>
+
+                          {selectedStaffRole === 'custom' ? (
+                            <View>
+                              <Text style={[styles.inputLabel, { color: brandColor }]}>Especifique el cargo:</Text>
+                              <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej: Especialista Senior" placeholderTextColor={tColor.muted} value={customStaffRole} onChangeText={text => setCustomStaffRole(toTitleCase(text))} />
+                            </View>
+                          ) : null}
+
+                          <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={handleAddStaff as any}>
+                            <Text style={styles.primaryButtonText}>Guardar en el Sistema</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
+                        <Text style={[styles.cardTitle, { color: tColor.text }]}>📋 Personal Registrado ({staffList.length})</Text>
+                        <ScrollView style={{ maxHeight: 350 }} showsVerticalScrollIndicator={false}>
+                          {staffList.map((m, idx) => (
+                            <View key={`${m.id}-${idx}`} style={[styles.staffRow, { backgroundColor: tColor.input, borderColor: tColor.border }, !m.isActive ? { opacity: 0.6 } : {}]}>
+                              <View>
+                                <Text style={[styles.staffName, { color: tColor.text }, !m.isActive ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(m.name)}</Text>
+                                <Text style={[styles.staffRole, { color: brandColor }]}>{toTitleCase(m.role)}</Text>
+                              </View>
+                              <TouchableOpacity style={m.isActive ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => toggleStaffStatus(m.id, m.isActive ?? true)}>
+                                <Text style={m.isActive ? styles.activeStatusText : styles.inactiveStatusText}>{m.isActive ? 'ACTIVO' : 'INACTIVO'}</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ))}
+                        </ScrollView>
+                      </View>
+                    </View>
+                  </View>
+                ) : null}
+
+              </View>
+            )}
+          </View>
+        ) : null}
+      </ScrollView>
+
+      {/* ==========================================
+          MODALES B2C / POS (100% COMPLETOS)
+          ========================================== */}
+      {isBookingModalOpen ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border }]}>
+              <TouchableOpacity style={[styles.closeBtn, { backgroundColor: tColor.input }]} onPress={() => { setIsBookingModalOpen(false); setIsPlateSearched(false); }}><Text style={{color: tColor.text}}>✕</Text></TouchableOpacity>
+              <Text style={[styles.pageTitle, { color: tColor.text }]}>Nueva Reserva</Text>
+              
+              {isAutomotive && !isPlateSearched ? (
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ fontSize: 48, marginBottom: 16 }}>🚗</Text>
+                  <Text style={{ fontSize: 20, fontWeight: '800', color: tColor.text, marginBottom: 12 }}>¿Ya nos has visitado antes?</Text>
+                  <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, maxWidth: 250, textAlign: 'center', fontSize: 20, letterSpacing: 2, marginBottom: 24 }]} placeholder="Placa (Ej: JNT776)" placeholderTextColor={tColor.muted} value={searchPlate} onChangeText={text => setSearchPlate(text.toUpperCase())} />
+                  <View style={{ flexDirection: 'row', gap: 16, width: '100%', justifyContent: 'center' }}>
+                    <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, flex: 1, maxWidth: 200 }]} onPress={handleSearchVehicle} disabled={isSearchingPlate}><Text style={styles.primaryButtonText}>{isSearchingPlate ? 'Buscando...' : '🔍 Buscar Placa'}</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, flex: 1, maxWidth: 200 }]} onPress={() => setIsPlateSearched(true)}><Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Primera Vez ➔</Text></TouchableOpacity>
+                  </View>
+                </View>
+              ) : (
+                <View style={{ flexDirection: 'column', gap: 16 } as any}>
+                  <View style={{ marginBottom: 24 }}>
+                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Servicio Seleccionado</Text>
+                    {Platform.OS === 'web' ? (
+                      <select className="web-input-override" value={selectedServiceType} onChange={e => setSelectedServiceType(e.target.value)}>
+                        {activeCatalogServices.map((srv, idx) => <option key={`${srv.id}-${idx}`} value={srv.id}>{toTitleCase(srv.name)} - ${srv.price}</option>)}
+                      </select>
+                    ) : (
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={selectedServiceType} editable={false} />
+                    )}
+                  </View>
+
+                  {(activeStaffList.length > 0) ? (
+                    <View style={{ marginBottom: 24, backgroundColor: tColor.input, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: brandColor, borderStyle: 'dashed' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
+                        <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 0 }]}>
+                          👤 Elegir {staffTerm} ({activeStaffList.length} {activeStaffList.length === 1 ? 'profesional activo' : 'profesionales en simultáneo'})
+                        </Text>
+                        {(appointmentDate && appointmentTime) ? (() => {
+                          const freeNow = getFreeStaffForSlot(appointmentDate, appointmentTime, selectedServiceType);
+                          return (
+                            <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.15)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: '#10B981' }}>
+                              <Text style={{ color: '#10B981', fontSize: 11, fontWeight: '900' }}>
+                                ✅ {freeNow.length} de {activeStaffList.length} disponible(s) a las {appointmentTime}
+                              </Text>
+                            </View>
+                          );
+                        })() : null}
+                      </View>
+                      {Platform.OS === 'web' ? (
+                        <select className="web-input-override" value={selectedBookingStaff} onChange={e => setSelectedBookingStaff(e.target.value)}>
+                          <option value="">✨ Cualquiera disponible (Asignación inteligente de silla libre)</option>
+                          {activeStaffList.map((stf, idx) => {
+                            const isFreeAtSelectedSlot = (appointmentDate && appointmentTime)
+                              ? getFreeStaffForSlot(appointmentDate, appointmentTime, selectedServiceType).some(f => f.id === stf.id)
+                              : true;
+                            return (
+                              <option key={`${stf.id}-${idx}`} value={stf.id}>
+                                {toTitleCase(stf.name)} ({toTitleCase(stf.role)}) {(appointmentDate && appointmentTime) ? (isFreeAtSelectedSlot ? '— 🟢 Libre a esta hora' : '— 🔴 Ocupado a esta hora') : ''}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      ) : (
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Seleccionar Staff" placeholderTextColor={tColor.muted} />
+                      )}
+
+                      {/* Píldoras visuales de quién está libre en la hora elegida */}
+                      {(appointmentDate && appointmentTime) ? (
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+                          {activeStaffList.map((stf, stfPillIdx) => {
+                            const isFree = getFreeStaffForSlot(appointmentDate, appointmentTime, selectedServiceType).some(f => f.id === stf.id);
+                            const isSelected = selectedBookingStaff === stf.id;
+                            return (
+                              <TouchableOpacity
+                                key={`${stf.id}-pill-${stfPillIdx}`}
+                                disabled={!isFree}
+                                onPress={() => setSelectedBookingStaff(isSelected ? '' : stf.id)}
+                                style={{
+                                  paddingVertical: 6,
+                                  paddingHorizontal: 10,
+                                  borderRadius: 8,
+                                  borderWidth: 1,
+                                  borderColor: isSelected ? brandColor : (isFree ? '#10B981' : '#EF4444'),
+                                  backgroundColor: isSelected ? brandColor : (isFree ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)'),
+                                  opacity: isFree ? 1 : 0.5
+                                }}
+                              >
+                                <Text style={{ color: isSelected ? '#FFF' : (isFree ? '#10B981' : '#EF4444'), fontSize: 11, fontWeight: '800' }}>
+                                  {isFree ? '🟢' : '🔴'} {toTitleCase(stf.name)} {isFree ? '(Libre)' : '(Ocupado)'}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
+
+                  {isAutomotive ? (
+                    <View style={{ backgroundColor: tColor.input, padding: 24, borderRadius: 16, marginBottom: 24, borderWidth: 1, borderColor: tColor.border }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                        <Text style={{ fontSize: 16, color: brandColor, fontWeight: '800' }}>Datos del Vehículo</Text>
+                        <TouchableOpacity onPress={() => setIsPlateSearched(false)}><Text style={{ color: tColor.muted, textDecorationLine: 'underline', fontSize: 13, fontWeight: 'bold' }}>Volver a buscar</Text></TouchableOpacity>
+                      </View>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 16 }}>
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Placa" placeholderTextColor={tColor.muted} value={searchPlate} onChangeText={text => setSearchPlate(text.toUpperCase())} />
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Marca" placeholderTextColor={tColor.muted} value={carBrand} onChangeText={t => setCarBrand(toTitleCase(t))} />
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Modelo" placeholderTextColor={tColor.muted} value={carModel} onChangeText={t => setCarModel(toTitleCase(t))} />
+                      </View>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 20 }}>
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Año" placeholderTextColor={tColor.muted} keyboardType="numeric" value={carYear} onChangeText={setCarYear} />
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.text, flex: 1 }]} placeholder="Kilometraje" placeholderTextColor={tColor.muted} keyboardType="numeric" value={carMileage} onChangeText={setCarMileage} />
+                      </View>
+                      <Text style={{ fontSize: 13, color: tColor.muted, fontWeight: 'bold', marginBottom: 12 }}>Síntomas rápidos:</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                        {clientQuickServices.map((qs, idx) => (
+                          <TouchableOpacity key={`${qs}-${idx}`} style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border }, quickNotes.includes(qs) ? { backgroundColor: brandColor, borderColor: brandColor } : {}]} onPress={() => setQuickNotes(prev => prev.includes(qs) ? prev : `${prev} ${qs}`.trim())}>
+                            <Text style={[styles.chipText, { color: tColor.muted }, quickNotes.includes(qs) ? styles.activeChipText : {}]}>+ {qs}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 80, marginTop: 16 }]} placeholder="Detalles Adicionales..." placeholderTextColor={tColor.muted} multiline value={quickNotes} onChangeText={t => setQuickNotes(toTitleCase(t))} />
+                    </View>
+                  ) : null}
+
+                  <View style={{ marginBottom: 16 }}>
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Nombre Completo (Ej: Cesar Lopez)" placeholderTextColor={tColor.muted} value={clientName} onChangeText={text => setClientName(toTitleCase(text))} />
+                  </View>
+                  
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 16 }}>
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Correo Electrónico" placeholderTextColor={tColor.muted} keyboardType="email-address" value={clientEmail} onChangeText={setClientEmail} />
+                    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                      <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
+                      <TextInput style={{ flex: 1, color: tColor.text, padding: 14, outlineStyle: 'none' } as any} placeholder="Teléfono" placeholderTextColor={tColor.muted} keyboardType="phone-pad" value={clientPhone} onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))} />
+                    </View>
+                  </View>
+
+                  {(tenantInfo?.loyaltyConfig?.referralActive && bookingClientCoupons > 0) ? (
+                    <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#3B82F6', marginBottom: 16 }}>
+                      <Text style={{ color: '#3B82F6', fontWeight: '900', fontSize: 14, marginBottom: 4 }}>
+                        🏆 ¡Tienes {bookingClientCoupons} cupón(es) de {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento por haber referido amigos!
+                      </Text>
+                      <Text style={{ color: tColor.text, fontSize: 12, lineHeight: 18 }}>
+                        Tu {staffTerm.toLowerCase()} ya lo verá activo en el sistema al momento de cobrar tu cita.
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {tenantInfo?.loyaltyConfig?.referralActive ? (
+                    !isExistingClient ? (
+                      <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.05)', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#10B981', marginBottom: 32 }}>
+                        <Text style={[styles.inputLabel, { color: '#10B981', marginBottom: 4 }]}>🤝 ¿Te recomendó un amigo?</Text>
+                        <Text style={{ color: tColor.muted, fontSize: 12, marginBottom: 8 }}>
+                          Ingresa el número de teléfono de quien te refirió. ¡Al completar tu cita, él recibirá un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento y +1 punto en su plan de fidelidad!
+                        </Text>
+                        <View style={{ flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                          <CountryCodeSelector value={referredByCountryCode} onChange={setReferredByCountryCode} tColor={tColor} width={105} />
+                          <TextInput style={{ flex: 1, color: tColor.text, padding: 14, outlineStyle: 'none' } as any} placeholder="Teléfono de quien te recomendó (Opcional)" placeholderTextColor={tColor.muted} keyboardType="phone-pad" value={referredByPhone} onChangeText={text => setReferredByPhone(text.replace(/[^0-9\s-]/g, ''))} />
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={{ backgroundColor: tColor.input, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, marginBottom: 32 }}>
+                        <Text style={{ color: tColor.muted, fontSize: 12, fontStyle: 'italic', textAlign: 'center' }}>
+                          ℹ️ Ya eres cliente registrado. ¡Recuerda que si tus amigos nuevos ponen tu número ({clientPhone}) en su primera cita, tú ganas un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento!
+                        </Text>
+                      </View>
+                    )
+                  ) : null}
+
+                  {/* 🌟 AVISO DE POLÍTICA DE PROTECCIÓN AL NEGOCIO: 3H PARA AGENDAR Y RECORDATORIO 6H ANTES 🌟 */}
+                  <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.1)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.4)', borderRadius: 12, padding: 14, marginBottom: 16, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                    <Feather name="shield" size={18} color="#F59E0B" style={{ marginTop: 2 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 12.5, marginBottom: 3 }}>
+                        Garantía de Puntualidad y Reserva Responsable
+                      </Text>
+                      <Text style={{ color: tColor.muted, fontSize: 11.5, lineHeight: 17 }}>
+                        • Las reservas se programan con al menos <Text style={{ color: '#F59E0B', fontWeight: '900' }}>3 horas de anticipación</Text> para organizar tu atención sin contratiempos.{''}
+                        • Recibirás un recordatorio <Text style={{ color: '#10B981', fontWeight: '900' }}>6 horas antes</Text> de tu cita para confirmar tu asistencia en 1 clic o liberar el turno si no puedes asistir.
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 32 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Día de la Cita</Text>
+                      {Platform.OS === 'web' ? (
+                        <input type="date" className="web-input-override" value={appointmentDate} onChange={e => setAppointmentDate(e.target.value)} />
+                      ) : (
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} value={appointmentDate} onChangeText={setAppointmentDate} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hora de la Cita</Text>
+                      {Platform.OS === 'web' ? (
+                        <select className="web-input-override" value={appointmentTime} onChange={e => setAppointmentTime(e.target.value)} disabled={!appointmentDate || availableTimes.length === 0}>
+                          <option value="" disabled>{!appointmentDate ? 'Primero elige un día' : availableTimes.length === 0 ? '❌ Sin turnos (Recuerda reservar con mínimo 3h de anticipación)' : 'Seleccione Hora'}</option>
+                          {availableTimes.map((t, idx) => {
+                            const freeStaffAtSlot = getFreeStaffForSlot(appointmentDate, t, selectedServiceType);
+                            const selectedStaffObj = activeStaffList.find(s => s.id === selectedBookingStaff);
+                            const labelSuffix = selectedStaffObj
+                              ? ` — 🟢 ${toTitleCase(selectedStaffObj.name)} Libre`
+                              : (activeStaffList.length > 0 ? ` — 🟢 ${freeStaffAtSlot.length} ${freeStaffAtSlot.length === 1 ? 'disponible' : 'disponibles'} (${freeStaffAtSlot.map(s => toTitleCase(s.name.split(' ')[0])).join(', ')})` : '');
+                            return (
+                              <option key={`${t}-${idx}`} value={t}>
+                                {t}{labelSuffix}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      ) : (
+                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder={availableTimes.length === 0 ? "Sin turnos" : "HH:MM"} placeholderTextColor={tColor.muted} value={appointmentTime} onChangeText={setAppointmentTime} editable={availableTimes.length > 0} />
+                      )}
+                    </View>
+                  </View>
+
+                  <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 20 }]} onPress={handleBookService as any} disabled={isSubmitting}>
+                    <Text style={[styles.primaryButtonText, { fontSize: 16 }]}>{isSubmitting ? 'Procesando...' : 'Confirmar Agendamiento'}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {selectedOrder ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border }]}>
+              <TouchableOpacity style={[styles.closeBtn, { backgroundColor: tColor.input }]} onPress={() => setSelectedOrder(null)}><Text style={{color: tColor.text}}>✕</Text></TouchableOpacity>
+              <Text style={[styles.pageTitle, { color: tColor.text }]}>Cierre de Servicio (POS)</Text>
+              
+              <View style={{ backgroundColor: tColor.input, padding: 16, borderRadius: 12, marginBottom: 24, borderWidth: 1, borderColor: tColor.border }}>
+                {isAutomotive ? (
+                  <>
+                    <Text style={{ color: tColor.text, fontSize: 16, fontWeight: 'bold' }}>Vehículo: <Text style={{ color: brandColor }}>{toTitleCase(selectedOrder.metadata?.carBrand || selectedOrder.brand || '')}</Text></Text>
+                    <Text style={{ color: tColor.muted, fontSize: 14 }}>Placa: {selectedOrder.metadata?.carPlate || selectedOrder.plate} | Cliente: {toTitleCase(selectedOrder.clientName || '')}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={{ color: tColor.text, fontSize: 16, fontWeight: 'bold' }}>Cliente: <Text style={{ color: brandColor }}>{toTitleCase(selectedOrder.clientName || '')}</Text></Text>
+                    <Text style={{ color: tColor.muted, fontSize: 14 }}>Servicio: {toTitleCase(selectedOrder.service?.name || selectedOrder.serviceType || 'General')}</Text>
+                  </>
+                )}
+              </View>
+
+              {tenantInfo?.loyaltyConfig?.isActive ? (
+                <View style={{ marginBottom: 24 }}>
+                  {isCheckingLoyalty ? (
+                     <View style={{ flexDirection: 'row', alignItems: 'center', padding: 16, backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border }}>
+                       <ActivityIndicator color={brandColor} style={{ marginRight: 12 }} />
+                       <Text style={{ color: tColor.muted }}>Verificando visitas del cliente...</Text>
+                     </View>
+                  ) : (
+                    <>
+                      {(tenantInfo?.loyaltyConfig?.referralActive && totalAvailableReferralCouponsPOS > 0) ? (
+                        <View style={{ marginBottom: 16, padding: 16, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderRadius: 12, borderWidth: 1, borderColor: '#10B981' }}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <View style={{ flex: 1, paddingRight: 16 }}>
+                              <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 15 }}>🏆 ¡Premio por Referir Disponible!</Text>
+                              <Text style={{ color: tColor.text, fontSize: 13, marginTop: 4 }}>
+                                {selectedOrderLiveReferrals.length > 0 
+                                  ? `Recomendó a: ${selectedOrderLiveReferrals.join(', ')}. ` 
+                                  : ''}
+                                Tiene {totalAvailableReferralCouponsPOS} cupón(es) de {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento listo(s) para aplicar (se usa 1 por servicio y el resto se guarda para su próxima visita).
+                              </Text>
+                            </View>
+                            <Switch 
+                              value={applyReferralDiscount} 
+                              onValueChange={toggleReferralDiscount}
+                              trackColor={{ false: '#3e3e3e', true: '#10B981' }}
+                            />
+                          </View>
+                        </View>
+                      ) : null}
+
+                      {clientVisits !== null ? (
+                        <View style={[{ padding: 16, borderRadius: 12, borderWidth: 1, borderColor: tColor.border }, 
+                          clientVisits >= (tenantInfo.loyaltyConfig.visitsRequired || 10) && !rewardApplied ? { backgroundColor: 'rgba(255, 215, 0, 0.1)', borderColor: '#FFD700' } : { backgroundColor: tColor.input }
+                        ]}>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <View>
+                              <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 14 }}>
+                                Programa de Fidelidad
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4 }}>
+                                Lleva {clientVisits} visitas de {tenantInfo.loyaltyConfig.visitsRequired || 10} necesarias.
+                              </Text>
+                            </View>
+                            
+                            {(clientVisits >= (tenantInfo.loyaltyConfig.visitsRequired || 10) && !rewardApplied) ? (
+                              <TouchableOpacity 
+                                style={{ backgroundColor: '#FFD700', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 8 }}
+                                onPress={handleApplyLoyaltyReward}
+                                disabled={applyReferralDiscount}
+                              >
+                                <Text style={{ color: '#000', fontWeight: '900', fontSize: 12 }}>🎁 CANJEAR PREMIO</Text>
+                              </TouchableOpacity>
+                            ) : null}
+                            
+                            {rewardApplied ? (
+                               <Text style={{ color: '#10B981', fontWeight: 'bold', fontSize: 12 }}>✅ Premio Aplicado</Text>
+                            ) : null}
+                          </View>
+                          
+                          <View style={{ width: '100%', height: 6, backgroundColor: tColor.border, borderRadius: 3, marginTop: 12, overflow: 'hidden' }}>
+                             <View style={{ 
+                               width: `${Math.min(100, (clientVisits / (tenantInfo.loyaltyConfig.visitsRequired || 10)) * 100)}%`, 
+                               height: '100%', 
+                               backgroundColor: clientVisits >= (tenantInfo.loyaltyConfig.visitsRequired || 10) ? '#FFD700' : brandColor 
+                             }} />
+                          </View>
+                        </View>
+                      ) : null}
+                    </>
+                  )}
+                </View>
+              ) : null}
+
+              {(tenantInfo?.loyaltyConfig?.referralActive && activeReferredBy) ? (
+                <View style={{ marginBottom: 24, padding: 16, backgroundColor: 'rgba(16, 185, 129, 0.08)', borderRadius: 12, borderWidth: 1, borderColor: '#10B981' }}>
+                  <Text style={{ color: '#10B981', fontWeight: 'bold', fontSize: 14 }}>🤝 Viene Recomendado</Text>
+                  <Text style={{ color: tColor.text, fontSize: 13, marginTop: 4 }}>
+                    Referido por el número: <Text style={{ fontWeight: 'bold' }}>{activeReferredBy}</Text>
+                  </Text>
+                  <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4 }}>
+                    Al cerrar y facturar esta orden, se le sumará automáticamente +1 visita y el cupón de {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento al cliente que lo recomendó.
+                  </Text>
+                </View>
+              ) : null}
+              
+              <View style={{ flexDirection: 'column', gap: 16 } as any}>
+                <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 24, marginBottom: 24 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Valor Final a Cobrar ($)</Text>
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: (rewardApplied || applyReferralDiscount) ? '#FFD700' : tColor.border, fontSize: 24, fontWeight: '900', color: (rewardApplied || applyReferralDiscount) ? '#FFD700' : brandColor }]} placeholder="$ 25.00" placeholderTextColor={tColor.muted} value={finalCost} onChangeText={(v) => setFinalCost(formatCurrency(v))} keyboardType="numeric" />
+                  </View>
+                  {isAutomotive ? (
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Millaje de Salida</Text>
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, fontSize: 18, fontWeight: 'bold' }]} placeholder="Ej: 21000" placeholderTextColor={tColor.muted} value={exitMileage} onChangeText={setExitMileage} keyboardType="numeric" />
+                    </View>
+                  ) : null}
+                </View>
+
+                <View style={{ marginBottom: 24 }}>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>⚙️ Asignar Personal Responsable</Text>
+                  {Platform.OS === 'web' ? (
+                    <select className="web-input-override" value={assignedMechanicId} onChange={e => setAssignedMechanicId(e.target.value)}>
+                      <option value="" disabled>Seleccione el personal a cargo</option>
+                      {activeStaffList.map((m, idx) => <option key={`${m.id}-${idx}`} value={m.id}>{toTitleCase(m.name)} ({toTitleCase(m.role)})</option>)}
+                    </select>
+                  ) : (
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Seleccionar Personal" placeholderTextColor={tColor.muted} />
+                  )}
+                </View>
+
+                <View style={{ backgroundColor: tColor.input, padding: 24, borderRadius: 16, marginBottom: 24, borderWidth: 1, borderColor: tColor.border }}>
+                  <Text style={{ margin: 0, marginBottom: 16, fontSize: 16, color: tColor.text, fontWeight: '800' }}>
+                    {isAutomotive ? 'Reporte y Evidencias Técnicas' : 'Fotos del Trabajo (Opcional)'}
+                  </Text>
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 20 }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, color: tColor.muted, fontWeight: 'bold' }}>
+                        {isAutomotive ? 'Nota 1 / Estado Inicial' : 'Detalles Iniciales (Opcional)'}
+                      </Text>
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginTop: 8, marginBottom: 12 }]} placeholder="Detalle..." placeholderTextColor={tColor.muted} value={oldParts} onChangeText={t => setOldParts(toTitleCase(t))} />
+                      {!oldPartPreview ? (
+                        <View>
+                          {Platform.OS === 'web' ? (
+                            <View style={{ marginTop: 8 }}>
+                              <input type="file" ref={oldFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'old')} />
+                              <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => oldFileInputRef.current?.click()}>
+                                 <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>📸 Subir Foto (Antes)</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ) : null}
+                        </View>
+                      ) : (
+                        <View style={{ position: 'relative', width: '100%', height: 120, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
+                          {Platform.OS === 'web' ? <img src={oldPartPreview} alt="Evidencia Antes WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}
+                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.7)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setOldPartPreview(null); setOldPartImage(null); }}>
+                            <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 13, color: tColor.muted, fontWeight: 'bold' }}>
+                        {isAutomotive ? 'Nota 2 / Resultado' : 'Resultado Final (Opcional)'}
+                      </Text>
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginTop: 8, marginBottom: 12 }]} placeholder="Detalle..." placeholderTextColor={tColor.muted} value={newParts} onChangeText={t => setNewParts(toTitleCase(t))} />
+                      {!newPartPreview ? (
+                        <View>
+                          {Platform.OS === 'web' ? (
+                            <View style={{ marginTop: 8 }}>
+                              <input type="file" ref={newFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'new')} />
+                              <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => newFileInputRef.current?.click()}>
+                                 <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>📸 Subir Foto (Después)</Text>
+                              </TouchableOpacity>
+                            </View>
+                          ) : null}
+                        </View>
+                      ) : (
+                        <View style={{ position: 'relative', width: '100%', height: 120, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
+                          {Platform.OS === 'web' ? <img src={newPartPreview} alt="Evidencia Después WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}
+                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.7)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setNewPartPreview(null); setNewPartImage(null); }}>
+                            <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                </View>
+
+                <View style={{ marginBottom: 24 }}>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Notas y Diagnóstico Interno</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 12 }}>
+                    {mechanicQuickNotes.map((opt, idx) => (
+                      <TouchableOpacity key={`${opt}-${idx}`} style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border }, mechanicNotes.includes(opt) ? { backgroundColor: brandColor, borderColor: brandColor } : {}]} onPress={() => setMechanicNotes(prev => prev.includes(opt) ? prev : `${prev} ${opt}. `.trimStart())}>
+                        <Text style={[styles.chipText, { color: tColor.muted }, mechanicNotes.includes(opt) ? styles.activeChipText : {}]}>+ {opt}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {Platform.OS === 'web' ? (
+                    <textarea className="form-input" placeholder="Describe Los Ajustes Realizados..." value={mechanicNotes} onChange={(e: any) => setMechanicNotes(toTitleCase(e.target.value))} style={{ width: '100%', minHeight: '100px', padding: '14px', borderRadius: '12px', backgroundColor: tColor.input, border: `1px solid ${tColor.border}`, color: tColor.text, outline: 'none', resize: 'vertical' } as any} />
+                  ) : (
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 100 }]} multiline placeholder="Describe Los Ajustes..." placeholderTextColor={tColor.muted} value={mechanicNotes} onChangeText={t => setMechanicNotes(toTitleCase(t))} />
+                  )}
+                </View>
+
+                <View style={{ marginBottom: 32 }}>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Alerta de Próxima Visita</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                    {nextServiceOptions.map((opt, idx) => (
+                      <TouchableOpacity key={`${opt}-${idx}`} style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border }, nextServiceTime === opt ? { backgroundColor: brandColor, borderColor: brandColor } : {}]} onPress={() => setNextServiceTime(opt)}>
+                        <Text style={[styles.chipText, { color: tColor.muted }, nextServiceTime === opt ? styles.activeChipText : {}]}>{opt}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </ScrollView>
+                </View>
+                
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 20 }]} onPress={handleCompleteWorkOrder as any} disabled={isSubmitting}>
+                  <Text style={[styles.primaryButtonText, { fontSize: 16 }]}>{isSubmitting ? 'Procesando...' : '✅ Cerrar Orden y Facturar'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {isCatalogModalVisible ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border }]}>
+              <TouchableOpacity style={[styles.closeBtn, { backgroundColor: tColor.input }]} onPress={() => setIsCatalogModalVisible(false)}><Text style={{color: tColor.text}}>✕</Text></TouchableOpacity>
+              <Text style={[styles.pageTitle, { color: tColor.text }]}>{catalogEditingId ? 'Editar Servicio' : 'Nuevo Servicio'}</Text>
+              
+              <View style={{ flexDirection: 'column', gap: 16 } as any}>
+                <View>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Foto del Servicio (Opcional)</Text>
+                  {!catalogFormPreview ? (
+                    <View style={{ marginTop: 8 }}>
+                      {Platform.OS === 'web' ? (
+                        <>
+                          <input type="file" ref={catalogInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handleCatalogImageSelect} />
+                          <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => catalogInputRef.current?.click()}>
+                            <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
+                            <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Click para subir foto</Text>
+                          </TouchableOpacity>
+                        </>
+                      ) : null}
+                    </View>
+                  ) : (
+                    <View style={{ position: 'relative', width: '100%', height: 200, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
+                      {catalogFormPreview.startsWith('blob:') ? (
+                        Platform.OS === 'web' ? <img src={catalogFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null
+                      ) : (
+                        <PrivateSupabaseImage path={catalogFormPreview} alt="Preview" />
+                      )}
+                      <TouchableOpacity style={{ position: 'absolute', top: 8, right: 8, backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 16, width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }} onPress={() => { setCatalogFormPreview(null); setCatalogFormFile(null); }}>
+                        <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+
+                <View>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Nombre del Servicio</Text>
+                  <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej. Corte Clásico" placeholderTextColor={tColor.muted} value={catalogFormName} onChangeText={t => setCatalogFormName(toTitleCase(t))} />
+                </View>
+
+                <View>
+                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Descripción Detallada (Opcional)</Text>
+                  <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 60 }]} placeholder="Ej. Incluye Lavado Y Perfilado..." placeholderTextColor={tColor.muted} multiline value={catalogFormDesc} onChangeText={t => setCatalogFormDesc(toTitleCase(t))} />
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 16 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Precio ($)</Text>
+                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="$ 0" keyboardType="numeric" placeholderTextColor={tColor.muted} value={catalogFormPrice} onChangeText={t => setCatalogFormPrice(formatCurrency(t))} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Duración (Min)</Text>
+                    {Platform.OS === 'web' ? (
+                      <select className="web-input-override" value={catalogFormDuration} onChange={e => setCatalogFormDuration(e.target.value)}>
+                        <option value="15">15 minutos</option><option value="30">30 minutos</option><option value="45">45 minutos</option><option value="60">1 hora</option><option value="90">1.5 horas</option><option value="120">2 horas</option><option value="180">3 horas</option>
+                      </select>
+                    ) : (
+                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="30" keyboardType="numeric" placeholderTextColor={tColor.muted} value={catalogFormDuration} onChangeText={setCatalogFormDuration} />
+                    )}
+                  </View>
+                </View>
+                
+                <View style={{ marginTop: 8 }}>
+                  <ContentTermsCheck value={acceptedContentTerms} onChange={setAcceptedContentTerms} tColor={tColor} brandColor={brandColor} />
+                </View>
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, marginTop: 0 }]} onPress={handleSaveCatalogService} disabled={isSubmitting}>
+                  <Text style={styles.primaryButtonText}>{isSubmitting ? 'Guardando...' : 'Guardar Servicio'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {reportTarget ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border, maxWidth: 460, padding: 28 }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <Text style={{ color: tColor.text, fontSize: 22, fontWeight: '900' }}>Reportar Contenido</Text>
+                <TouchableOpacity onPress={closeReport} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Feather name="x" size={22} color={tColor.text} />
+                </TouchableOpacity>
+              </View>
+              <Text style={{ color: tColor.muted, fontSize: 13, lineHeight: 19, marginBottom: 6 }}>
+                Selecciona el motivo por el cual deseas reportar este contenido. Nuestro equipo lo revisará de inmediato.
+              </Text>
+              <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', marginBottom: 14 }} numberOfLines={2}>
+                📌 {reportTarget.title}
+              </Text>
+
+              {REPORT_REASONS.map((r, i) => {
+                const selected = reportReason === r.key;
+                return (
+                  <TouchableOpacity
+                    key={r.key}
+                    activeOpacity={0.8}
+                    onPress={() => setReportReason(r.key)}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14, borderBottomWidth: i === REPORT_REASONS.length - 1 ? 0 : 1, borderBottomColor: tColor.border }}
+                  >
+                    <View style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: selected ? '#FF5C6C' : tColor.muted, alignItems: 'center', justifyContent: 'center' }}>
+                      {selected ? <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#FF5C6C' }} /> : null}
+                    </View>
+                    <Text style={{ color: tColor.text, fontSize: 15, fontWeight: selected ? '800' : '500', flex: 1 }}>{r.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 70, marginTop: 16 }]}
+                placeholder="Detalles adicionales (opcional)"
+                placeholderTextColor={tColor.muted}
+                multiline
+                maxLength={500}
+                value={reportDetails}
+                onChangeText={setReportDetails}
+              />
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginTop: 12 }]}
+                placeholder={reportReason === 'copyright_spam' ? 'Tu correo o teléfono (recomendado en reclamos de copyright)' : 'Tu correo o teléfono (opcional)'}
+                placeholderTextColor={tColor.muted}
+                maxLength={120}
+                value={reportContact}
+                onChangeText={setReportContact}
+              />
+
+              <Text style={{ color: tColor.muted, fontSize: 11, lineHeight: 16, marginTop: 14 }}>
+                Los negocios son responsables del contenido que publican. AutoFlow revisa los reportes y puede retirar contenido que infrinja derechos de terceros o nuestras normas. Los reportes de mala fe pueden ser ignorados.
+              </Text>
+
+              <TouchableOpacity
+                style={{ backgroundColor: '#FF5C6C', borderRadius: 16, paddingVertical: 16, alignItems: 'center', marginTop: 18, opacity: (!reportReason || isSendingReport) ? 0.55 : 1 }}
+                onPress={handleSubmitReport}
+                disabled={!reportReason || isSendingReport}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 16 }}>{isSendingReport ? 'Enviando...' : 'Enviar Reporte'}</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {cancellingOrder ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border, maxWidth: 480, padding: 28 }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={{ width: 38, height: 38, borderRadius: 10, backgroundColor: 'rgba(239, 68, 68, 0.15)', borderWidth: 1, borderColor: '#EF4444', alignItems: 'center', justifyContent: 'center' }}>
+                    <Feather name="calendar" size={18} color="#EF4444" />
+                  </View>
+                  <Text style={{ color: tColor.text, fontSize: 20, fontWeight: '900' }}>Cancelar Cita y Liberar Turno</Text>
+                </View>
+                <TouchableOpacity onPress={() => setCancellingOrder(null)}>
+                  <Feather name="x" size={22} color={tColor.text} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={{ backgroundColor: tColor.input, padding: 14, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, marginBottom: 16 }}>
+                <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>
+                  👤 {toTitleCase(cancellingOrder.clientName || clientExpedienteData?.client?.name || 'Cliente')}
+                </Text>
+                <Text style={{ color: brandColor, fontWeight: '800', fontSize: 13, marginTop: 4 }}>
+                  ✨ {toTitleCase(cancellingOrder.service?.name || cancellingOrder.serviceType || 'Servicio General')}  •  🕒 {cancellingOrder.time || 'Turno agendado'}
+                </Text>
+                <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4 }}>
+                  Al cancelar, este horario quedará libre de inmediato para otros clientes y se enviará una notificación por Telegram y Push.
+                </Text>
+              </View>
+
+              <Text style={[styles.inputLabel, { color: tColor.muted }]}>Motivo de la cancelación (Opcional)</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                {['Surgió un imprevisto', 'Cambio de horario', 'Cliente no puede asistir', 'Solicitud del cliente'].map((mOpt) => (
+                  <TouchableOpacity
+                    key={mOpt}
+                    onPress={() => setCancelReasonText(mOpt)}
+                    style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: cancelReasonText === mOpt ? '#EF4444' : tColor.border, backgroundColor: cancelReasonText === mOpt ? 'rgba(239, 68, 68, 0.15)' : tColor.input }}
+                  >
+                    <Text style={{ color: cancelReasonText === mOpt ? '#EF4444' : tColor.muted, fontSize: 11.5, fontWeight: 'bold' }}>{mOpt}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 70, marginBottom: 20 }]}
+                placeholder="Escribe el motivo si deseas agregar detalles..."
+                placeholderTextColor={tColor.muted}
+                multiline
+                value={cancelReasonText}
+                onChangeText={setCancelReasonText}
+              />
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <TouchableOpacity
+                  style={[styles.secondaryButton, { flex: 1, backgroundColor: tColor.input, borderColor: tColor.border }]}
+                  onPress={() => setCancellingOrder(null)}
+                >
+                  <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Volver</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.primaryButton, { flex: 1.5, backgroundColor: '#EF4444', flexDirection: 'row', gap: 8 }]}
+                  onPress={handleConfirmCancelAppointment}
+                  disabled={isCancellingApt}
+                >
+                  <Feather name="x-circle" size={16} color="#FFF" />
+                  <Text style={styles.primaryButtonText}>{isCancellingApt ? 'Cancelando...' : 'Confirmar Cancelación'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
+      {expandedImage ? (
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.95)', zIndex: 2000, justifyContent: 'center', alignItems: 'center' }]}>
+          <TouchableOpacity style={{ position: 'absolute', top: 24, right: 24, backgroundColor: 'rgba(255,255,255,0.1)', width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', zIndex: 2100 }} onPress={() => setExpandedImage(null)}>
+            <Text style={{ color: '#FFF', fontSize: 20 }}>✕</Text>
+          </TouchableOpacity>
+          <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '900', marginBottom: 16 }}>{expandedImage.alt}</Text>
+          <View style={{ width: '90%', height: '80%' }}>
+            <PrivateSupabaseImage path={expandedImage.path} alt={expandedImage.alt} isExpanded={true} />
+          </View>
+        </View>
+      ) : null}
+
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  contentArea: { padding: Platform.OS === 'web' ? 40 : 20, maxWidth: 1200, alignSelf: 'center', width: '100%', minHeight: '100%' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 },
+  pageTitle: { fontSize: 32, fontWeight: '900', marginBottom: 8 },
+  sectionTitle: { fontSize: 24, fontWeight: '900', marginBottom: 24 },
+  primaryButton: { paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14.5 },
+  secondaryButton: { borderWidth: 1, paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  secondaryButtonText: { fontWeight: '800', fontSize: 14.5 },
+  formInput: { borderWidth: 1, borderRadius: 12, padding: 14, fontSize: 14.5 },
+  inputLabel: { fontSize: 12, fontWeight: 'bold', marginBottom: 8, textTransform: 'uppercase' },
+  tabsContainer: { flexDirection: 'row', gap: 12, flexWrap: 'wrap', marginBottom: 32, padding: 8, borderRadius: 16, minWidth: 800 },
+  tab: { flex: 1, minWidth: 120, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
+  tabText: { fontWeight: '800', fontSize: 14 },
+  bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24, width: '100%' },
+  glassCard: { borderWidth: 1, borderRadius: 24, padding: 32 },
+  flexCard: { borderWidth: 1, borderRadius: 24, padding: 32, flex: 1, minWidth: 320 },
+  modalOverlay: { backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 1000 },
+  modalContentWrapper: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: Platform.OS === 'web' ? 40 : 20 },
+  modalContent: { borderWidth: 1, borderRadius: 24, padding: 32, width: '100%', maxWidth: 750 },
+  closeBtn: { position: 'absolute', top: 24, right: 24, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', zIndex: 10 },
+  chip: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, marginRight: 10, marginBottom: 10 },
+  chipText: { fontWeight: 'bold', fontSize: 13 },
+  activeChipText: { color: '#FFFFFF' },
+  filterGroup: { flex: 1, minWidth: 150 },
+  cardTitle: { fontSize: 18, fontWeight: '800', marginBottom: 16 },
+  emptyText: { textAlign: 'center', fontWeight: 'bold', fontSize: 16 },
+  orderCard: { borderWidth: 1, borderRadius: 16, padding: 24, flex: 1, minWidth: 320, display: 'flex', flexDirection: 'column' },
+  orderHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  plateBadge: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8 },
+  plateText: { color: '#FFFFFF', fontWeight: '900', fontSize: 16, letterSpacing: 1.5 },
+  statusBadge: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 10, borderRadius: 12 },
+  statusDot: { fontSize: 12, marginRight: 6 },
+  statusText: { fontSize: 12, fontWeight: 'bold' },
+  orderDetails: { marginBottom: 16 },
+  vehicleTitle: { fontSize: 20, fontWeight: '800', marginBottom: 4 },
+  clientName: { fontSize: 14 },
+  serviceBox: { borderWidth: 1, padding: 16, borderRadius: 12, marginBottom: 24 },
+  serviceText: { fontSize: 14, fontWeight: '700' },
+  kpiLabel: { fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase' },
+  kpiValue: { fontSize: 36, fontWeight: '900', marginTop: 8 },
+  staffRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, borderRadius: 12, borderWidth: 1, marginBottom: 12 },
+  staffName: { fontWeight: 'bold', fontSize: 14.5 },
+  staffRole: { fontSize: 12, marginTop: 4 },
+  activeStatusBadge: { backgroundColor: 'rgba(16, 185, 129, 0.2)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 12 },
+  activeStatusText: { color: '#10B981', fontSize: 12, fontWeight: 'bold' },
+  inactiveStatusBadge: { backgroundColor: 'rgba(239, 68, 68, 0.2)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 12 },
+  inactiveStatusText: { color: '#EF4444', fontSize: 12, fontWeight: 'bold' }
+});

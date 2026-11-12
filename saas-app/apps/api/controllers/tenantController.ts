@@ -1,47 +1,117 @@
 import { Request, Response } from 'express';
-import { db, tenants } from '@taller/database';
-import { eq } from 'drizzle-orm';
+import { db, tenants, users } from '@taller/database';
+import { eq, and, sql } from 'drizzle-orm';
 
-// 1. Registrar un nuevo negocio (Tenant) en la plataforma SaaS
+const safeParseJSON = (data: any): any => {
+  if (!data) return {};
+  if (typeof data === 'object') return data;
+  if (typeof data === 'string') {
+    try {
+      const parsed = JSON.parse(data);
+      return typeof parsed === 'string' ? JSON.parse(parsed) : parsed;
+    } catch (e) {
+      return {};
+    }
+  }
+  return {};
+};
+
+const extractCleanPhone = (phoneStr?: string | null): string => {
+  if (!phoneStr) return '';
+  const digits = String(phoneStr).replace(/\D/g, '');
+  return digits.length > 10 ? digits.slice(-10) : digits;
+};
+
+// 📱 Disparo de Notificación Push Real desde Localhost (Telegram + Expo Push Service)
+const dispatchLocalPushNotifications = async (tenantId: string, title: string, message: string, targetAudience: string) => {
+  // 1. Enviar aviso a Telegram si está configurado en .env
+  const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+  if (TELEGRAM_TOKEN && TELEGRAM_CHAT_ID) {
+    try {
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text: `📢 <b>¡CAMPAÑA PUSH ACTIVA!</b>\n🎯 <b>Audiencia:</b> ${targetAudience}\n📌 <b>${title}</b>\n💬 ${message}`,
+          parse_mode: 'HTML'
+        })
+      });
+    } catch (e) {}
+  }
+
+  // 2. Buscar dispositivos móviles registrados en public.user_devices para este tenant y enviarles Expo Push
+  try {
+    const devicesRes = await db.execute(sql`
+      SELECT d.push_token 
+      FROM public.user_devices d
+      INNER JOIN public.users u ON u.id = d.user_id
+      WHERE u.tenant_id = ${tenantId}::uuid AND d.is_active = true
+    `);
+    const deviceRows = Array.isArray(devicesRes) ? devicesRes : (devicesRes as any).rows || [];
+    const tokens = deviceRows.map((r: any) => r.push_token).filter((t: string) => t && t.startsWith('ExponentPushToken'));
+
+    if (tokens.length > 0) {
+      const messages = tokens.map((token: string) => ({
+        to: token,
+        sound: 'default',
+        title,
+        body: message,
+        data: { tenantId, targetAudience }
+      }));
+
+      await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(messages)
+      });
+      console.log(`📲 Push enviado a ${tokens.length} dispositivos móviles.`);
+    }
+  } catch (errPush) {
+    console.log('ℹ️ Info Push Local:', errPush);
+  }
+};
+
+// 1. Registrar un nuevo negocio (Tenant)
 export async function createTenant(req: Request, res: Response) {
   try {
-    const { name, businessType, subdomain, settings } = req.body;
+    const { id, name, niche, address, city, state, zipCode, logoUrl, primaryColor, planTier, subscriptionStatus } = req.body;
 
-    if (!name || !businessType) {
-      return res.status(400).json({ error: 'El nombre del negocio y el tipo de negocio son obligatorios.' });
+    if (!name || !niche) {
+      return res.status(400).json({ success: false, message: 'El nombre del negocio y la categoría son obligatorios.' });
     }
 
     const [newTenant] = await db.insert(tenants).values({
+      id: id || crypto.randomUUID(),
       name: name.trim(),
-      businessType: businessType.trim(),
-      subdomain: subdomain ? subdomain.trim().toLowerCase() : null,
-      settings: settings || {}
+      niche: niche.trim(),
+      address: address ? address.trim() : null,
+      city: city ? city.trim() : null,
+      state: state ? state.trim().toUpperCase() : null,
+      zipCode: zipCode ? zipCode.trim() : null,
+      logoUrl: logoUrl || null,
+      primaryColor: primaryColor || '#FF5E00',
+      planTier: planTier || 'starter',
+      subscriptionStatus: subscriptionStatus || 'active',
     } as any).returning();
 
     return res.status(201).json({ success: true, tenant: newTenant });
   } catch (error: any) {
-    console.error('Error al registrar el tenant:', error);
-    return res.status(500).json({ success: false, error: error.message || String(error) });
+    console.error('❌ Error al registrar el tenant en la BD:', error);
+    return res.status(500).json({ success: false, message: error.message || String(error) });
   }
 }
 
-// 2. Obtener la información y configuración del tenant actual (Blindado con Auto-Creación)
+// 2. Obtener la información y configuración del tenant actual + Campañas (con is_active) y Reseñas
 export async function getTenantInfo(req: Request, res: Response) {
   try {
     const tenantId = req.headers['x-tenant-id'] as string;
-    console.log('🔍 BUSCANDO TENANT ID:', tenantId); 
-    
-    if (!tenantId) {
-      return res.status(400).json({ error: 'Tenant ID requerido.' });
-    }
+    if (!tenantId) return res.status(400).json({ error: 'Tenant ID requerido.' });
 
-    // Buscamos el tenant en la base de datos local
     let [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
-    console.log('✅ RESULTADO BD:', tenant); 
 
-    // 🛡️ Fallback de seguridad: si no existe, lo creamos automáticamente al vuelo
     if (!tenant) {
-      console.log('⚠️ Tenant no encontrado en BD. Creándolo automáticamente...');
       const defaultName = tenantId.includes('spa') ? 'Zen Beauty Spa' : tenantId.includes('barber') ? 'Classic BarberShop' : 'AutoFlow Central';
       const defaultType = tenantId.includes('spa') ? 'spa' : tenantId.includes('barber') ? 'barbershop' : 'automotive';
 
@@ -53,20 +123,249 @@ export async function getTenantInfo(req: Request, res: Response) {
       } as any).returning();
       
       tenant = createdTenant;
-      console.log('🚀 Tenant creado exitosamente al vuelo:', tenant);
     }
 
-    return res.status(200).json({ success: true, tenant });
+    const parsedLoyalty = safeParseJSON((tenant as any).loyaltyConfig);
+
+    // 📢 Cargar campañas desde public.push_campaigns incluyendo is_active
+    try {
+      const cmpResult = await db.execute(sql`
+        SELECT id, tenant_id, title, message, target_audience, COALESCE(is_active, true) AS is_active, sent_at
+        FROM public.push_campaigns
+        WHERE tenant_id = ${tenantId}::uuid
+        ORDER BY sent_at DESC
+      `);
+      const dbCampaigns = Array.isArray(cmpResult) ? cmpResult : (cmpResult as any).rows || [];
+      if (dbCampaigns.length > 0) {
+        parsedLoyalty.campaigns = dbCampaigns;
+      }
+    } catch (cmpErr) {
+      console.warn('⚠️ No se pudieron leer push_campaigns:', cmpErr);
+    }
+
+    // ⭐ Cargar reseñas desde public.reviews
+    try {
+      const revResult = await db.execute(sql`
+        SELECT 
+          r.id,
+          r.client_id AS "clientKey",
+          u.name AS "clientName",
+          r.rating,
+          r.reaction,
+          r.comment,
+          r.created_at AS "createdAt"
+        FROM public.reviews r
+        INNER JOIN public.users u ON u.id = r.client_id
+        WHERE r.tenant_id = ${tenantId}::uuid
+        ORDER BY r.created_at DESC
+      `);
+      const dbReviews = Array.isArray(revResult) ? revResult : (revResult as any).rows || [];
+      if (dbReviews.length > 0) {
+        parsedLoyalty.reviews = dbReviews;
+      }
+    } catch (revErr) {
+      console.warn('⚠️ No se pudieron leer reviews:', revErr);
+    }
+
+    return res.status(200).json({
+      success: true,
+      tenant: {
+        ...tenant,
+        loyaltyConfig: parsedLoyalty
+      }
+    });
   } catch (error: any) {
-    console.error('❌ ERROR CRÍTICO EN DRIZZLE:', error);
-    // Fallback de emergencia absoluta para que la UI jamás se rompa
     return res.status(200).json({ 
       success: true, 
       tenant: { 
         id: req.headers['x-tenant-id'] || '123e4567-e89b-12d3-a456-426614174000', 
         name: 'AutoFlow Central', 
-        businessType: 'automotive' 
+        niche: 'automotive' 
       } 
     });
+  }
+}
+
+// 3. Actualizar configuración del tenant + Sincronizar Campañas (Activas/Inactivas) y Reseñas
+export async function updateTenantConfig(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    if (!tenantId) {
+      return res.status(400).json({ success: false, message: 'Falta x-tenant-id en los headers' });
+    }
+
+    const { business_hours, portfolio, portfolio_images, loyaltyConfig } = req.body;
+    const updateData: any = {};
+    
+    if (business_hours !== undefined) updateData.businessHours = business_hours;
+    
+    const newPortfolio = portfolio || portfolio_images;
+    if (newPortfolio !== undefined) updateData.portfolio = newPortfolio;
+
+    if (loyaltyConfig !== undefined) {
+      const cleanLoyalty = safeParseJSON(loyaltyConfig);
+
+      // =====================================================================
+      // 📢 1. SINCRONIZAR CAMPAÑAS (INSERTAR NUEVAS Y ACTUALIZAR ACTIVA/INACTIVA)
+      // =====================================================================
+      if (Array.isArray(cleanLoyalty.campaigns) && cleanLoyalty.campaigns.length > 0) {
+        for (let i = 0; i < cleanLoyalty.campaigns.length; i++) {
+          const camp = cleanLoyalty.campaigns[i];
+          if (!camp || !camp.title || !camp.message) continue;
+          const isActiveBool = camp.is_active !== false;
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(camp.id || ''));
+
+          try {
+            if (isUuid) {
+              // Actualizar estado is_active de una campaña existente en PostgreSQL
+              await db.execute(sql`
+                UPDATE public.push_campaigns
+                SET is_active = ${isActiveBool},
+                    title = ${camp.title},
+                    message = ${camp.message},
+                    target_audience = ${camp.target_audience || 'all_clients'}
+                WHERE id = ${camp.id}::uuid AND tenant_id = ${tenantId}::uuid
+              `);
+            } else {
+              // Verificar si ya existe por título y mensaje
+              const existingCheck = await db.execute(sql`
+                SELECT id FROM public.push_campaigns
+                WHERE tenant_id = ${tenantId}::uuid
+                  AND title = ${camp.title}
+                  AND message = ${camp.message}
+                LIMIT 1
+              `);
+              const existingRows = Array.isArray(existingCheck) ? existingCheck : (existingCheck as any).rows || [];
+
+              if (existingRows.length > 0) {
+                cleanLoyalty.campaigns[i].id = existingRows[0].id;
+                await db.execute(sql`
+                  UPDATE public.push_campaigns
+                  SET is_active = ${isActiveBool}
+                  WHERE id = ${existingRows[0].id}::uuid
+                `);
+              } else {
+                // Insertar campaña nueva y disparar notificación push desde local
+                const insertedResult = await db.execute(sql`
+                  INSERT INTO public.push_campaigns (tenant_id, title, message, target_audience, is_active, sent_at)
+                  VALUES (
+                    ${tenantId}::uuid,
+                    ${camp.title},
+                    ${camp.message},
+                    ${camp.target_audience || 'all_clients'},
+                    ${isActiveBool},
+                    NOW()
+                  )
+                  RETURNING id, tenant_id, title, message, target_audience, is_active, sent_at
+                `);
+                const insertedRows = Array.isArray(insertedResult) ? insertedResult : (insertedResult as any).rows || [];
+                if (insertedRows[0]) {
+                  cleanLoyalty.campaigns[i] = insertedRows[0];
+                  if (isActiveBool) {
+                    dispatchLocalPushNotifications(tenantId, camp.title, camp.message, camp.target_audience || 'all_clients');
+                  }
+                }
+              }
+            }
+          } catch (errCamp) {
+            console.error('⚠️ Error sincronizando campaña:', errCamp);
+          }
+        }
+      }
+
+      // =====================================================================
+      // ⭐ 2. SINCRONIZAR RESEÑAS Y LIKES/DISLIKES CON LA TABLA public.reviews
+      // =====================================================================
+      if (Array.isArray(cleanLoyalty.reviews) && cleanLoyalty.reviews.length > 0) {
+        const latestRev = cleanLoyalty.reviews[0];
+        if (latestRev) {
+          try {
+            let resolvedClientId: string | null = null;
+            const rawKey = String(latestRev.clientKey || latestRev.workOrderId || '').trim();
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawKey);
+
+            if (isUuid) {
+              const [uById] = await db.select().from(users).where(and(eq(users.id, rawKey), eq(users.tenantId, tenantId)));
+              if (uById) resolvedClientId = uById.id;
+            }
+
+            if (!resolvedClientId && rawKey) {
+              const cleanDigits = extractCleanPhone(rawKey);
+              if (cleanDigits.length >= 7) {
+                const [uByPhone] = await db.select().from(users).where(
+                  and(
+                    eq(users.tenantId, tenantId),
+                    sql`regexp_replace(${users.phone}, '[^0-9]', '', 'g') LIKE ${'%' + cleanDigits + '%'}`
+                  )
+                );
+                if (uByPhone) resolvedClientId = uByPhone.id;
+              }
+            }
+
+            if (!resolvedClientId && latestRev.clientName) {
+              const [uByName] = await db.select().from(users).where(
+                and(
+                  eq(users.tenantId, tenantId),
+                  sql`LOWER(${users.name}) = ${String(latestRev.clientName).toLowerCase().trim()}`
+                )
+              );
+              if (uByName) resolvedClientId = uByName.id;
+            }
+
+            if (resolvedClientId) {
+              const ratingNum = Number(latestRev.rating || 5);
+              const reactionStr = latestRev.reaction || (ratingNum >= 4 ? 'like' : 'dislike');
+              const likesCount = reactionStr === 'like' ? 1 : 0;
+              const dislikesCount = reactionStr === 'dislike' ? 1 : 0;
+              const commentStr = latestRev.comment || '';
+
+              await db.execute(sql`
+                INSERT INTO public.reviews (tenant_id, client_id, rating, reaction, comment, likes, dislikes, created_at)
+                VALUES (
+                  ${tenantId}::uuid,
+                  ${resolvedClientId}::uuid,
+                  ${ratingNum},
+                  ${reactionStr},
+                  ${commentStr},
+                  ${likesCount},
+                  ${dislikesCount},
+                  NOW()
+                )
+                ON CONFLICT (tenant_id, client_id)
+                DO UPDATE SET
+                  rating = EXCLUDED.rating,
+                  reaction = EXCLUDED.reaction,
+                  comment = EXCLUDED.comment,
+                  likes = EXCLUDED.likes,
+                  dislikes = EXCLUDED.dislikes,
+                  created_at = NOW()
+              `);
+            }
+          } catch (errRev) {
+            console.error('⚠️ Error sincronizando public.reviews:', errRev);
+          }
+        }
+      }
+
+      updateData.loyaltyConfig = cleanLoyalty;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ success: false, message: 'No hay datos válidos para actualizar' });
+    }
+
+    const [updatedTenant] = await db.update(tenants)
+      .set(updateData)
+      .where(eq(tenants.id, tenantId))
+      .returning();
+
+    if (!updatedTenant) {
+      return res.status(404).json({ success: false, message: 'Negocio no encontrado' });
+    }
+
+    return res.status(200).json({ success: true, tenant: updatedTenant });
+  } catch (error: any) {
+    console.error('❌ Error al actualizar config del tenant:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Internal Server Error' });
   }
 }

@@ -1,0 +1,32 @@
+{
+    "expo": {
+      "name": "SaaS Multinicho Mobile",
+      "slug": "mobile",
+      "version": "1.0.0",
+      "orientation": "portrait",
+      "icon": "./assets/icon.png",
+      "userInterfaceStyle": "dark",
+      "scheme": "saasapp",
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#05070C"
+      },
+      "ios": {
+        "supportsTablet": true
+      },
+      "android": {
+        "adaptiveIcon": {
+          "foregroundImage": "./assets/adaptive-icon.png",
+          "backgroundColor": "#05070C"
+        }
+      },
+      "web": {
+        "bundler": "metro",
+        "output": "static"
+      },
+      "plugins": [
+        "expo-router"
+      ]
+    }
+  }

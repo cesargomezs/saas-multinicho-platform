@@ -22,34 +22,35 @@ export async function getServices(req: Request, res: Response) {
 }
 
 // 2. Crear un nuevo servicio en el catálogo del negocio
-export async function createService(req: Request, res: Response) {
+export const createService = async (req: Request, res: Response) => {
   try {
+    // Extraemos el tenantId de los headers (que envía tu función apiFetch del frontend)
     const tenantId = req.headers['x-tenant-id'] as string;
-    if (!tenantId) {
-      return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
+    
+    // 🌟 FIX: Extraemos description e imageUrl del body para guardarlos
+    const { name, description, price, durationMinutes, imageUrl } = req.body;
+
+    if (!tenantId || !name || !price) {
+      return res.status(400).json({ success: false, message: 'Faltan datos obligatorios' });
     }
 
-    const { name, description, price, duration, category } = req.body;
-
-    if (!name || price === undefined) {
-      return res.status(400).json({ error: 'El nombre del servicio y el precio son obligatorios.' });
-    }
-
-    const [newService] = await db.insert(services).values({
+    // Insertamos en PostgreSQL vía Drizzle ORM
+    const newService = await db.insert(services).values({
       tenantId,
       name: name.trim(),
-      description: description ? description.trim() : null,
+      description: description ? description.trim() : null, // 🌟 GUARDAMOS DESCRIPCIÓN
       price: String(price),
-      duration: duration ? Number(duration) : 30, // Duración estimada en minutos por defecto
-      category: category ? category.trim() : 'general'
-    } as any).returning();
+      durationMinutes: Number(durationMinutes || 30),
+      imageUrl: imageUrl || null // 🌟 GUARDAMOS IMAGEN
+    }).returning(); // .returning() nos devuelve el objeto recién creado con su ID real
 
-    return res.status(201).json({ success: true, service: newService });
-  } catch (error: any) {
-    console.error('Error al crear el servicio:', error);
-    return res.status(500).json({ success: false, error: error.message || String(error) });
+    return res.status(201).json({ success: true, service: newService[0] });
+
+  } catch (error) {
+    console.error("Error creando servicio:", error);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
-}
+};
 
 // 3. Actualizar un servicio existente asegurando que pertenezca al tenant
 export async function updateService(req: Request, res: Response) {
@@ -61,16 +62,26 @@ export async function updateService(req: Request, res: Response) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
     }
 
-    const { name, description, price, duration, category } = req.body;
+    // 🌟 FIX: Agregamos imageUrl a las variables exactas que envía el frontend
+    const { name, description, price, durationMinutes, category, isActive, imageUrl } = req.body;
+
+    // 🌟 FIX: Armamos el objeto de actualización solo con los campos que vienen en el body
+    const updateData: any = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (description !== undefined) updateData.description = description ? description.trim() : null; // Permite vaciar la descripción
+    if (price !== undefined) updateData.price = String(price);
+    if (durationMinutes !== undefined) updateData.durationMinutes = Number(durationMinutes);
+    if (category !== undefined) updateData.category = category.trim();
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+    if (imageUrl !== undefined) updateData.imageUrl = imageUrl; // 🌟 GUARDAMOS IMAGEN AL EDITAR
+
+    // 🌟 FIX: Prevenimos el error "No values to set" si el body llegó vacío
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ success: false, error: 'No se enviaron datos válidos para actualizar.' });
+    }
 
     const [updatedService] = await db.update(services)
-      .set({
-        ...(name && { name: name.trim() }),
-        ...(description !== undefined && { description: description.trim() }),
-        ...(price !== undefined && { price: String(price) }),
-        ...(duration !== undefined && { duration: Number(duration) }),
-        ...(category && { category: category.trim() })
-      })
+      .set(updateData)
       .where(
         and(
           eq(services.id, id),
