@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -84,6 +84,29 @@ export default function B2BRegistrationScreen() {
   // Paso 2: Ubicación Real
   const [businessName, setBusinessName] = useState('');
   const [category, setCategory] = useState('');
+  const [dbCategories, setDbCategories] = useState<{ code: string; name: string }[]>([
+    { code: 'automotive', name: 'Talleres Mecánicos y Automotriz' },
+    { code: 'spa', name: 'Spas y Centros de Belleza' },
+    { code: 'barbershop', name: 'Barberías y Salones Masculinos' },
+    { code: 'legal', name: 'Abogados y Firmas Legales' },
+    { code: 'dental', name: 'Odontología y Clínicas Dentales' },
+  ]);
+
+  useEffect(() => {
+    const loadCategoriesFromDb = async () => {
+      try {
+        const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+        const res = await fetch(`${API_URL}/api/categories`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.categories) && data.categories.length > 0) {
+            setDbCategories(data.categories);
+          }
+        }
+      } catch (e) {}
+    };
+    loadCategoriesFromDb();
+  }, []);
   const [address, setAddress] = useState('');
   const [stateCode, setStateCode] = useState('');
   const [city, setCity] = useState('');
@@ -246,17 +269,35 @@ export default function B2BRegistrationScreen() {
     <View style={styles.root}>
       <WebStyles />
       
-      <View style={styles.header}>
-        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }} onPress={() => router.push('/')}>
+      <View style={[styles.header, { zIndex: 50 }]}>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }}
+          onPress={() => {
+            if (router.canGoBack()) router.back();
+            else router.replace('/');
+          }}
+        >
           <View style={{ backgroundColor: primaryColor, width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
             <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>A</Text>
           </View>
           <Text style={{ fontSize: 20, fontWeight: '900', color: '#FFF', letterSpacing: -0.5 }}>AutoFlow <Text style={{ color: '#94A3B8', fontWeight: 'normal', fontSize: 16 }}>/ Partners</Text></Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }} onPress={() => router.push('/')}>
-          <Feather name="x" size={16} color="#94A3B8" />
-          <Text style={{ color: '#94A3B8', fontWeight: 'bold', fontSize: 14 }}>Cancelar</Text>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          hitSlop={{ top: 12, bottom: 12, left: 16, right: 16 }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' }}
+          onPress={() => {
+            if (router.canGoBack()) {
+              router.back();
+            } else {
+              router.replace('/');
+            }
+          }}
+        >
+          <Feather name="x" size={16} color="#E2E8F0" />
+          <Text style={{ color: '#E2E8F0', fontWeight: 'bold', fontSize: 14 }}>Cancelar</Text>
         </TouchableOpacity>
       </View>
 
@@ -269,7 +310,7 @@ export default function B2BRegistrationScreen() {
             </View>
             
             <Text style={{ fontSize: isMobile ? 36 : 52, fontWeight: '900', color: '#FFF', textAlign: 'center', marginBottom: 20, lineHeight: isMobile ? 44 : 60, letterSpacing: -1 }}>
-              Digitaliza tu Taller, Spa o Barbería con <Text style={{ color: primaryColor }}>AutoFlow</Text>
+              Digitaliza tu Negocio, Clínica o Firma Legal con <Text style={{ color: primaryColor }}>AutoFlow</Text>
             </Text>
             
             <Text style={{ fontSize: 18, color: '#94A3B8', textAlign: 'center', maxWidth: 650, lineHeight: 28, marginBottom: 48 }}>
@@ -336,9 +377,11 @@ export default function B2BRegistrationScreen() {
                       {Platform.OS === 'web' ? (
                         <select className="web-input-override" value={category} onChange={e => setCategory(e.target.value)}>
                           <option value="" disabled>Elige Nicho Comercial</option>
-                          <option value="automotive">Talleres Mecánicos y Automotriz</option>
-                          <option value="spa">Spas y Centros de Belleza</option>
-                          <option value="barbershop">Barberías y Salones Masculinos</option>
+                          {dbCategories.map((cat) => (
+                            <option key={cat.code} value={cat.code}>
+                              {cat.name}
+                            </option>
+                          ))}
                         </select>
                       ) : (
                         <TextInput style={styles.formInput} placeholder="Ej: automotive" placeholderTextColor="#475569" value={category} onChangeText={setCategory} />

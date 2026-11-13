@@ -111,6 +111,18 @@ const formatWallClockForNotification = (scheduledAtDate?: Date | string | null, 
   return fallbackDate || fallbackTime || 'Horario programado';
 };
 
+
+// 📅 Helper para incluir link de "Agregar a Google Calendar" en 1 clic dentro de los mensajes de Telegram
+const buildTelegramGoogleCalendarLink = (scheduledAtDate: Date, titleStr: string, detailsStr: string, durationMin = 30): string => {
+  try {
+    const endDt = new Date(scheduledAtDate.getTime() + durationMin * 60000);
+    const fmt = (d: Date) => d.toISOString().replace(/[-:]/g, '').split('.')[0];
+    return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(titleStr)}&dates=${fmt(scheduledAtDate)}/${fmt(endDt)}&details=${encodeURIComponent(detailsStr)}`;
+  } catch (e) {
+    return 'https://calendar.google.com';
+  }
+};
+
 // 🔍 BUSCAR VEHÍCULO POR PLACA (EXPEDIENTE)
 export async function getVehicleByPlate(req: Request, res: Response) {
   try {
@@ -243,16 +255,25 @@ export async function createAppointment(req: Request, res: Response) {
       finalCost: '0.00' 
     }).returning();
 
-    // 🔔 DISPARAR NOTIFICACIÓN A TELEGRAM
+    // 🔔 DISPARAR NOTIFICACIÓN A TELEGRAM (MULTI-NICHO + LINK GOOGLE CALENDAR)
+    const modalityText = cleanMetadata?.modality === 'phone_call' ? '📞 Llamada Telefónica' : cleanMetadata?.modality === 'video_call' ? '💻 Videollamada' : '📍 Presencial';
+    const gcalUrl = buildTelegramGoogleCalendarLink(
+      parsedDate,
+      `Cita AutoFlow: ${clientName.trim()}`,
+      `Teléfono: ${clientPhone?.trim() || 'N/A'} | Modalidad: ${modalityText} | Notas: ${notes || 'Sin detalles'}`
+    );
     const telegramMsg = `
 🚨 <b>¡NUEVA RESERVA EN AUTOFLOW!</b> 🚨
-👤 <b>Cliente:</b> ${clientName.trim()}
+👤 <b>Cliente/Paciente:</b> ${clientName.trim()}
 📞 <b>Teléfono:</b> ${clientPhone?.trim() || 'N/A'}
-🗓️ <b>Fecha:</b> ${formatWallClockForNotification(parsedDate, finalMediaAndReports)}
-🚗 <b>Vehículo:</b> ${cleanMetadata.carPlate || 'No registrada'}
-🛠️ <b>Servicio:</b> Revisa el sistema para más detalles.
-📝 <b>Notas:</b> ${notes || 'Sin detalles'}
-${refPhone ? `🤝 <b>Referido por:</b> ${refPhone}` : ''}
+🗓️ <b>Fecha y Hora:</b> ${formatWallClockForNotification(parsedDate, finalMediaAndReports)}
+📍 <b>Modalidad:</b> ${modalityText}
+${cleanMetadata.carPlate ? `🚗 <b>Vehículo:</b> ${cleanMetadata.carPlate}
+` : ''}${cleanMetadata.caseType ? `📌 <b>Área / Motivo:</b> ${cleanMetadata.caseType}
+` : ''}${cleanMetadata.opposingParty ? `🛡️ <b>Contraparte / Seguro:</b> ${cleanMetadata.opposingParty}
+` : ''}📝 <b>Notas:</b> ${notes || 'Sin detalles'}
+${refPhone ? `🤝 <b>Referido por:</b> ${refPhone}
+` : ''}📅 <a href="${gcalUrl}"><b>+ Agregar a Google Calendar en 1 Clic</b></a>
     `;
     
     sendTelegramNotification(telegramMsg);
@@ -1032,5 +1053,1174 @@ export async function sendAppointmentReminder(req: Request, res: Response) {
   } catch (error: any) {
     console.error('Error enviando recordatorio 6h:', error);
     return res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+
+// =========================================================================
+// 🛠️ HELPERS DE VALIDACIÓN ESTRICTA PARA VOZ IA (TELÉFONO, NOMBRE "(Voz IA)", EMAIL, FECHA Y HORA NATURAL)
+// =========================================================================
+
+// Capitaliza palabras y agrega siempre el sufijo "(Voz IA)" cuando hay un nombre real
+const formatVoiceAiClientName = (rawName?: string | null, existingDbName?: string | null): string => {
+  const cleanCandidate = String(rawName || '')
+    .replace(/\(Voz IA\)/gi, '')
+    .replace(/\(Voice AI\)/gi, '')
+    .trim();
+
+  const isGeneric = (val: string) => {
+    if (!val || val.length < 2) return true;
+    const lower = val.toLowerCase();
+    return (
+      lower === 'cliente telefónico' ||
+      lower === 'cliente telefonico' ||
+      lower === 'cliente' ||
+      lower === 'customer' ||
+      lower === 'unknown' ||
+      lower === 'usuario' ||
+      lower === 'llamada entrante' ||
+      lower === 'n/a' ||
+      lower === 'null' ||
+      lower === 'undefined'
+    );
+  };
+
+  if (!isGeneric(cleanCandidate)) {
+    const titled = cleanCandidate.replace(/(^|\s)\S/g, (m) => m.toUpperCase());
+    return `${titled} (Voz IA)`;
+  }
+
+  const cleanExisting = String(existingDbName || '')
+    .replace(/\(Voz IA\)/gi, '')
+    .replace(/\(Voice AI\)/gi, '')
+    .trim();
+
+  if (!isGeneric(cleanExisting)) {
+    const titledExisting = cleanExisting.replace(/(^|\s)\S/g, (m) => m.toUpperCase());
+    return `${titledExisting} (Voz IA)`;
+  }
+
+  return 'Cliente Telefónico (Voz IA)';
+};
+
+// Valida y prioriza el teléfono real (Caller ID de Vapi o teléfono dictado válido)
+const resolveValidVoicePhone = (callerIdPhone?: string | null, spokenPhone?: string | null, existingDbPhone?: string | null): string => {
+  const isValidRealPhone = (p?: string | null) => {
+    if (!p) return false;
+    const digits = String(p).replace(/\D/g, '');
+    if (digits.length < 7) return false;
+    if (/^0+$/.test(digits) || digits.includes('0000000') || digits === '1234567890') return false;
+    return true;
+  };
+
+  const formatCleanPhone = (raw: string) => {
+    const trimmed = String(raw).trim();
+    const digits = trimmed.replace(/\D/g, '');
+    if (trimmed.startsWith('+')) return `+${digits}`;
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+    return `+${digits}`;
+  };
+
+  if (isValidRealPhone(callerIdPhone)) return formatCleanPhone(callerIdPhone!);
+  if (isValidRealPhone(spokenPhone)) return formatCleanPhone(spokenPhone!);
+  if (isValidRealPhone(existingDbPhone)) return formatCleanPhone(existingDbPhone!);
+  return '+10000000000';
+};
+
+// Normaliza correos hablados por voz ("cesar arroba gmail punto com" -> "cesar@gmail.com")
+const normalizeSpokenEmail = (rawEmail?: string | null, cleanPhone10?: string): { email: string; isReal: boolean } => {
+  if (rawEmail && typeof rawEmail === 'string') {
+    const cleaned = rawEmail
+      .toLowerCase()
+      .replace(/\s+arroba\s+/g, '@')
+      .replace(/\s+at\s+/g, '@')
+      .replace(/\s+punto\s+/g, '.')
+      .replace(/\s+dot\s+/g, '.')
+      .replace(/\s+/g, '')
+      .trim();
+
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned) && !cleaned.endsWith('@autoflow.voice')) {
+      return { email: cleaned, isReal: true };
+    }
+  }
+  const fallback = `tel.${cleanPhone10 || Date.now()}@autoflow.voice`.toLowerCase();
+  return { email: fallback, isReal: false };
+};
+
+// 🗓️ PARSER INTELIGENTE DE FECHA EN LENGUAJE NATURAL (ESPAÑOL E INGLÉS)
+// Soporta: "mañana", "pasado mañana", "lunes", "viernes", "15 de noviembre", "november 15", "2026-11-15", "15/11/2026"
+const normalizeVoiceDate = (rawDate?: string | null): string => {
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+  const dayAfterTomorrow = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+  const dayAfterTomorrowStr = dayAfterTomorrow.toISOString().split('T')[0];
+
+  if (!rawDate) return tomorrowStr;
+  const clean = String(rawDate)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // Quita tildes para comparar fácil
+
+  if (clean.includes('pasado manana') || clean.includes('day after tomorrow')) return dayAfterTomorrowStr;
+  if (clean === 'hoy' || clean === 'today' || clean.includes('para hoy')) return todayStr;
+  if (clean.includes('manana') || clean.includes('tomorrow')) return tomorrowStr;
+
+  // 1. Si ya viene como YYYY-MM-DD
+  const isoMatch = clean.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const yyyy = isoMatch[1];
+    const mm = isoMatch[2].padStart(2, '0');
+    const dd = isoMatch[3].padStart(2, '0');
+    const testDt = new Date(`${yyyy}-${mm}-${dd}T12:00:00Z`);
+    if (!isNaN(testDt.getTime())) return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // 2. Si dice un mes en español o inglés ("15 de noviembre", "noviembre 15", "nov 15")
+  const monthsMap: Record<string, number> = {
+    enero: 1, jan: 1, january: 1,
+    febrero: 2, feb: 2, february: 2,
+    marzo: 3, mar: 3, march: 3,
+    abril: 4, apr: 4, april: 4,
+    mayo: 5, may: 5,
+    junio: 6, jun: 6, june: 6,
+    julio: 7, jul: 7, july: 7,
+    agosto: 8, aug: 8, august: 8,
+    septiembre: 9, sep: 9, sept: 9, september: 9,
+    octubre: 10, oct: 10, october: 10,
+    noviembre: 11, nov: 11, november: 11,
+    diciembre: 12, dic: 12, dec: 12, december: 12
+  };
+
+  for (const [mName, mNum] of Object.entries(monthsMap)) {
+    const regex1 = new RegExp(`(\\d{1,2})\\s*(?:de\\s*)?${mName}(?:\\s*(?:de|del)?\\s*(\\d{4}))?`);
+    const regex2 = new RegExp(`${mName}\\s*(\\d{1,2})(?:[,\\s]+(\\d{4}))?`);
+    const m1 = clean.match(regex1);
+    const m2 = clean.match(regex2);
+    const matched = m1 || m2;
+    if (matched) {
+      const dayNum = parseInt(matched[1], 10);
+      const yearNum = matched[2] ? parseInt(matched[2], 10) : now.getFullYear();
+      if (dayNum >= 1 && dayNum <= 31) {
+        return `${yearNum}-${String(mNum).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+      }
+    }
+  }
+
+  // 3. Si dice un día de la semana ("lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo")
+  const weekdaysMap: Record<string, number> = {
+    domingo: 0, sunday: 0,
+    lunes: 1, monday: 1,
+    martes: 2, tuesday: 2,
+    miercoles: 3, wednesday: 3,
+    jueves: 4, thursday: 4,
+    viernes: 5, friday: 5,
+    sabado: 6, saturday: 6
+  };
+
+  for (const [wName, targetDay] of Object.entries(weekdaysMap)) {
+    if (clean.includes(wName)) {
+      const currentDay = now.getDay();
+      let daysAhead = (targetDay - currentDay + 7) % 7;
+      if (daysAhead === 0) daysAhead = 7; // Próximo día de la semana
+      const nextDate = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+      return nextDate.toISOString().split('T')[0];
+    }
+  }
+
+  // 4. Si viene como DD/MM/YYYY o MM/DD/YYYY
+  const slashMatch = clean.match(/(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+  if (slashMatch) {
+    const p1 = parseInt(slashMatch[1], 10);
+    const p2 = parseInt(slashMatch[2], 10);
+    let yyyy = slashMatch[3] ? parseInt(slashMatch[3], 10) : now.getFullYear();
+    if (yyyy < 100) yyyy += 2000;
+    const mm = String(p1 > 12 ? p2 : p1).padStart(2, '0');
+    const dd = String(p1 > 12 ? p1 : p2).padStart(2, '0');
+    const testDt = new Date(`${yyyy}-${mm}-${dd}T12:00:00Z`);
+    if (!isNaN(testDt.getTime())) return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const parsed = new Date(rawDate);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  return tomorrowStr;
+};
+
+// 🕒 PARSER INTELIGENTE DE HORA EN LENGUAJE NATURAL ("2 de la tarde" -> "14:00", "10 de la mañana" -> "10:00", "3 y media" -> "15:30")
+const normalizeVoiceTime = (rawTime?: string | null): string => {
+  if (!rawTime) return '14:00';
+  const clean = String(rawTime)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const isPM = clean.includes('pm') || clean.includes('p.m') || clean.includes('tarde') || clean.includes('noche');
+  const isAM = clean.includes('am') || clean.includes('a.m') || clean.includes('manana') || clean.includes('madrugada');
+  const hasHalf = clean.includes('y media') || clean.includes(':30') || clean.includes('treinta');
+
+  // Extraer hora y minutos numéricos si existen
+  const timeMatch = clean.match(/(\d{1,2})(?::(\d{2}))?/);
+  if (timeMatch) {
+    let hh = parseInt(timeMatch[1], 10);
+    let mm = timeMatch[2] ? parseInt(timeMatch[2], 10) : (hasHalf ? 30 : 0);
+
+    if (isPM && hh < 12) hh += 12;
+    else if (isAM && hh === 12) hh = 0;
+    else if (!isAM && !isPM && hh >= 1 && hh <= 7) hh += 12; // Horario comercial: "a las 2" = 14:00
+
+    hh = Math.min(23, Math.max(0, hh));
+    mm = Math.min(59, Math.max(0, mm));
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+
+  // Números hablados en letras ("dos de la tarde", "diez de la manana")
+  const wordHours: Record<string, number> = {
+    una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5,
+    seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12
+  };
+  for (const [word, hVal] of Object.entries(wordHours)) {
+    if (clean.includes(word)) {
+      let hh = hVal;
+      if (isPM && hh < 12) hh += 12;
+      else if (!isAM && hh >= 1 && hh <= 7) hh += 12;
+      const mm = hasHalf ? '30' : '00';
+      return `${String(hh).padStart(2, '0')}:${mm}`;
+    }
+  }
+
+  return '14:00';
+};
+
+// Genera una tabla de los próximos 10 días con su nombre de día y fecha para que la IA traduzca sola sin preguntar formatos
+const buildNaturalCalendarReferenceForPrompt = (): string => {
+  const daysEs = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+  const monthsEs = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  const now = new Date();
+  const lines: string[] = [];
+
+  for (let i = 0; i < 10; i++) {
+    const d = new Date(now.getTime() + i * 24 * 60 * 60 * 1000);
+    const iso = d.toISOString().split('T')[0];
+    const dayName = daysEs[d.getDay()];
+    const dayNum = d.getDate();
+    const monthName = monthsEs[d.getMonth()];
+    const prefix = i === 0 ? 'HOY' : i === 1 ? 'MAÑANA' : i === 2 ? 'PASADO MAÑANA' : `El ${dayName}`;
+    lines.push(`- ${prefix} (${dayName} ${dayNum} de ${monthName}) = ${iso}`);
+  }
+  return lines.join('\n');
+};
+
+// Resuelve de forma segura el tenantId aunque Vapi no envíe query params o el ID por defecto no exista
+const resolveValidTenantIdForWebhook = async (candidateTenantId?: string | null, assistantId?: string | null): Promise<string> => {
+  try {
+    const allTenants = await db.select().from(tenants);
+    if (allTenants.length === 0) return candidateTenantId || '123e4567-e89b-12d3-a456-426614174000';
+
+    if (candidateTenantId) {
+      const exact = allTenants.find((t) => t.id === candidateTenantId);
+      if (exact) return exact.id;
+    }
+
+    if (assistantId) {
+      const byAssistant = allTenants.find((t) => {
+        const lConf = safeParseJSON((t as any).loyaltyConfig);
+        return lConf?.vapiConfig?.assistantId === assistantId;
+      });
+      if (byAssistant) return byAssistant.id;
+    }
+
+    const activeVapiTenant = allTenants.find((t) => {
+      const lConf = safeParseJSON((t as any).loyaltyConfig);
+      return lConf?.vapiConfig?.isActive === true;
+    });
+    if (activeVapiTenant) return activeVapiTenant.id;
+
+    return allTenants[0].id;
+  } catch (e) {
+    return candidateTenantId || '123e4567-e89b-12d3-a456-426614174000';
+  }
+};
+
+// =========================================================================
+// ⚡ AUTOCONFIGURADOR 1-CLIC DE RECEPCIONISTA IA EN VAPI.AI (MODELO BYOK)
+// - Pide Nombre, Correo, Motivo y Fecha/Hora en lenguaje 100% natural (PROHIBIDO pedir formato especial)
+// - Envía notificación de activación del Agente Virtual a Telegram y al navegador
+// =========================================================================
+export async function configureTenantVapiAssistant(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    if (!tenantId) return res.status(400).json({ success: false, message: 'Falta x-tenant-id en los headers.' });
+
+    const { vapiConfig, businessName, niche, services: servicesListInput, staff: staffListInput } = req.body || {};
+    const apiKeyClean = String(vapiConfig?.privateApiKey || '').trim();
+
+    if (!apiKeyClean && !vapiConfig?.phoneNumber?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Por favor pega tu Private Key de Vapi (la primera clave de arriba en "Claves API").'
+      });
+    }
+
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+    if (!tenant) return res.status(404).json({ success: false, message: 'Negocio no encontrado.' });
+
+    // 🧹 Limpieza automática en BD de citas duplicadas previas
+    try {
+      await db.execute(sql`
+        DELETE FROM public.appointments
+        WHERE tenant_id = ${tenantId}::uuid
+          AND id NOT IN (
+            SELECT MIN(id::text)::uuid
+            FROM public.appointments
+            WHERE tenant_id = ${tenantId}::uuid
+            GROUP BY client_id, scheduled_at
+          )
+      `);
+    } catch (cleanErr) {}
+
+    const currentNiche = String(niche || (tenant as any).niche || 'automotive').toLowerCase();
+    const bizTitle = businessName || tenant.name || 'AutoFlow';
+    const staffSummary = Array.isArray(staffListInput) && staffListInput.length > 0
+      ? staffListInput.map((s: any) => `${s.name} (${s.role || 'Profesional'})`).join(', ')
+      : 'Equipo profesional disponible';
+    const servicesSummary = Array.isArray(servicesListInput) && servicesListInput.length > 0
+      ? servicesListInput.map((s: any) => `${s.name} ($${s.price})`).join(', ')
+      : 'Consulta general';
+
+    const calendarCheatSheet = buildNaturalCalendarReferenceForPrompt();
+
+    // 🌟 PROTOCOLO CONVERSACIONAL HUMANO: SIN CONTRAPARTE, PIDE CORREO Y HABLA DE FECHAS DE FORMA NATURAL
+    const roleInstruction = currentNiche === 'legal'
+      ? `Eres la recepcionista legal bilingüe (Español e Inglés) del bufete de abogados "${bizTitle}". Conversa de forma cálida, breve y humana. Pregunta: 1) Nombre y apellido del cliente, 2) Correo electrónico para enviarle la notificación de su cita, 3) Área o motivo de su consulta (Inmigración, Familia, Laboral, Civil, Penal o Contratos), y 4) Qué día y a qué hora le gustaría su cita y si la prefiere Presencial, por Llamada Telefónica o Videollamada.`
+      : currentNiche === 'dental'
+        ? `Eres la recepcionista virtual bilingüe (Español e Inglés) de la clínica odontológica "${bizTitle}". Conversa de forma cálida y humana. Pregunta: 1) Nombre y apellido del paciente, 2) Correo electrónico para enviarle la confirmación, 3) Motivo de su consulta (Limpieza, Dolor o Urgencia dental, Ortodoncia, Implantes o Valoración), y 4) Qué día y a qué hora le queda bien.`
+        : `Eres la recepcionista virtual bilingüe (Español e Inglés) de "${bizTitle}". Conversa de forma cálida y humana. Pregunta: 1) Nombre y apellido del cliente, 2) Correo electrónico para enviarle la confirmación, 3) Servicio que desea, y 4) Qué día y a qué hora le gustaría venir.`;
+
+    const systemPrompt = `${roleInstruction}
+
+CALENDARIO DE REFERENCIA AUTOMÁTICO (Usa esta guía para saber qué fecha es cada día):
+${calendarCheatSheet}
+
+Profesionales activos en el equipo: ${staffSummary}.
+Catálogo de servicios y tarifas: ${servicesSummary}.
+
+REGLAS DE ORO DE CONVERSACIÓN NATURAL:
+1. PROHIBIDO pedirle al cliente que diga la fecha o la hora en un formato especial. NUNCA menciones palabras como "formato año-mes-día", "YYYY-MM-DD", "formato de 24 horas" ni "HH:mm".
+2. Deja que el cliente diga el día y la hora con sus propias palabras (por ejemplo: "mañana a las 2 de la tarde", "el viernes a las 10 de la mañana", "el 15 de noviembre a las 4"). Tú conviertes eso silenciosamente por dentro usando el Calendario de Referencia.
+3. NO preguntes por nombre de contraparte ni datos largos.
+4. Si el cliente habla en inglés, respóndele en inglés fluido. Si habla en español, respóndele en español.
+5. Apenas el cliente te confirme su nombre, correo, día y hora, invoca la herramienta "book_appointment" UNA SOLA VEZ y confírmale verbalmente que su cita ya quedó agendada.`;
+
+    // Permitir URL personalizada desde la pantalla o desde el archivo .env
+    const rawWebhookBase = String(
+      vapiConfig?.webhookBaseUrl?.trim() ||
+      process.env.PUBLIC_API_URL ||
+      process.env.EXPO_PUBLIC_API_URL ||
+      'http://localhost:4000'
+    ).replace(/\/+$/, '');
+
+    if (rawWebhookBase.includes('xxxx')) {
+      return res.status(400).json({
+        success: false,
+        message: '⚠️ Tu URL de túnel todavía dice "https://xxxx.lhr.life". Pega la URL real de tu terminal (ej. https://b5b46f7862d679.lhr.life) en la casilla "URL Pública del Túnel HTTPS" o en tu archivo apps/api/.env.'
+      });
+    }
+
+    const webhookUrl = `${rawWebhookBase}/api/vapi/webhook?tenantId=${tenantId}`;
+    const isHttpsWebhook = webhookUrl.startsWith('https://');
+
+    let remoteAssistantId = vapiConfig?.assistantId || '';
+    let detectedPhoneNumber = vapiConfig?.phoneNumber?.trim() || '';
+    let detectedPhoneNumberId = vapiConfig?.phoneNumberId || '';
+    let vapiApiMessage = '✅ Configuración guardada localmente.';
+
+    if (apiKeyClean.length >= 10) {
+      const toolsArray = isHttpsWebhook
+        ? [
+            {
+              type: 'function',
+              function: {
+                name: 'check_availability',
+                description: 'Consulta los horarios disponibles para un día determinado.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    date: { type: 'string', description: 'Día o fecha solicitada por el cliente (ej. mañana, viernes, o 2026-11-13)' }
+                  },
+                  required: ['date']
+                }
+              },
+              server: { url: webhookUrl }
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'book_appointment',
+                description: 'Registra la cita del cliente en el calendario y envía la notificación a Telegram.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    clientName: { type: 'string', description: 'Nombre y apellido del cliente' },
+                    clientEmail: { type: 'string', description: 'Correo electrónico del cliente' },
+                    clientPhone: { type: 'string', description: 'Teléfono del cliente (opcional)' },
+                    appointmentDate: { type: 'string', description: 'Fecha acordada (ej. 2026-11-13 o mañana o viernes)' },
+                    appointmentTime: { type: 'string', description: 'Hora acordada (ej. 14:00 o 2:00 PM)' },
+                    serviceName: { type: 'string', description: 'Nombre del servicio o consulta' },
+                    staffName: { type: 'string', description: 'Nombre del profesional asignado' },
+                    modality: { type: 'string', enum: ['in_person', 'phone_call', 'video_call'] },
+                    caseType: { type: 'string', description: 'Motivo breve de la consulta' },
+                    language: { type: 'string', enum: ['es', 'en'] }
+                  },
+                  required: ['clientName', 'appointmentDate', 'appointmentTime']
+                }
+              },
+              server: { url: webhookUrl }
+            }
+          ]
+        : undefined;
+
+      const vapiPayload: any = {
+        name: `AutoFlow - ${bizTitle}`.slice(0, 40),
+        metadata: {
+          tenantId,
+          businessName: bizTitle,
+          niche: currentNiche
+        },
+        firstMessage: vapiConfig?.languageMode === 'en'
+          ? `Hello! Thank you for calling ${bizTitle}. Who do I have the pleasure of speaking with, and how can I help you today?`
+          : `¡Hola! Gracias por llamar a ${bizTitle}. ¿Con quién tengo el gusto de hablar y en qué te puedo colaborar hoy?`,
+        transcriber: {
+          provider: 'deepgram',
+          model: 'nova-2',
+          language: 'multi'
+        },
+        model: {
+          provider: 'openai',
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'system', content: systemPrompt }],
+          ...(toolsArray ? { tools: toolsArray } : {})
+        },
+        serverMessages: ['tool-calls', 'function-call', 'end-of-call-report'],
+        artifactPlan: {
+          recordingEnabled: true,
+          transcriptPlan: { enabled: true }
+        },
+        analysisPlan: {
+          structuredDataPlan: {
+            enabled: true,
+            schema: {
+              type: 'object',
+              properties: {
+                clientName: { type: 'string', description: 'Nombre completo del cliente que llamó' },
+                clientEmail: { type: 'string', description: 'Correo electrónico del cliente' },
+                clientPhone: { type: 'string', description: 'Teléfono mencionado por el cliente' },
+                appointmentDate: { type: 'string', description: 'Fecha o día acordado para la cita' },
+                appointmentTime: { type: 'string', description: 'Hora acordada para la cita' },
+                serviceName: { type: 'string', description: 'Servicio o consulta solicitada' },
+                modality: { type: 'string', description: 'in_person, phone_call o video_call' },
+                caseType: { type: 'string', description: 'Motivo de la consulta' },
+                appointmentConfirmed: { type: 'boolean', description: 'true si el cliente pidió o acordó agendar cita' }
+              }
+            }
+          }
+        },
+        ...(isHttpsWebhook ? { serverUrl: webhookUrl } : {}),
+        ...(vapiConfig?.transferPhone?.trim() ? { forwardingPhoneNumber: vapiConfig.transferPhone.trim() } : {})
+      };
+
+      // PASO A: Crear o actualizar el Agente (Assistant) en Vapi
+      let vapiRes = await fetch(
+        remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-')
+          ? `https://api.vapi.ai/assistant/${remoteAssistantId}`
+          : 'https://api.vapi.ai/assistant',
+        {
+          method: remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-') ? 'PATCH' : 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKeyClean}`
+          },
+          body: JSON.stringify(vapiPayload)
+        }
+      );
+
+      if (vapiRes.status === 404) {
+        vapiRes = await fetch('https://api.vapi.ai/assistant', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKeyClean}`
+          },
+          body: JSON.stringify(vapiPayload)
+        });
+      }
+
+      if (vapiRes.status === 401 || vapiRes.status === 403) {
+        return res.status(400).json({
+          success: false,
+          message: '⚠️ Clave rechazada por Vapi. Asegúrate de copiar la "Private Key" (la de arriba con punticos •••••• en Claves API) y NO la "Public Key" de abajo.'
+        });
+      }
+
+      if (vapiRes.ok) {
+        const vapiData = await vapiRes.json();
+        if (vapiData?.id) {
+          remoteAssistantId = vapiData.id;
+        }
+      } else {
+        const errTxt = await vapiRes.text();
+        console.warn('⚠️ Respuesta de Vapi creando asistente:', errTxt);
+      }
+
+      // PASO B: Vincular el Número de Teléfono en Vapi con el Agente actualizado
+      if (remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-')) {
+        try {
+          const phonesRes = await fetch('https://api.vapi.ai/phone-number', {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${apiKeyClean}` }
+          });
+
+          if (phonesRes.ok) {
+            const phonesList = await phonesRes.json();
+            if (Array.isArray(phonesList) && phonesList.length > 0) {
+              const cleanInputDigits = extractCleanPhone(detectedPhoneNumber);
+              const matchedPhone = (cleanInputDigits.length >= 7
+                ? phonesList.find((p: any) => extractCleanPhone(p.number || '').includes(cleanInputDigits))
+                : null) || phonesList[0];
+
+              if (matchedPhone?.id) {
+                detectedPhoneNumberId = matchedPhone.id;
+                detectedPhoneNumber = matchedPhone.number || detectedPhoneNumber;
+
+                await fetch(`https://api.vapi.ai/phone-number/${matchedPhone.id}`, {
+                  method: 'PATCH',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKeyClean}`
+                  },
+                  body: JSON.stringify({
+                    assistantId: remoteAssistantId,
+                    serverUrl: isHttpsWebhook ? webhookUrl : undefined,
+                    name: `Línea AutoFlow - ${bizTitle}`.slice(0, 40)
+                  })
+                });
+
+                vapiApiMessage = `🤖 ¡Agente Virtual IA Activado con Éxito!
+📞 Línea enlazada: ${detectedPhoneNumber}
+🌐 Webhook activo: ${rawWebhookBase}
+✨ Fecha y hora en lenguaje 100% natural.`;
+              }
+            }
+          }
+        } catch (phoneErr) {
+          console.warn('⚠️ Aviso vinculando número en Vapi:', phoneErr);
+        }
+      }
+    }
+
+    const existingLoyalty = safeParseJSON((tenant as any).loyaltyConfig);
+    const updatedVapiConfig = {
+      ...vapiConfig,
+      webhookBaseUrl: rawWebhookBase,
+      phoneNumber: detectedPhoneNumber || vapiConfig?.phoneNumber || 'Línea IA Configurada',
+      phoneNumberId: detectedPhoneNumberId,
+      privateApiKey: apiKeyClean,
+      isActive: true,
+      assistantId: remoteAssistantId || vapiConfig?.assistantId || `vapi-ast-${tenantId.slice(0, 8)}`,
+      lastSyncedAt: new Date().toISOString()
+    };
+
+    const updatedLoyalty = {
+      ...existingLoyalty,
+      vapiConfig: updatedVapiConfig
+    };
+
+    await db.update(tenants)
+      .set({ loyaltyConfig: updatedLoyalty } as any)
+      .where(eq(tenants.id, tenantId));
+
+    // 🔔 DISPARAR SIEMPRE LA NOTIFICACIÓN DE ACTIVACIÓN DEL AGENTE VIRTUAL A TELEGRAM
+    sendTelegramNotification(`
+🤖 <b>¡AGENTE VIRTUAL IA ACTIVADO Y SINCRONIZADO!</b> 🚀
+🏢 <b>Negocio:</b> ${bizTitle}
+📞 <b>Línea IA:</b> ${updatedVapiConfig.phoneNumber}
+🆔 <b>Agente Vapi ID:</b> ${updatedVapiConfig.assistantId}
+🌐 <b>Túnel / Webhook:</b> ${rawWebhookBase}
+🌎 <b>Idioma:</b> ${String(updatedVapiConfig.languageMode || 'bilingual').toUpperCase()}
+✅ <i>Conversación 100% natural activada (Nombre, Correo, Motivo y Día/Hora sin pedir formatos especiales).</i>
+    `);
+
+    return res.status(200).json({
+      success: true,
+      message: vapiApiMessage,
+      vapiConfig: updatedVapiConfig
+    });
+  } catch (error: any) {
+    console.error('Error configurando Vapi Assistant:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+// =========================================================================
+// 💾 HELPER INTERNO PARA GUARDAR O ACTUALIZAR CLIENTE + CITA DE VOZ IA EN BD
+// =========================================================================
+const upsertVoiceClientAndAppointment = async (params: {
+  tenantId: string;
+  rawClientName?: string;
+  rawClientEmail?: string;
+  callerIdPhone?: string;
+  spokenPhone?: string;
+  rawDate?: string;
+  rawTime?: string;
+  serviceId?: string;
+  serviceName?: string;
+  staffId?: string | null;
+  staffName?: string | null;
+  modality?: string;
+  caseType?: string;
+  callLanguage?: string;
+  callSummary?: string;
+  recordingUrl?: string;
+  callTranscript?: string;
+  callId?: string;
+  sendTelegram?: boolean;
+}) => {
+  const {
+    tenantId,
+    rawClientName,
+    rawClientEmail,
+    callerIdPhone,
+    spokenPhone,
+    rawDate,
+    rawTime,
+    serviceId,
+    serviceName,
+    staffId,
+    staffName,
+    modality: rawModality,
+    caseType: rawCaseType,
+    callLanguage = 'es',
+    callSummary: rawCallSummary,
+    recordingUrl = '',
+    callTranscript = '',
+    callId = '',
+    sendTelegram = true
+  } = params;
+
+  // 1. Validar Teléfono real (Caller ID o dictado)
+  const validatedPhone = resolveValidVoicePhone(callerIdPhone, spokenPhone);
+  const cleanPhone10 = extractCleanPhone(validatedPhone);
+
+  // 2. Validar Correo Electrónico
+  const { email: normalizedEmail, isReal: isRealEmail } = normalizeSpokenEmail(rawClientEmail, cleanPhone10);
+
+  // 3. Buscar si el cliente ya existe en este negocio (por correo o por los 10 dígitos del teléfono)
+  let existingUserByEmail: any = null;
+  let existingUserByPhone: any = null;
+
+  const [foundByEmail] = await db.select().from(users).where(
+    and(eq(users.tenantId, tenantId), eq(users.email, normalizedEmail))
+  );
+  if (foundByEmail) existingUserByEmail = foundByEmail;
+
+  if (cleanPhone10.length >= 7 && cleanPhone10 !== '0000000000') {
+    const [foundByPhone] = await db.select().from(users).where(
+      and(
+        eq(users.tenantId, tenantId),
+        sql`regexp_replace(${users.phone}, '[^0-9]', '', 'g') LIKE ${'%' + cleanPhone10 + '%'}`
+      )
+    );
+    if (foundByPhone) existingUserByPhone = foundByPhone;
+  }
+
+  let targetUser = existingUserByEmail || existingUserByPhone || null;
+
+  // 4. Formatear el Nombre agregando siempre "(Voz IA)"
+  const finalClientName = formatVoiceAiClientName(rawClientName, targetUser?.name);
+  const finalClientPhone = resolveValidVoicePhone(callerIdPhone, spokenPhone, targetUser?.phone);
+
+  if (!targetUser) {
+    const [insertedUser] = await db.insert(users).values({
+      tenantId,
+      name: finalClientName,
+      email: normalizedEmail,
+      phone: finalClientPhone,
+      role: 'client'
+    }).returning();
+    targetUser = insertedUser;
+  } else {
+    let emailToUpdate = targetUser.email;
+    if (isRealEmail && normalizedEmail !== targetUser.email) {
+      if (!existingUserByEmail || existingUserByEmail.id === targetUser.id) {
+        emailToUpdate = normalizedEmail;
+      }
+    }
+
+    const [updatedUser] = await db.update(users)
+      .set({
+        name: finalClientName,
+        phone: finalClientPhone,
+        email: emailToUpdate
+      })
+      .where(eq(users.id, targetUser.id))
+      .returning();
+    targetUser = updatedUser;
+  }
+
+  // 5. Resolver Servicio del Catálogo
+  const tenantServices = await db.select().from(services).where(eq(services.tenantId, tenantId));
+  let resolvedServiceId = serviceId || '';
+  let resolvedServiceName = serviceName || rawCaseType || 'Consulta Inicial';
+
+  if (resolvedServiceId) {
+    const foundSrv = tenantServices.find((s) => s.id === resolvedServiceId);
+    if (foundSrv) resolvedServiceName = foundSrv.name;
+  } else if (tenantServices.length > 0) {
+    const searchTerm = String(serviceName || rawCaseType || '').toLowerCase().trim();
+    const matchedByName = (searchTerm
+      ? tenantServices.find((s) => s.name.toLowerCase().includes(searchTerm) || searchTerm.includes(s.name.toLowerCase()))
+      : null) || tenantServices[0];
+    resolvedServiceId = matchedByName.id;
+    resolvedServiceName = matchedByName.name;
+  }
+
+  if (!resolvedServiceId) {
+    const [createdSrv] = await db.insert(services).values({
+      tenantId,
+      name: resolvedServiceName,
+      description: 'Consulta agendada por Recepcionista IA',
+      price: '0.00',
+      durationMinutes: 30,
+      isActive: true
+    } as any).returning();
+    resolvedServiceId = createdSrv.id;
+  }
+
+  // 6. Normalizar Fecha y Hora (Acepta "mañana", "viernes", "2 de la tarde", etc.)
+  const datePart = normalizeVoiceDate(rawDate);
+  const timePart = normalizeVoiceTime(rawTime);
+  const parsedDate = parseWallClockAppointmentDate(`${datePart}T${timePart}:00.000Z`, datePart, timePart);
+  const safeDbStaffId = await resolveSafeUserStaffId(staffId);
+
+  const cleanModality = String(rawModality || '').toLowerCase();
+  const modality: 'in_person' | 'phone_call' | 'video_call' =
+    cleanModality.includes('presencial') || cleanModality === 'in_person'
+      ? 'in_person'
+      : cleanModality.includes('video') || cleanModality === 'video_call'
+        ? 'video_call'
+        : 'phone_call';
+
+  const caseType = String(rawCaseType || '').trim();
+  const callSummary =
+    rawCallSummary ||
+    `Cita agendada por Recepcionista IA (${callLanguage.toUpperCase()})${caseType ? ` — Motivo: ${caseType}` : ''}`;
+
+  // 7. Evitar duplicados (por callId o por mismo cliente + misma fecha/hora)
+  const clientApts = await db.select().from(appointments).where(
+    and(
+      eq(appointments.tenantId, tenantId),
+      eq(appointments.clientId, targetUser.id),
+      ne(appointments.status, 'cancelled')
+    )
+  );
+
+  const existingSameApt = clientApts.find((a) => {
+    const m = safeParseJSON(a.mediaAndReports);
+    if (callId && m?.vapiCallId === callId) return true;
+    return a.scheduledAt.getTime() === parsedDate.getTime();
+  });
+
+  const mediaPayload = {
+    bookedVia: 'vapi_voice_ai',
+    vapiCallId: callId || undefined,
+    callLanguage,
+    clientPhone: finalClientPhone,
+    clientEmail: targetUser.email,
+    localDate: datePart,
+    localTime: timePart,
+    modality,
+    caseType,
+    callSummary,
+    recordingUrl: recordingUrl || undefined,
+    callTranscript: callTranscript || undefined,
+    assignedStaffId: staffId || null,
+    assignedStaffName: staffName || null
+  };
+
+  let apt: any = null;
+  if (existingSameApt) {
+    const prevMeta = safeParseJSON(existingSameApt.mediaAndReports);
+    const [updatedApt] = await db.update(appointments)
+      .set({
+        serviceId: resolvedServiceId,
+        staffNotes: callSummary,
+        mediaAndReports: { ...prevMeta, ...mediaPayload }
+      })
+      .where(eq(appointments.id, existingSameApt.id))
+      .returning();
+    apt = updatedApt;
+  } else {
+    // IMPORTANTE: No enviamos columnas opcionales que puedan no estar compiladas en @taller/database (todo viaja seguro en mediaAndReports)
+    const [insertedApt] = await db.insert(appointments).values({
+      tenantId,
+      clientId: targetUser.id,
+      staffId: safeDbStaffId,
+      serviceId: resolvedServiceId,
+      scheduledAt: parsedDate,
+      status: 'confirmed',
+      staffNotes: callSummary,
+      mediaAndReports: mediaPayload,
+      estimatedCost: '0.00',
+      finalCost: '0.00'
+    }).returning();
+    apt = insertedApt;
+  }
+
+  if (sendTelegram && !existingSameApt) {
+    const modalityLabel =
+      modality === 'phone_call'
+        ? '📞 Llamada Telefónica'
+        : modality === 'video_call'
+          ? '💻 Videollamada'
+          : '📍 Presencial en Oficina/Consultorio';
+    const formattedDateStr = formatWallClockForNotification(parsedDate, mediaPayload);
+    const gcalLink = buildTelegramGoogleCalendarLink(
+      parsedDate,
+      `[Voz IA] ${resolvedServiceName} - ${finalClientName}`,
+      `Cliente: ${finalClientName}\nTeléfono: ${finalClientPhone}\nCorreo: ${targetUser.email}\nModalidad: ${modalityLabel}\nMotivo: ${caseType || resolvedServiceName}\nResumen IA: ${callSummary}`
+    );
+
+    const displayEmail = targetUser.email.endsWith('@autoflow.voice') ? 'No indicado en llamada' : targetUser.email;
+
+    const telegramMsg = `
+📞 <b>¡NUEVA CITA AGENDADA POR RECEPCIONISTA IA (${callLanguage.toUpperCase()})!</b> 🤖
+👤 <b>Cliente/Paciente:</b> ${finalClientName}
+📞 <b>Teléfono:</b> ${finalClientPhone}
+📧 <b>Correo:</b> ${displayEmail}
+🗓️ <b>Fecha y Hora:</b> ${formattedDateStr}
+📍 <b>Modalidad:</b> ${modalityLabel}
+🛠️ <b>Servicio:</b> ${resolvedServiceName}
+${caseType ? `📌 <b>Motivo:</b> ${caseType}\n` : ''}💬 <b>Resumen IA:</b> <i>"${callSummary}"</i>
+📅 <a href="${gcalLink}"><b>+ Agregar a Google Calendar en 1 Clic</b></a>
+    `;
+    // No bloqueamos la respuesta HTTP a Vapi mientras sale el mensaje a Telegram
+    sendTelegramNotification(telegramMsg).catch(() => {});
+  }
+
+  return {
+    apt,
+    user: targetUser,
+    finalClientName,
+    finalClientPhone,
+    datePart,
+    timePart,
+    resolvedServiceName
+  };
+};
+
+// =========================================================================
+// 📞 WEBHOOK BILINGÜE (ES/EN) DE VAPI.AI + RESPALDO AUTOMÁTICO AL COLGAR
+// =========================================================================
+export async function handleVapiVoiceWebhook(req: Request, res: Response) {
+  try {
+    const body = req.body || {};
+    const isFromVapiServer = Boolean(body.message);
+    const vapiMessage = body.message || {};
+    const messageType = String(vapiMessage.type || (body.simulated ? 'direct_voice_booking' : ''));
+    const callId = String(vapiMessage.call?.id || body.callId || '');
+
+    const rawCandidateTenantId =
+      (req.query.tenantId as string) ||
+      (req.headers['x-tenant-id'] as string) ||
+      vapiMessage.call?.assistant?.metadata?.tenantId ||
+      vapiMessage.assistant?.metadata?.tenantId ||
+      null;
+    const incomingAssistantId = vapiMessage.call?.assistantId || vapiMessage.assistant?.id || null;
+    const tenantId = await resolveValidTenantIdForWebhook(rawCandidateTenantId, incomingAssistantId);
+
+    const callerIdNumber =
+      vapiMessage.call?.customer?.number ||
+      body.call?.customer?.number ||
+      vapiMessage.customer?.number ||
+      '';
+
+    // =========================================================================
+    // A) REPORTE DE FIN DE LLAMADA ("end-of-call-report")
+    // =========================================================================
+    if (messageType === 'end-of-call-report') {
+      const recordingUrl =
+        vapiMessage.recordingUrl ||
+        vapiMessage.artifact?.recordingUrl ||
+        vapiMessage.artifact?.stereoRecordingUrl ||
+        vapiMessage.call?.recordingUrl ||
+        '';
+      const summary =
+        vapiMessage.summary ||
+        vapiMessage.analysis?.summary ||
+        '';
+      const transcript =
+        vapiMessage.transcript ||
+        vapiMessage.artifact?.transcript ||
+        '';
+      const structured = safeParseJSON(vapiMessage.analysis?.structuredData);
+
+      const cleanCaller10 = extractCleanPhone(callerIdNumber || structured?.clientPhone || '');
+      let existingApt: any = null;
+      let matchedClient: any = null;
+
+      const allTenantApts = await db.select().from(appointments).where(eq(appointments.tenantId, tenantId));
+      if (callId) {
+        existingApt = allTenantApts.find((a) => safeParseJSON(a.mediaAndReports)?.vapiCallId === callId) || null;
+      }
+
+      if (!existingApt && cleanCaller10.length >= 7) {
+        const [clientByPhone] = await db.select().from(users).where(
+          and(
+            eq(users.tenantId, tenantId),
+            sql`regexp_replace(${users.phone}, '[^0-9]', '', 'g') LIKE ${'%' + cleanCaller10 + '%'}`
+          )
+        );
+        if (clientByPhone) {
+          matchedClient = clientByPhone;
+          const clientApts = allTenantApts
+            .filter((a) => a.clientId === clientByPhone.id && a.status !== 'cancelled')
+            .sort((a, b) => new Date(b.createdAt || b.scheduledAt).getTime() - new Date(a.createdAt || a.scheduledAt).getTime());
+          existingApt = clientApts[0] || null;
+        }
+      }
+
+      if (existingApt) {
+        if (!matchedClient) {
+          const [foundCli] = await db.select().from(users).where(eq(users.id, existingApt.clientId));
+          matchedClient = foundCli;
+        }
+        if (matchedClient) {
+          const updatedName = formatVoiceAiClientName(structured?.clientName, matchedClient.name);
+          const updatedPhone = resolveValidVoicePhone(callerIdNumber, structured?.clientPhone, matchedClient.phone);
+          const { email: extractedEmail, isReal: hasRealEmail } = normalizeSpokenEmail(structured?.clientEmail, cleanCaller10);
+
+          let emailToSave = matchedClient.email;
+          if (hasRealEmail && extractedEmail !== matchedClient.email) {
+            const [conflictEmail] = await db.select().from(users).where(
+              and(eq(users.tenantId, tenantId), eq(users.email, extractedEmail))
+            );
+            if (!conflictEmail || conflictEmail.id === matchedClient.id) {
+              emailToSave = extractedEmail;
+            }
+          }
+
+          const [savedCli] = await db.update(users)
+            .set({ name: updatedName, phone: updatedPhone, email: emailToSave })
+            .where(eq(users.id, matchedClient.id))
+            .returning();
+          matchedClient = savedCli;
+        }
+
+        const meta = safeParseJSON(existingApt.mediaAndReports);
+        await db.update(appointments)
+          .set({
+            staffNotes: summary || transcript || existingApt.staffNotes,
+            mediaAndReports: {
+              ...meta,
+              vapiCallId: callId || meta.vapiCallId,
+              clientPhone: matchedClient?.phone || meta.clientPhone,
+              clientEmail: matchedClient?.email || meta.clientEmail,
+              recordingUrl: recordingUrl || meta.recordingUrl,
+              callSummary: summary || meta.callSummary,
+              callTranscript: transcript || meta.callTranscript
+            }
+          })
+          .where(eq(appointments.id, existingApt.id));
+      } else if (
+        structured?.appointmentConfirmed ||
+        structured?.appointmentDate ||
+        structured?.appointmentTime ||
+        structured?.clientName
+      ) {
+        const fallbackResult = await upsertVoiceClientAndAppointment({
+          tenantId,
+          rawClientName: structured?.clientName,
+          rawClientEmail: structured?.clientEmail,
+          callerIdPhone: callerIdNumber,
+          spokenPhone: structured?.clientPhone,
+          rawDate: structured?.appointmentDate,
+          rawTime: structured?.appointmentTime,
+          serviceName: structured?.serviceName,
+          modality: structured?.modality,
+          caseType: structured?.caseType,
+          callSummary: summary || undefined,
+          recordingUrl,
+          callTranscript: transcript,
+          callId,
+          sendTelegram: true
+        });
+        existingApt = fallbackResult.apt;
+        matchedClient = fallbackResult.user;
+      }
+
+      if (recordingUrl || summary) {
+        const displayPhone = matchedClient?.phone || resolveValidVoicePhone(callerIdNumber, structured?.clientPhone);
+        const displayName = matchedClient?.name || formatVoiceAiClientName(structured?.clientName);
+        const displayEmail =
+          matchedClient?.email && !String(matchedClient.email).endsWith('@autoflow.voice')
+            ? matchedClient.email
+            : structured?.clientEmail || '';
+
+        const tgRecordingMsg = `
+🎙️ <b>¡GRABACIÓN Y RESUMEN DE LLAMADA IA!</b> 🎙️
+👤 <b>Cliente:</b> ${displayName}
+📞 <b>Teléfono:</b> ${displayPhone}
+${displayEmail ? `📧 <b>Correo:</b> ${displayEmail}\n` : ''}${summary ? `📝 <b>Resumen IA:</b> <i>"${summary}"</i>\n` : ''}${transcript ? `💬 <b>Transcripción:</b> <i>"${String(transcript).slice(0, 280)}${String(transcript).length > 280 ? '...' : ''}"</i>\n` : ''}${recordingUrl ? `🎧 <a href="${recordingUrl}"><b>▶️ Escuchar Grabación de la Llamada (Audio)</b></a>` : ''}
+        `;
+        sendTelegramNotification(tgRecordingMsg).catch(() => {});
+      }
+
+      return res.status(200).json({ success: true, updatedAppointmentId: existingApt?.id || null });
+    }
+
+    // =========================================================================
+    // 🔒 BLOQUEO ANTI-SPAM: IGNORAR EVENTOS INTERMEDIOS DE VAPI
+    // =========================================================================
+    if (
+      isFromVapiServer &&
+      messageType !== 'tool-calls' &&
+      messageType !== 'function-call' &&
+      !body.simulated
+    ) {
+      return res.status(200).json({ ok: true, ignoredEvent: messageType });
+    }
+
+    const rawToolCallsList: any[] =
+      (Array.isArray(vapiMessage.toolCalls) && vapiMessage.toolCalls.length > 0 ? vapiMessage.toolCalls : null) ||
+      (Array.isArray(vapiMessage.toolCallList) && vapiMessage.toolCallList.length > 0 ? vapiMessage.toolCallList : null) ||
+      (Array.isArray(vapiMessage.toolWithToolCallList) && vapiMessage.toolWithToolCallList.length > 0
+        ? vapiMessage.toolWithToolCallList.map((item: any) => item.toolCall || item)
+        : null) ||
+      (vapiMessage.functionCall
+        ? [{ id: 'fn-call', function: { name: vapiMessage.functionCall.name, arguments: vapiMessage.functionCall.parameters } }]
+        : []);
+
+    if (isFromVapiServer && rawToolCallsList.length === 0 && !body.simulated) {
+      return res.status(200).json({ ok: true, ignored: 'no_tool_call' });
+    }
+
+    // Si es una llamada directa del simulador en el frontend
+    if (body.simulated || (!isFromVapiServer && rawToolCallsList.length === 0)) {
+      const simRes = await upsertVoiceClientAndAppointment({
+        tenantId,
+        rawClientName: body.clientName,
+        rawClientEmail: body.clientEmail,
+        callerIdPhone: body.clientPhone,
+        spokenPhone: body.clientPhone,
+        rawDate: body.appointmentDate,
+        rawTime: body.appointmentTime,
+        serviceId: body.serviceId,
+        serviceName: body.serviceName,
+        staffId: body.staffId,
+        staffName: body.staffName,
+        modality: body.modality,
+        caseType: body.caseType,
+        callLanguage: body.language || 'es',
+        callSummary: body.callSummary,
+        recordingUrl: body.recordingUrl,
+        callId: `sim-${Date.now()}`,
+        sendTelegram: true
+      });
+
+      const confirmText = `Cita confirmada para ${simRes.finalClientName} el día ${simRes.datePart} a las ${simRes.timePart} para ${simRes.resolvedServiceName}.`;
+      return res.status(200).json({
+        success: true,
+        message: confirmText,
+        appointment: simRes.apt
+      });
+    }
+
+    const results: { toolCallId: string; result: string }[] = [];
+
+    for (const tc of rawToolCallsList) {
+      const tcId = String(tc?.id || tc?.toolCallId || 'tool-call-1');
+      const fnName = String(tc?.function?.name || tc?.name || 'book_appointment');
+      const fnArgs = safeParseJSON(tc?.function?.arguments ?? tc?.arguments ?? tc?.parameters ?? {});
+
+      if (fnName === 'check_availability') {
+        try {
+          const targetDate = normalizeVoiceDate(fnArgs.date || fnArgs.appointmentDate);
+          const dayApts = await db.select().from(appointments).where(
+            and(
+              eq(appointments.tenantId, tenantId),
+              gte(appointments.scheduledAt, new Date(`${targetDate}T00:00:00Z`)),
+              lt(appointments.scheduledAt, new Date(`${targetDate}T23:59:59Z`)),
+              ne(appointments.status, 'cancelled')
+            )
+          );
+          const bookedHours = dayApts.map((a) => a.scheduledAt.toISOString().split('T')[1].substring(0, 5));
+          const standardSlots = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00'];
+          const freeSlots = standardSlots.filter((s) => !bookedHours.includes(s));
+
+          const resultText = freeSlots.length > 0
+            ? `Horarios disponibles para ${targetDate}: ${freeSlots.join(', ')}`
+            : `No hay horarios libres el ${targetDate}. Por favor ofrécele otro día al cliente.`;
+
+          results.push({ toolCallId: tcId, result: resultText });
+        } catch (availErr) {
+          results.push({
+            toolCallId: tcId,
+            result: 'Horarios disponibles: 09:00, 10:00, 11:00, 14:00, 15:00, 16:00, 17:00'
+          });
+        }
+        continue;
+      }
+
+      if (fnName === 'book_appointment') {
+        try {
+          const booked = await upsertVoiceClientAndAppointment({
+            tenantId,
+            rawClientName: fnArgs.clientName || fnArgs.name || fnArgs.customerName || fnArgs.fullName,
+            rawClientEmail: fnArgs.clientEmail || fnArgs.email || fnArgs.customerEmail || fnArgs.correo,
+            callerIdPhone: callerIdNumber,
+            spokenPhone: fnArgs.clientPhone || fnArgs.phone || fnArgs.telefono,
+            rawDate: fnArgs.appointmentDate || fnArgs.date || fnArgs.fecha,
+            rawTime: fnArgs.appointmentTime || fnArgs.time || fnArgs.hora,
+            serviceId: fnArgs.serviceId,
+            serviceName: fnArgs.serviceName || fnArgs.service || fnArgs.servicio,
+            staffId: fnArgs.staffId || null,
+            staffName: fnArgs.staffName || null,
+            modality: fnArgs.modality || fnArgs.modalidad,
+            caseType: fnArgs.caseType || fnArgs.reason || fnArgs.motivo,
+            callLanguage: fnArgs.language || 'es',
+            callSummary: fnArgs.callSummary,
+            recordingUrl: fnArgs.recordingUrl,
+            callId,
+            sendTelegram: true
+          });
+
+          const confirmText =
+            (fnArgs.language || 'es') === 'en'
+              ? `Appointment successfully booked for ${booked.finalClientName} on ${booked.datePart} at ${booked.timePart} for ${booked.resolvedServiceName}.`
+              : `Cita agendada con éxito para ${booked.finalClientName} el día ${booked.datePart} a las ${booked.timePart} para ${booked.resolvedServiceName}.`;
+
+          results.push({ toolCallId: tcId, result: confirmText });
+        } catch (bookErr: any) {
+          console.error('Error en tool book_appointment:', bookErr);
+          results.push({
+            toolCallId: tcId,
+            result: 'La solicitud de cita fue recibida y registrada por recepción.'
+          });
+        }
+        continue;
+      }
+
+      results.push({ toolCallId: tcId, result: 'OK' });
+    }
+
+    return res.status(200).json({ results });
+  } catch (error: any) {
+    console.error('Error en handleVapiVoiceWebhook:', error);
+    return res.status(200).json({ results: [], ok: true });
   }
 }

@@ -139,6 +139,24 @@ const formatWallClockTime12h = (orderObj: any): string => {
   return rawTime || 'Hora N/A';
 };
 
+// 📅 HELPER UNIVERSAL: Generar enlace directo a Google Calendar en 1 clic (para Abogados, Odontólogos, etc.)
+const buildGoogleCalendarUrl = (orderObj: any, businessName?: string, durationMin = 30): string => {
+  const startDt = parseAppointmentWallClock(orderObj);
+  const endDt = new Date(startDt.getTime() + durationMin * 60000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const fmt = (d: Date) =>
+    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+  const title = encodeURIComponent(`${orderObj?.service?.name || orderObj?.serviceType || 'Cita'} - ${orderObj?.clientName || 'Cliente'} (${businessName || 'AutoFlow'})`);
+  const modalityLabel = orderObj?.metadata?.modality === 'phone_call' ? 'Llamada Telefónica' : orderObj?.metadata?.modality === 'video_call' ? 'Videollamada' : 'Presencial en Oficina/Consultorio';
+  const details = encodeURIComponent(
+    `Cliente/Paciente: ${orderObj?.clientName || 'N/A'}
+Teléfono: ${orderObj?.clientPhone || 'N/A'}
+Modalidad: ${modalityLabel}
+Detalle/Motivo: ${orderObj?.metadata?.caseType || orderObj?.notes || 'Sin notas adicionales'}`
+  );
+  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${fmt(startDt)}/${fmt(endDt)}&details=${details}`;
+};
+
 const getReportDiscountInfo = (r: any, servicesList: ServiceInfo[]) => {
   const notesStr = String(r.mechanicNotes || r.notes || r.staffNotes || '').toUpperCase();
   if (notesStr.includes('REFERIR') || notesStr.includes('REFERIDO') || notesStr.includes('RECOMENDADO') || r.referralDiscountApplied) {
@@ -411,6 +429,13 @@ const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tCo
       .horarios-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
       .chart-bar-col { transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); cursor: pointer; }
       .chart-bar-col:hover { transform: translateY(-4px) scale(1.04); }
+      .portal-dock-scroll, .portal-dock-scroll > div { scrollbar-width: none !important; -ms-overflow-style: none !important; }
+      .portal-dock-scroll::-webkit-scrollbar, .portal-dock-scroll > div::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
+      .portal-tab-pill { transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); cursor: pointer; user-select: none; }
+      .portal-tab-pill:hover { background-color: ${theme === 'dark' ? 'rgba(255,255,255,0.07)' : 'rgba(15,23,42,0.06)'} !important; }
+      .portal-tab-pill-active { transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); cursor: pointer; user-select: none; box-shadow: 0 4px 14px -2px ${brandColor}66; }
+      .portal-nav-arrow { transition: all 0.18s ease; cursor: pointer; backdrop-filter: blur(10px); }
+      .portal-nav-arrow:hover { transform: scale(1.08); background-color: ${brandColor} !important; border-color: ${brandColor} !important; }
     `}} />
   );
 };
@@ -421,7 +446,8 @@ const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tCo
 interface PortfolioItem { url: string; title: string; description: string; }
 interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; }
 interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; }
-interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; }
+interface VapiVoiceConfig { isActive?: boolean; phoneNumber?: string; privateApiKey?: string; phoneNumberId?: string; assistantId?: string; languageMode?: 'bilingual' | 'es' | 'en'; transferPhone?: string; webhookBaseUrl?: string; allowUrgentOverride?: boolean; lastSyncedAt?: string; }
+interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; }
 interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
 interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
 interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
@@ -477,21 +503,25 @@ export default function TenantDashboardScreen() {
   const dbNiche = tenantInfo?.niche?.toLowerCase() || tenantInfo?.businessType?.toLowerCase() || '';
   const isSpa = dbNiche === 'spa' || (!dbNiche && safeTenantId.includes('spa'));
   const isBarbershop = dbNiche === 'barbershop' || (!dbNiche && safeTenantId.includes('barber'));
-  const isAutomotive = !isSpa && !isBarbershop; 
+  const isLegal = dbNiche === 'legal' || (!dbNiche && (safeTenantId.includes('legal') || safeTenantId.includes('abogad') || safeTenantId.includes('law')));
+  const isDental = dbNiche === 'dental' || (!dbNiche && (safeTenantId.includes('dental') || safeTenantId.includes('odonto') || safeTenantId.includes('clinic')));
+  const isAutomotive = !isSpa && !isBarbershop && !isLegal && !isDental; 
 
-  const brandColor = tenantInfo?.primaryColor || '#FF5E00';
-  const staffTerm = isAutomotive ? 'Mecánico' : (isBarbershop ? 'Barbero' : 'Especialista');
+  const brandColor = tenantInfo?.primaryColor || (isLegal ? '#3B82F6' : isDental ? '#06B6D4' : '#FF5E00');
+  const staffTerm = isAutomotive ? 'Mecánico' : isBarbershop ? 'Barbero' : isLegal ? 'Abogado(a)' : isDental ? 'Odontólogo(a)' : 'Especialista';
 
   const bgImage = useMemo(() => {
     if (isSpa) return 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?q=80&w=2000&auto=format&fit=crop'; 
     if (isBarbershop) return 'https://images.unsplash.com/photo-1503951914875-452162b0f3f1?q=80&w=2000&auto=format&fit=crop';
+    if (isLegal) return 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?q=80&w=2000&auto=format&fit=crop';
+    if (isDental) return 'https://images.unsplash.com/photo-1629909613654-28e377c37b09?q=80&w=2000&auto=format&fit=crop';
     return 'https://images.unsplash.com/photo-1613214149922-f1809c99b414?q=80&w=2000&auto=format&fit=crop';
-  }, [isSpa, isBarbershop]);
+  }, [isSpa, isBarbershop, isLegal, isDental]);
 
   const [isMechanicAuth, setIsMechanicAuth] = useState(false);
   const [mechanicPin, setMechanicPin] = useState('');
   
-  const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad'>('today');
+  const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad' | 'recepcion_ia'>('today');
   const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -540,6 +570,10 @@ export default function TenantDashboardScreen() {
   const [newPartPreview, setNewPartPreview] = useState<string | null>(null);
   const oldFileInputRef = useRef<HTMLInputElement>(null);
   const newFileInputRef = useRef<HTMLInputElement>(null);
+  const portalTabsScrollRef = useRef<any>(null);
+  const [portalTabsScrollX, setPortalTabsScrollX] = useState(0);
+  const [portalTabsContentW, setPortalTabsContentW] = useState(0);
+  const [portalTabsViewW, setPortalTabsViewW] = useState(0);
 
   const [clientVisits, setClientVisits] = useState<number | null>(null);
   const [isCheckingLoyalty, setIsCheckingLoyalty] = useState(false);
@@ -598,6 +632,27 @@ export default function TenantDashboardScreen() {
   const [referredByPhone, setReferredByPhone] = useState('');
   const [bookingClientCoupons, setBookingClientCoupons] = useState<number>(0);
   const [isExistingClient, setIsExistingClient] = useState(false);
+  // Campos especializados para Abogados (legal) y Centros Odontológicos (dental)
+  const [appointmentModality, setAppointmentModality] = useState<'in_person' | 'phone_call' | 'video_call'>('in_person');
+  const [caseOrTreatmentArea, setCaseOrTreatmentArea] = useState<string>('');
+  const [opposingPartyOrInsurance, setOpposingPartyOrInsurance] = useState<string>('');
+  const [urgencyLevel, setUrgencyLevel] = useState<'normal' | 'priority' | 'urgent'>('normal');
+
+  // 📞 Estados para Recepción Telefónica IA (Vapi.ai BYOK 1-Clic)
+  const [vapiConfig, setVapiConfig] = useState<VapiVoiceConfig>({
+    isActive: false,
+    phoneNumber: '',
+    privateApiKey: '',
+    phoneNumberId: '',
+    assistantId: '',
+    languageMode: 'bilingual',
+    transferPhone: '',
+    allowUrgentOverride: true,
+    lastSyncedAt: ''
+  });
+  const [isSyncingVapi, setIsSyncingVapi] = useState<boolean>(false);
+  const [isSimulatingVoiceCall, setIsSimulatingVoiceCall] = useState<boolean>(false);
+  const [vapiActivationNotice, setVapiActivationNotice] = useState<string | null>(null);
 
   // Expediente
   const [expedienteQuery, setExpedienteQuery] = useState('');
@@ -650,17 +705,29 @@ export default function TenantDashboardScreen() {
     ? ['Niveles OK', 'Frenos Desgastados', 'Fugas de Aceite', 'Requiere Alineación'] 
     : isBarbershop
       ? ['Requiere hidratación', 'Corte de puntas', 'Cuero cabelludo sensible', 'Aplicar tónico']
-      : ['Sin alergias', 'Requiere sesión extra', 'Piel sensible', 'Tratamiento completado'];
+      : isLegal
+        ? ['Sin conflicto de interés', 'Documentación pendiente', 'Caso viable', 'Requiere poder firmado', 'Audiencia programada']
+        : isDental
+          ? ['Radiografía panorámica OK', 'Requiere profilaxis', 'Sensibilidad dental', 'Plan de ortodoncia', 'Control post-operatorio']
+          : ['Sin alergias', 'Requiere sesión extra', 'Piel sensible', 'Tratamiento completado'];
     
   const nextServiceOptions = isAutomotive 
     ? ['3 Meses', '6 Meses', '1 Año', '5,000 Millas']
-    : ['1 Semana', '15 Días', '1 Mes', '2 Meses'];
+    : isLegal
+      ? ['1 Semana (Revisión)', '15 Días (Seguimiento)', '1 Mes (Audiencia)', '3 Meses']
+      : isDental
+        ? ['1 Semana (Control)', '1 Mes (Ajuste)', '6 Meses (Limpieza)', '1 Año']
+        : ['1 Semana', '15 Días', '1 Mes', '2 Meses'];
     
   const clientQuickServices = isAutomotive 
     ? ['Cambio de Aceite', 'Revisión General', 'Frenos', 'Ruidos', 'Llantas']
     : isBarbershop
       ? ['Corte de Cabello', 'Perfilado de Barba', 'Cejas', 'Corte de Niño', 'Colorimetría']
-      : ['Masaje Relajante', 'Corte Clásico', 'Facial', 'Coloración'];
+      : isLegal
+        ? ['Inmigración / Visas', 'Familia / Divorcio', 'Accidente / Lesiones', 'Laboral / Despido', 'Contratos / Civil', 'Penal / Urgente']
+        : isDental
+          ? ['Dolor / Urgencia Dental', 'Limpieza / Blanqueamiento', 'Ortodoncia / Brackets', 'Implantes / Prótesis', 'Valoración 1ra Vez', 'Odontopediatría']
+          : ['Masaje Relajante', 'Corte Clásico', 'Facial', 'Coloración'];
 
   const apiFetch = async (url: string, options: RequestInit = {}) => {
     const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
@@ -995,6 +1062,9 @@ export default function TenantDashboardScreen() {
             }
             if (Array.isArray(parsedLoyalty.campaigns)) {
               setPushCampaignsList(parsedLoyalty.campaigns);
+            }
+            if (parsedLoyalty.vapiConfig) {
+              setVapiConfig((prev) => ({ ...prev, ...parsedLoyalty.vapiConfig }));
             }
           }
           if (dataInfo.tenant?.id) {
@@ -1601,8 +1671,10 @@ export default function TenantDashboardScreen() {
     if (isAutomotive) return ['Mecánico General', 'Especialista en Frenos', 'Electricista Automotriz', 'Técnico de Suspensión', 'Jefe de Taller'];
     if (isSpa) return ['Masajista Profesional', 'Cosmetóloga', 'Esteticista', 'Terapeuta Corporal', 'Especialista en Spa'];
     if (isBarbershop) return ['Barbero Senior', 'Estilista', 'Especialista en Barba', 'Colorista', 'Barbero Master'];
+    if (isLegal) return ['Abogado Socio / Titular', 'Abogado de Inmigración', 'Abogado de Familia / Civil', 'Abogado Penalista / Laboral', 'Paralegal / Asociado'];
+    if (isDental) return ['Odontólogo General', 'Ortodoncista', 'Endodoncista / Cirujano Oral', 'Implantólogo / Rehabilitador', 'Higienista Dental'];
     return ['Especialista', 'Técnico', 'Asistente', 'Gerente'];
-  }, [isAutomotive, isSpa, isBarbershop]);
+  }, [isAutomotive, isSpa, isBarbershop, isLegal, isDental]);
 
   const activeStaffList = useMemo(() => staffList.filter(s => s.isActive !== false), [staffList]);
   const activeCatalogServices = useMemo(() => servicesList.filter(s => s.isActive !== false), [servicesList]);
@@ -1923,6 +1995,125 @@ export default function TenantDashboardScreen() {
     }
   };
 
+  // ⚡ AUTOCONFIGURACIÓN EN 1 CLIC DEL RECEPCIONISTA DE VOZ EN VAPI.AI (MODELO BYOK - EL DUEÑO PAGA SUS LLAMADAS)
+  const handleAutoConfigureVapiAssistant = async () => {
+    if (!vapiConfig.privateApiKey?.trim() && !vapiConfig.phoneNumber?.trim()) {
+      alert('Por favor pega tu "Private Key" de Vapi (la primera clave con punticos •••••• que sale arriba en Claves API).');
+      return;
+    }
+    setIsSyncingVapi(true);
+    try {
+      const res = await apiFetch('/api/tenants/vapi-setup', {
+        method: 'POST',
+        body: JSON.stringify({
+          vapiConfig: {
+            ...vapiConfig,
+            isActive: true,
+            lastSyncedAt: new Date().toISOString()
+          },
+          businessName: tenantInfo?.name || 'Nuestro Negocio',
+          niche: dbNiche || (isLegal ? 'legal' : isDental ? 'dental' : isSpa ? 'spa' : isBarbershop ? 'barbershop' : 'automotive'),
+          services: activeCatalogServices.map((s) => ({ id: s.id, name: s.name, price: s.price, durationMinutes: s.durationMinutes || 30 })),
+          staff: activeStaffList.map((st) => ({ id: st.id, name: st.name, role: st.role })),
+          businessHours: localHours
+        })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        const savedVapi = data.vapiConfig || { ...vapiConfig, isActive: true, lastSyncedAt: new Date().toISOString() };
+        setVapiConfig(savedVapi);
+        const updatedLoyalty = { ...localLoyalty, reviews: reviewsList, campaigns: pushCampaignsList, vapiConfig: savedVapi };
+        setLocalLoyalty(updatedLoyalty);
+        setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyalty } : prev));
+        const noticeMsg = data.message || `🤖 ¡Agente Virtual IA Activado! Línea: ${savedVapi.phoneNumber || 'Activa'}`;
+        setVapiActivationNotice(noticeMsg);
+        triggerBrowserLocalNotification(
+          `🤖 ¡Agente Virtual IA Activado! — ${tenantInfo?.name || 'AutoFlow'}`,
+          `Línea ${savedVapi.phoneNumber || ''} conectada y lista para recibir llamadas en lenguaje natural.`
+        );
+        alert(noticeMsg);
+      } else {
+        alert(data.message || 'Error al configurar el asistente de voz.');
+      }
+    } catch (err) {
+      alert('Error de red al conectar con el motor de voz.');
+    } finally {
+      setIsSyncingVapi(false);
+    }
+  };
+
+  // 📞 SIMULADOR LOCAL DE LLAMADA ENTRANTE IA (PARA PROBAR AGENDAMIENTO TELEFÓNICO + TELEGRAM + PUSH SIN GASTAR SALDO)
+  const handleSimulatePhoneBooking = async (lang: 'es' | 'en' = 'es') => {
+    setIsSimulatingVoiceCall(true);
+    try {
+      const now = new Date();
+      const targetTime = new Date(now.getTime() + 4 * 60 * 60 * 1000); // +4h (cumple regla de 3h)
+      const yyyy = targetTime.getFullYear();
+      const mm = String(targetTime.getMonth() + 1).padStart(2, '0');
+      const dd = String(targetTime.getDate()).padStart(2, '0');
+      const hh = String(Math.min(17, Math.max(9, targetTime.getHours()))).padStart(2, '0');
+      const dateStr = `${yyyy}-${mm}-${dd}`;
+      const timeStr = `${hh}:00`;
+
+      const firstService = activeCatalogServices[0];
+      const firstStaff = activeStaffList[0];
+
+      const sampleSummary = isLegal
+        ? (lang === 'en'
+            ? 'Client called in English requesting a legal consultation regarding an immigration visa review. Requested phone modality.'
+            : 'El cliente llamó solicitando asesoría legal sobre un trámite de inmigración / contrato. Prefiere consulta telefónica.')
+        : isDental
+          ? (lang === 'en'
+              ? 'Patient called in English reporting molar sensitivity and requesting a dental evaluation + cleaning. Has dental insurance.'
+              : 'Paciente llamó por sensibilidad dental y solicita valoración odontológica + limpieza. Indica primera vez.')
+          : (lang === 'en'
+              ? 'Customer called in English to schedule an appointment for today.'
+              : 'Cliente llamó a la línea IA para agendar turno disponible.');
+
+      const res = await apiFetch('/api/vapi/webhook', {
+        method: 'POST',
+        body: JSON.stringify({
+          simulated: true,
+          language: lang,
+          clientName: 'Cesar Gomez (Voz IA)',
+          clientPhone: '+1 9512586016',
+          clientEmail: 'cesar.gomez@autoflow.ai',
+          serviceId: firstService?.id || '',
+          serviceName: firstService?.name || (isLegal ? 'Consulta Legal Inicial' : isDental ? 'Valoración Odontológica' : 'Servicio General'),
+          staffId: firstStaff?.id || null,
+          staffName: firstStaff?.name || '',
+          appointmentDate: dateStr,
+          appointmentTime: timeStr,
+          modality: isLegal ? 'phone_call' : 'in_person',
+          caseType: isLegal ? 'Inmigración / Contratos' : isDental ? 'Valoración + Limpieza' : 'General',
+          opposingParty: '',
+          urgency: 'normal',
+          callSummary: sampleSummary,
+          recordingUrl: 'https://www2.cs.uic.edu/~i101/SoundFiles/BabyElephantWalk60.wav'
+        })
+      });
+
+      if (res.ok) {
+        triggerBrowserLocalNotification(
+          `📞 Nueva Cita por Llamada IA (${lang.toUpperCase()})`,
+          `Agendada para ${dateStr} a las ${timeStr}. Revisa Telegram y tu agenda.`
+        );
+        await fetchAgendaData();
+        setAgendaFilter('today');
+        alert(`📞 ¡Llamada IA (${lang === 'en' ? 'Inglés' : 'Español'}) simulada con éxito!
+
+La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el mensaje a Telegram con enlace a Google Calendar.`);
+      } else {
+        alert('Asegúrate de tener al menos 1 servicio creado en tu Catálogo para simular la reserva telefónica.');
+      }
+    } catch (e) {
+      alert('Error simulando llamada IA.');
+    } finally {
+      setIsSimulatingVoiceCall(false);
+    }
+  };
+
   const handleSearchExpediente = async () => {
     if (!expedienteQuery) return;
     setIsSearchingExpediente(true); setClientExpedienteData(null); setIsEditingClientReview(false);
@@ -2029,6 +2220,10 @@ export default function TenantDashboardScreen() {
       }
       if (appointmentDate) metadataObj.localDate = appointmentDate;
       if (appointmentTime) metadataObj.localTime = appointmentTime;
+      metadataObj.modality = appointmentModality;
+      if (caseOrTreatmentArea) metadataObj.caseType = toTitleCase(caseOrTreatmentArea.trim());
+      if (opposingPartyOrInsurance) metadataObj.opposingParty = toTitleCase(opposingPartyOrInsurance.trim());
+      if (urgencyLevel) metadataObj.urgency = urgencyLevel;
       if (finalAssignedStaffId) {
         metadataObj.assignedStaffId = finalAssignedStaffId;
         if (assignedStaffObj) metadataObj.assignedStaffName = toTitleCase(assignedStaffObj.name);
@@ -2212,102 +2407,177 @@ export default function TenantDashboardScreen() {
       <Image key={`${bgImage}-${theme}`} source={{ uri: bgImage }} style={[StyleSheet.absoluteFill, { width: '100%', height: '100%', opacity: theme === 'dark' ? 0.15 : 0.05 } as any]} resizeMode="cover" />
       <WebStyles theme={theme} tColor={tColor} brandColor={brandColor} />
 
-      {/* 🌟 MENÚ SUPERIOR CON BADGE DE ESTRELLAS + LIKES/DISLIKES 🌟 */}
+      {/* 🌟 MENÚ SUPERIOR RESPONSIVE (MÓVIL + TABLET + DESKTOP) 🌟 */}
       <View style={[styles.header, { 
         position: Platform.OS === 'web' ? ('sticky' as any) : 'relative', top: 0, zIndex: 200,
         backgroundColor: tColor.nav, backdropFilter: Platform.OS === 'web' ? 'blur(16px)' : 'none',
-        paddingHorizontal: Platform.OS === 'web' ? 40 : 20, paddingTop: Platform.OS === 'web' ? 20 : 0, paddingBottom: 20,
-        borderBottomWidth: 1, borderBottomColor: tColor.border, display: isPrinting ? 'none' : 'flex'
+        paddingHorizontal: isMobile ? 16 : 40, paddingTop: isMobile ? 14 : 20, paddingBottom: isMobile ? 14 : 20,
+        borderBottomWidth: 1, borderBottomColor: tColor.border, display: isPrinting ? 'none' : 'flex',
+        gap: isMobile ? 10 : 16
       }]}>
         
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: isMobile ? 1 : undefined, minWidth: isMobile ? 180 : undefined }}>
           {tenantInfo?.logoUrl ? (
-             <View style={{ width: 40, height: 40, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: '#000' }}>
+             <View style={{ width: isMobile ? 34 : 40, height: isMobile ? 34 : 40, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: '#000' }}>
                <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo.name || 'Logo'} />
              </View>
           ) : (
-             <View style={{ backgroundColor: brandColor, width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }}>
-               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>{tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}</Text>
+             <View style={{ backgroundColor: brandColor, width: isMobile ? 34 : 36, height: isMobile ? 34 : 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }}>
+               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: isMobile ? 16 : 18 }}>{tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}</Text>
              </View>
           )}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <Text style={{ fontSize: 20, fontWeight: '900', color: tColor.text }}>{tenantInfo?.name || 'AutoFlow'}</Text>
-            <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Ionicons name="star" size={12} color="#F59E0B" />
-              <Text style={{ color: '#F59E0B', fontSize: 12, fontWeight: '900' }}>{ratingSummary.avg}</Text>
-              <View style={{ width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.15)' }} />
-              <Feather name="thumbs-up" size={11} color="#10B981" />
-              <Text style={{ color: '#10B981', fontSize: 11, fontWeight: '900' }}>{ratingSummary.likes}</Text>
-              {ratingSummary.dislikes > 0 ? (
-                <>
-                  <Feather name="thumbs-down" size={11} color="#EF4444" />
-                  <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
-                </>
+          <View style={{ flex: isMobile ? 1 : undefined }}>
+            <Text style={{ fontSize: isMobile ? 16 : 20, fontWeight: '900', color: tColor.text }} numberOfLines={1}>
+              {tenantInfo?.name || 'AutoFlow'}
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 3 }}>
+              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                <Ionicons name="star" size={11} color="#F59E0B" />
+                <Text style={{ color: '#F59E0B', fontSize: 11, fontWeight: '900' }}>{ratingSummary.avg}</Text>
+                <View style={{ width: 1, height: 9, backgroundColor: 'rgba(255,255,255,0.15)' }} />
+                <Feather name="thumbs-up" size={10} color="#10B981" />
+                <Text style={{ color: '#10B981', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.likes}</Text>
+                {ratingSummary.dislikes > 0 ? (
+                  <>
+                    <Feather name="thumbs-down" size={10} color="#EF4444" />
+                    <Text style={{ color: '#EF4444', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
+                  </>
+                ) : null}
+              </View>
+              {clientDistanceMiles ? (
+                <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                  <Feather name="navigation" size={10} color="#60A5FA" />
+                  <Text style={{ color: tColor.text, fontSize: 10.5, fontWeight: '800' }}>{clientDistanceMiles} mi</Text>
+                </View>
               ) : null}
             </View>
-            {clientDistanceMiles ? (
-              <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                <Feather name="navigation" size={11} color="#60A5FA" />
-                <Text style={{ color: tColor.text, fontSize: 11, fontWeight: '800' }}>A {clientDistanceMiles} mi de ti</Text>
-              </View>
-            ) : null}
           </View>
         </View>
 
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          {isMobile ? (
-            <TouchableOpacity style={{ padding: 10, backgroundColor: tColor.border, borderRadius: 10 }} onPress={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
-              <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={20} color={tColor.text} />
+        {!isMobile ? (
+          <View style={{ flexDirection: 'row', gap: 20, alignItems: 'center' }}>
+            <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('servicios')}>
+              <Feather name="calendar" size={15} color={activeView === 'servicios' ? brandColor : tColor.muted} />
+              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: '800' }}>Reservas</Text>
             </TouchableOpacity>
-          ) : (
-            <View style={{ flexDirection: 'row', gap: 20 }}>
-              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('servicios')}>
-                <Feather name="calendar" size={15} color={activeView === 'servicios' ? brandColor : tColor.muted} />
-                <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: '800' }}>Reservas</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('expediente')}>
-                <Feather name="file-text" size={15} color={activeView === 'expediente' ? brandColor : tColor.muted} />
-                <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: '800' }}>Expediente</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('mecanico')}>
-                <Feather name="sliders" size={15} color={activeView === 'mecanico' ? brandColor : tColor.muted} />
-                <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: '800' }}>Portal Interno</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
+            <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('expediente')}>
+              <Feather name="file-text" size={15} color={activeView === 'expediente' ? brandColor : tColor.muted} />
+              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: '800' }}>Expediente</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('mecanico')}>
+              <Feather name="sliders" size={15} color={activeView === 'mecanico' ? brandColor : tColor.muted} />
+              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: '800' }}>Portal Interno</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-          <TouchableOpacity onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 42, height: 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: 12 }}>
-            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={18} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12 }}>
+          <TouchableOpacity onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: isMobile ? 38 : 42, height: isMobile ? 38 : 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: 12 }}>
+            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={17} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, flexDirection: 'row', gap: 8 }]} onPress={() => {
+          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, flexDirection: 'row', gap: 6, paddingVertical: isMobile ? 9 : 14, paddingHorizontal: isMobile ? 12 : 24 }]} onPress={() => {
             if (router.canGoBack()) {
               router.back();
             } else {
               router.push(`/?category=${dbNiche}`);
             }
           }}>
-            <Feather name="arrow-left" size={16} color={tColor.text} />
-            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Volver</Text>
+            <Feather name="arrow-left" size={15} color={tColor.text} />
+            <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: isMobile ? 13 : 14.5 }]}>Volver</Text>
           </TouchableOpacity>
+          {isMobile ? (
+            <TouchableOpacity
+              style={{ width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: isMobileMenuOpen ? brandColor : tColor.border, borderRadius: 12 }}
+              onPress={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            >
+              <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={19} color={isMobileMenuOpen ? '#FFFFFF' : tColor.text} />
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
 
+      {/* 📱 MENÚ DESPLEGABLE MÓVIL CON SCROLL VERTICAL (INCLUYE SECCIONES DE PORTAL INTERNO) 📱 */}
       {isMobile && isMobileMenuOpen ? (
-        <View style={{ position: 'absolute', top: 80, left: 20, right: 20, backgroundColor: tColor.card, zIndex: 190, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: tColor.border, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.2, shadowRadius: 20 }}>
-          <TouchableOpacity style={{ paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('servicios')}>
-            <Feather name="calendar" size={18} color={activeView === 'servicios' ? brandColor : tColor.text} />
-            <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Reservas</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={{ paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('expediente')}>
-            <Feather name="file-text" size={18} color={activeView === 'expediente' ? brandColor : tColor.text} />
-            <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Expediente</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={{ paddingVertical: 16, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('mecanico')}>
-            <Feather name="sliders" size={18} color={activeView === 'mecanico' ? brandColor : tColor.text} />
-            <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 16 }}>Portal Interno</Text>
-          </TouchableOpacity>
+        <View style={{
+          position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
+          top: 72,
+          left: 16,
+          right: 16,
+          maxHeight: '78vh' as any,
+          backgroundColor: theme === 'dark' ? 'rgba(15, 20, 28, 0.98)' : 'rgba(255, 255, 255, 0.98)',
+          zIndex: 250,
+          borderRadius: 18,
+          borderWidth: 1,
+          borderColor: tColor.border,
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 12 },
+          shadowOpacity: 0.35,
+          shadowRadius: 24,
+          overflow: 'hidden'
+        }}>
+          <ScrollView showsVerticalScrollIndicator={true} contentContainerStyle={{ padding: 16 }}>
+            <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', marginBottom: 6, letterSpacing: 0.8 }}>
+              Navegación Principal
+            </Text>
+            <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('servicios')}>
+              <Feather name="calendar" size={18} color={activeView === 'servicios' ? brandColor : tColor.text} />
+              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Reservas</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('expediente')}>
+              <Feather name="file-text" size={18} color={activeView === 'expediente' ? brandColor : tColor.text} />
+              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Expediente</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: isMechanicAuth ? 1 : 0, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('mecanico')}>
+              <Feather name="sliders" size={18} color={activeView === 'mecanico' ? brandColor : tColor.text} />
+              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Portal Interno</Text>
+            </TouchableOpacity>
+
+            {isMechanicAuth ? (
+              <View style={{ marginTop: 14 }}>
+                <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', marginBottom: 8, letterSpacing: 0.8 }}>
+                  Secciones del Portal Interno (Scroll)
+                </Text>
+                {[
+                  { key: 'today', label: 'Órdenes de Hoy', icon: 'check-square' },
+                  { key: 'upcoming', label: 'Próximos Turnos', icon: 'calendar' },
+                  { key: 'reports', label: 'Reportes y Tráfico', icon: 'bar-chart-2' },
+                  { key: 'staff', label: `Personal (${staffTerm}s)`, icon: 'users' },
+                  { key: 'catalogo', label: 'Catálogo de Servicios', icon: 'tag' },
+                  { key: 'horarios', label: 'Horarios de Atención', icon: 'clock' },
+                  { key: 'portafolio', label: 'Portafolio Visual', icon: 'image' },
+                  { key: 'fidelidad', label: 'Fidelidad y Campañas', icon: 'gift' },
+                  { key: 'recepcion_ia', label: 'Recepción IA (Llamadas)', icon: 'phone-call' },
+                ].map((sec) => {
+                  const isActiveSec = activeView === 'mecanico' && agendaFilter === sec.key;
+                  return (
+                    <TouchableOpacity
+                      key={sec.key}
+                      onPress={() => {
+                        setActiveView('mecanico');
+                        setAgendaFilter(sec.key as any);
+                        setIsMobileMenuOpen(false);
+                      }}
+                      style={{
+                        paddingVertical: 12,
+                        paddingHorizontal: 12,
+                        borderRadius: 10,
+                        marginBottom: 4,
+                        backgroundColor: isActiveSec ? `${brandColor}20` : 'transparent',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10
+                      }}
+                    >
+                      <Feather name={sec.icon as any} size={16} color={isActiveSec ? brandColor : tColor.muted} />
+                      <Text style={{ color: isActiveSec ? brandColor : tColor.text, fontWeight: isActiveSec ? '900' : '600', fontSize: 14 }}>
+                        {sec.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : null}
+          </ScrollView>
         </View>
       ) : null}
 
@@ -3041,18 +3311,372 @@ export default function TenantDashboardScreen() {
               </View>
             ) : (
               <View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 32 }}>
-                  <View style={[styles.tabsContainer, { backgroundColor: tColor.card, marginBottom: 0, paddingRight: 20 }]}>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'today' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('today')}><Feather name="check-square" size={15} color={agendaFilter === 'today' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'today' ? '#FFFFFF' : tColor.muted }]}>Órdenes</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'upcoming' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('upcoming')}><Feather name="calendar" size={15} color={agendaFilter === 'upcoming' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'upcoming' ? '#FFFFFF' : tColor.muted }]}>Próximos</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'reports' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('reports')}><Feather name="bar-chart-2" size={15} color={agendaFilter === 'reports' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'reports' ? '#FFFFFF' : tColor.muted }]}>Reportes</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'staff' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('staff')}><Feather name="users" size={15} color={agendaFilter === 'staff' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'staff' ? '#FFFFFF' : tColor.muted }]}>Personal</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'catalogo' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('catalogo')}><Feather name="tag" size={15} color={agendaFilter === 'catalogo' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'catalogo' ? '#FFFFFF' : tColor.muted }]}>Catálogo</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'horarios' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('horarios')}><Feather name="clock" size={15} color={agendaFilter === 'horarios' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'horarios' ? '#FFFFFF' : tColor.muted }]}>Horarios</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'portafolio' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('portafolio')}><Feather name="image" size={15} color={agendaFilter === 'portafolio' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'portafolio' ? '#FFFFFF' : tColor.muted }]}>Portafolio</Text></TouchableOpacity>
-                    <TouchableOpacity style={[styles.tab, { flexDirection: 'row', justifyContent: 'center', gap: 7 }, agendaFilter === 'fidelidad' ? { backgroundColor: brandColor } : {}]} onPress={() => setAgendaFilter('fidelidad')}><Feather name="gift" size={15} color={agendaFilter === 'fidelidad' ? '#FFFFFF' : tColor.muted} /><Text style={[styles.tabText, { color: agendaFilter === 'fidelidad' ? '#FFFFFF' : tColor.muted }]}>Fidelidad</Text></TouchableOpacity>
+                {(() => {
+                  const portalMenuItems = [
+                    { key: 'today', label: 'Órdenes', icon: 'check-square' },
+                    { key: 'upcoming', label: 'Próximos', icon: 'calendar' },
+                    { key: 'reports', label: 'Reportes', icon: 'bar-chart-2' },
+                    { key: 'staff', label: 'Personal', icon: 'users' },
+                    { key: 'catalogo', label: 'Catálogo', icon: 'tag' },
+                    { key: 'horarios', label: 'Horarios', icon: 'clock' },
+                    { key: 'portafolio', label: 'Portafolio', icon: 'image' },
+                    { key: 'fidelidad', label: 'Fidelidad', icon: 'gift' },
+                    { key: 'recepcion_ia', label: 'Recepción IA', icon: 'phone-call' },
+                  ] as const;
+
+                  const hasOverflow = portalTabsContentW > portalTabsViewW + 6;
+                  const canScrollLeft = hasOverflow && portalTabsScrollX > 8;
+                  const canScrollRight = hasOverflow && portalTabsScrollX < (portalTabsContentW - portalTabsViewW - 8);
+
+                  const handleStepScroll = (direction: 'left' | 'right') => {
+                    const step = Math.max(180, Math.round(portalTabsViewW * 0.55));
+                    const nextX = direction === 'left'
+                      ? Math.max(0, portalTabsScrollX - step)
+                      : Math.min(Math.max(0, portalTabsContentW - portalTabsViewW), portalTabsScrollX + step);
+                    portalTabsScrollRef.current?.scrollTo({ x: nextX, animated: true });
+                  };
+
+                  return (
+                    <View
+                      style={{
+                        backgroundColor: tColor.card,
+                        borderWidth: 1,
+                        borderColor: tColor.border,
+                        borderRadius: 16,
+                        padding: 5,
+                        marginBottom: 28,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        position: 'relative',
+                        ...(Platform.OS === 'web' ? { backdropFilter: 'blur(20px)', boxShadow: theme === 'dark' ? '0 8px 24px -8px rgba(0,0,0,0.5)' : '0 8px 24px -8px rgba(15,23,42,0.08)' } : {}) as any,
+                      }}
+                    >
+                      {canScrollLeft ? (
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => handleStepScroll('left')}
+                          {...(Platform.OS === 'web' ? { className: 'portal-nav-arrow' } : {}) as any}
+                          style={{
+                            width: 30,
+                            height: 34,
+                            borderRadius: 10,
+                            backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)',
+                            borderWidth: 1,
+                            borderColor: tColor.border,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            marginRight: 4,
+                            zIndex: 10,
+                          }}
+                        >
+                          <Feather name="chevron-left" size={15} color={tColor.text} />
+                        </TouchableOpacity>
+                      ) : null}
+
+                      <ScrollView
+                        ref={portalTabsScrollRef}
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        scrollEventThrottle={16}
+                        onLayout={(e) => setPortalTabsViewW(Math.floor(e.nativeEvent.layout.width))}
+                        onContentSizeChange={(w) => setPortalTabsContentW(Math.floor(w))}
+                        onScroll={(e) => setPortalTabsScrollX(e.nativeEvent.contentOffset.x)}
+                        {...(Platform.OS === 'web' ? { className: 'portal-dock-scroll' } : {}) as any}
+                        style={{ flex: 1 }}
+                        contentContainerStyle={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 4,
+                          flexGrow: 1,
+                        }}
+                      >
+                        {portalMenuItems.map((tabItem) => {
+                          const isTabActive = agendaFilter === tabItem.key;
+                          return (
+                            <TouchableOpacity
+                              key={tabItem.key}
+                              activeOpacity={0.85}
+                              onPress={() => setAgendaFilter(tabItem.key)}
+                              {...(Platform.OS === 'web' ? { className: isTabActive ? 'portal-tab-pill-active' : 'portal-tab-pill' } : {}) as any}
+                              style={{
+                                flexGrow: 1,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: 7,
+                                paddingVertical: 10,
+                                paddingHorizontal: isMobile ? 14 : 16,
+                                borderRadius: 11,
+                                backgroundColor: isTabActive ? brandColor : 'transparent',
+                              }}
+                            >
+                              <Feather
+                                name={tabItem.icon as any}
+                                size={14}
+                                color={isTabActive ? '#FFFFFF' : tColor.muted}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={{
+                                  color: isTabActive ? '#FFFFFF' : (theme === 'dark' ? '#CBD5E1' : '#334155'),
+                                  fontWeight: isTabActive ? '800' : '600',
+                                  fontSize: 13,
+                                  letterSpacing: 0.15,
+                                }}
+                              >
+                                {tabItem.label}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </ScrollView>
+
+                      {canScrollRight ? (
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => handleStepScroll('right')}
+                          {...(Platform.OS === 'web' ? { className: 'portal-nav-arrow' } : {}) as any}
+                          style={{
+                            width: 30,
+                            height: 34,
+                            borderRadius: 10,
+                            backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)',
+                            borderWidth: 1,
+                            borderColor: tColor.border,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            marginLeft: 4,
+                            zIndex: 10,
+                          }}
+                        >
+                          <Feather name="chevron-right" size={15} color={tColor.text} />
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                  );
+                })()}
+
+                {agendaFilter === 'recepcion_ia' ? (
+                  <View>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 16 }}>
+                      <View>
+                        <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 4 }]}>
+                          Recepcionista Telefónica IA 24/7 (Bilingüe ES / EN)
+                        </Text>
+                        <Text style={{ color: tColor.muted, fontSize: 13.5 }}>
+                          Tu propio asistente de voz contesta llamadas, verifica qué {staffTerm.toLowerCase()} está libre, agenda en tu calendario y graba la llamada.
+                        </Text>
+                      </View>
+                      <View style={{ backgroundColor: vapiConfig.isActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)', borderWidth: 1, borderColor: vapiConfig.isActive ? '#10B981' : '#F59E0B', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Feather name={vapiConfig.isActive ? 'check-circle' : 'phone-Call' as any} size={15} color={vapiConfig.isActive ? '#10B981' : '#F59E0B'} />
+                        <Text style={{ color: vapiConfig.isActive ? '#10B981' : '#F59E0B', fontWeight: '900', fontSize: 12.5 }}>
+                          {vapiConfig.isActive ? `LÍNEA IA ACTIVA (${vapiConfig.phoneNumber})` : 'PENDIENTE DE VINCULAR'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Guía ultra-sencilla de 3 pasos (idéntica al menú en español de Vapi.ai para que el cliente no se pierda) */}
+                    <View style={[styles.bentoGrid, { marginBottom: 24 }]}>
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24 }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                          <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: `${brandColor}20`, alignItems: 'center', justifyContent: 'center' }}>
+                            <Text style={{ color: brandColor, fontWeight: '900' }}>1</Text>
+                          </View>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>Activa Facturación en Vapi</Text>
+                        </View>
+                        <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19, marginBottom: 14 }}>
+                          Entra a <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Vapi.ai</Text> y en el menú izquierdo haz clic en <Text style={{ color: '#10B981', fontWeight: 'bold' }}>💳 Facturación y pago</Text> (o <Text style={{ color: '#10B981', fontWeight: 'bold' }}>Comprar créditos</Text> abajo) para asociar tu tarjeta.
+                        </Text>
+                        {Platform.OS === 'web' ? (
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingVertical: 10 }]}
+                            onPress={() => window.open('https://dashboard.vapi.ai/org/api-keys', '_blank')}
+                          >
+                            <Text style={[styles.secondaryButtonText, { color: brandColor, fontSize: 12.5 }]}>Abrir Claves API en Vapi.ai ↗</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24 }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                          <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: `${brandColor}20`, alignItems: 'center', justifyContent: 'center' }}>
+                            <Text style={{ color: brandColor, fontWeight: '900' }}>2</Text>
+                          </View>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>Copia la "Private Key" (Arriba)</Text>
+                        </View>
+                        <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                          En el menú izquierdo entra a <Text style={{ color: tColor.text, fontWeight: 'bold' }}>🔒 Claves API</Text> y copia la <Text style={{ color: '#F59E0B', fontWeight: '900' }}>Private Key</Text> (la primera de arriba que tiene punticos <Text style={{ fontWeight: 'bold' }}>••••••••</Text>).{''}
+                          <Text style={{ color: '#EF4444', fontWeight: '800', fontSize: 11.5 }}>⚠️ No copies la Public Key de abajo.</Text>
+                        </Text>
+                      </View>
+
+                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24 }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                          <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: `${brandColor}20`, alignItems: 'center', justifyContent: 'center' }}>
+                            <Text style={{ color: brandColor, fontWeight: '900' }}>3</Text>
+                          </View>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>¡Cero Configuración Extra!</Text>
+                        </View>
+                        <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                          Pega tu <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Private Key</Text> abajo y pulsa el botón. <Text style={{ color: '#10B981', fontWeight: 'bold' }}>No tienes que crear ningún agente en Vapi:</Text> AutoFlow lo crea, lo entrena y lo enlaza a tu teléfono solo.
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Formulario de Conexión 1-Clic */}
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, marginBottom: 28 }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 18 }}>
+                        <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
+                          ⚙️ Conecta tu Cuenta en 1 Solo Paso
+                        </Text>
+                        {vapiConfig.assistantId ? (
+                          <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.14)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.4)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
+                            <Text style={{ color: '#60A5FA', fontSize: 11, fontWeight: '800' }}>
+                              🤖 Agente ID: {vapiConfig.assistantId.slice(0, 12)}...
+                            </Text>
+                          </View>
+                        ) : null}
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 18 }}>
+                        <View style={{ flex: 1.6 }}>
+                          <Text style={[styles.inputLabel, { color: '#F59E0B' }]}>
+                            🔑 1. Pega aquí tu "Private Key" de Vapi (Obligatorio — La clave de arriba con ••••••••)
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: brandColor, color: tColor.text }]}
+                            placeholder="Pega tu Private Key (de Claves API privadas)..."
+                            placeholderTextColor={tColor.muted}
+                            secureTextEntry
+                            value={vapiConfig.privateApiKey || ''}
+                            onChangeText={(t) => setVapiConfig({ ...vapiConfig, privateApiKey: t.trim() })}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>🌎 2. Idioma del Recepcionista IA</Text>
+                          {Platform.OS === 'web' ? (
+                            <select
+                              className="web-input-override"
+                              value={vapiConfig.languageMode || 'bilingual'}
+                              onChange={(e) => setVapiConfig({ ...vapiConfig, languageMode: e.target.value as any })}
+                            >
+                              <option value="bilingual">🌎 Bilingüe Automático (Español + Inglés)</option>
+                              <option value="es">🇪🇸 Solo Español</option>
+                              <option value="en">🇺🇸 Solo Inglés</option>
+                            </select>
+                          ) : (
+                            <TextInput
+                              style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                              value={vapiConfig.languageMode || 'bilingual'}
+                              editable={false}
+                            />
+                          )}
+                        </View>
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 18 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                            📞 Número en Vapi o Código de Área Deseado (Se detecta o crea automático)
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder="Opcional: Ej. 909 (o se detecta solo de tu cuenta Vapi)"
+                            placeholderTextColor={tColor.muted}
+                            value={vapiConfig.phoneNumber || ''}
+                            onChangeText={(t) => setVapiConfig({ ...vapiConfig, phoneNumber: t })}
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>📲 Teléfono Humano para Transferir Urgencias (Opcional)</Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder="Ej: +1 909 555 0100 (Desvío si el cliente pide humano)"
+                            placeholderTextColor={tColor.muted}
+                            value={vapiConfig.transferPhone || ''}
+                            onChangeText={(t) => setVapiConfig({ ...vapiConfig, transferPhone: t })}
+                          />
+                        </View>
+                      </View>
+
+                      <View style={{ marginBottom: 18 }}>
+                        <Text style={[styles.inputLabel, { color: '#10B981' }]}>
+                          🌐 URL Pública del Túnel HTTPS / Servidor (Para pruebas desde localhost.run sin reiniciar backend)
+                        </Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.input, borderColor: 'rgba(16, 185, 129, 0.45)', color: tColor.text }]}
+                          placeholder="Ej: https://b5b46f7862d679.lhr.life (Si lo dejas vacío usa PUBLIC_API_URL de tu .env)"
+                          placeholderTextColor={tColor.muted}
+                          autoCapitalize="none"
+                          value={vapiConfig.webhookBaseUrl || ''}
+                          onChangeText={(t) => setVapiConfig({ ...vapiConfig, webhookBaseUrl: t.trim() })}
+                        />
+                      </View>
+
+                      {vapiActivationNotice ? (
+                        <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.14)', borderWidth: 1.5, borderColor: '#10B981', borderRadius: 12, padding: 14, marginBottom: 18, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                          <Feather name="check-circle" size={20} color="#10B981" />
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 13.5 }}>
+                              🤖 ¡Notificación de Activación Enviada a Telegram y Vapi!
+                            </Text>
+                            <Text style={{ color: tColor.text, fontSize: 12, marginTop: 2, lineHeight: 18 }}>
+                              {vapiActivationNotice}
+                            </Text>
+                          </View>
+                        </View>
+                      ) : null}
+
+                      <View style={{ backgroundColor: tColor.input, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, marginBottom: 20 }}>
+                        <Text style={{ color: brandColor, fontWeight: '900', fontSize: 12, textTransform: 'uppercase', marginBottom: 6 }}>
+                          🧠 Conocimiento que AutoFlow inyecta automáticamente en tu IA ({isLegal ? 'Modo Bufete Legal' : isDental ? 'Modo Clínica Odontológica' : 'Modo Recepción Pro'}):
+                        </Text>
+                        <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Profesionales activos ({activeStaffList.length}):</Text> {activeStaffList.map((s) => s.name).join(', ') || 'Cualquiera disponible'}{''}
+                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Servicios y Tarifas ({activeCatalogServices.length}):</Text> {activeCatalogServices.map((s) => `${s.name} (${Number(s.price) === 0 ? 'Evaluación Gratis' : '$' + s.price})`).join(', ') || 'Catálogo general'}{''}
+                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Protocolo de Preguntas:</Text> {isLegal ? 'Pregunta nombre completo, correo electrónico (para enviar confirmación y Google Calendar), área del caso (Inmigración, Familia, Civil, Penal, Laboral) y modalidad (Presencial, Llamada o Videollamada).' : isDental ? 'Pregunta nombre completo, correo electrónico (para enviar confirmación), motivo o urgencia dental, y fecha/hora deseada.' : 'Pregunta nombre, servicio deseado y verifica disponibilidad respetando las 3 horas de anticipación.'}
+                        </Text>
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14, alignItems: 'center', justifyContent: 'space-between' }}>
+                        <TouchableOpacity
+                          style={[styles.primaryButton, { backgroundColor: brandColor, flex: 1, width: '100%', flexDirection: 'row', gap: 10, paddingVertical: 16 }]}
+                          onPress={handleAutoConfigureVapiAssistant}
+                          disabled={isSyncingVapi}
+                        >
+                          <Feather name="zap" size={18} color="#FFFFFF" />
+                          <Text style={styles.primaryButtonText}>
+                            {isSyncingVapi ? 'Programando Asistente en Vapi...' : '⚡ Conectar y Autoconfigurar Recepcionista IA'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <View style={{ flexDirection: 'row', gap: 10, width: isMobile ? '100%' : 'auto' }}>
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, { backgroundColor: 'rgba(16, 185, 129, 0.12)', borderColor: '#10B981', paddingVertical: 14, paddingHorizontal: 16, flex: isMobile ? 1 : undefined, flexDirection: 'row', gap: 6 }]}
+                            onPress={() => handleSimulatePhoneBooking('es')}
+                            disabled={isSimulatingVoiceCall}
+                          >
+                            <Feather name="phone-incoming" size={15} color="#10B981" />
+                            <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12.5 }}>
+                              {isSimulatingVoiceCall ? 'Simulando...' : 'Probar Llamada (ES)'}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[styles.secondaryButton, { backgroundColor: 'rgba(59, 130, 246, 0.12)', borderColor: '#3B82F6', paddingVertical: 14, paddingHorizontal: 16, flex: isMobile ? 1 : undefined, flexDirection: 'row', gap: 6 }]}
+                            onPress={() => handleSimulatePhoneBooking('en')}
+                            disabled={isSimulatingVoiceCall}
+                          >
+                            <Feather name="globe" size={15} color="#3B82F6" />
+                            <Text style={{ color: '#3B82F6', fontWeight: '900', fontSize: 12.5 }}>
+                              {isSimulatingVoiceCall ? 'Simulando...' : 'Test Call (EN)'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
                   </View>
-                </ScrollView>
+                ) : null}
 
                 {agendaFilter === 'horarios' ? (
                   <View>
@@ -3386,13 +4010,15 @@ export default function TenantDashboardScreen() {
                     <Text style={{ color: tColor.muted, marginBottom: 24 }}>Sube imágenes de tus mejores trabajos y ponles un título atractivo.</Text>
 
                     {isAddingPortfolio ? (
-                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 600 }]}>
+                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, width: '100%', maxWidth: isMobile ? '100%' : 760, alignSelf: 'center', padding: isMobile ? 20 : 32 }]}>
                         <Text style={{ fontSize: 20, fontWeight: 'bold', color: tColor.text, marginBottom: 20 }}>
-                          {portfolioEditingIndex !== null ? 'Editar Trabajo' : 'Nuevo Trabajo'}
+                          {portfolioEditingIndex !== null ? (isLegal ? 'Editar Caso / Publicación' : 'Editar Trabajo') : (isLegal ? 'Nuevo Caso de Éxito / Publicación' : 'Nuevo Trabajo')}
                         </Text>
                         
                         <View style={{ marginBottom: 20 }}>
-                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Foto del Trabajo {portfolioEditingIndex !== null && '(Opcional cambiar)'}</Text>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                            {isLegal ? 'Imagen o Documento Visual' : 'Foto del Trabajo'} {portfolioEditingIndex !== null && '(Opcional cambiar)'}
+                          </Text>
                           {!portfolioFormPreview ? (
                             <View style={{ marginTop: 8 }}>
                               {Platform.OS === 'web' ? (
@@ -3406,7 +4032,7 @@ export default function TenantDashboardScreen() {
                               ) : null}
                             </View>
                           ) : (
-                            <View style={{ position: 'relative', width: '100%', height: 200, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
+                            <View style={{ position: 'relative', width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
                               {portfolioFormPreview.startsWith('blob:') ? (
                                 Platform.OS === 'web' ? <img src={portfolioFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null
                               ) : (
@@ -3420,10 +4046,12 @@ export default function TenantDashboardScreen() {
                         </View>
 
                         <View style={{ marginBottom: 16 }}>
-                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Título del Trabajo</Text>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                            {isLegal ? 'Título del Caso o Área de Práctica' : 'Título del Trabajo'}
+                          </Text>
                           <TextInput 
                             style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
-                            placeholder="Ej: Fade + Barba" 
+                            placeholder={isLegal ? 'Ej: Residencia Permanente Aprobada' : isDental ? 'Ej: Diseño De Sonrisa Y Blanqueamiento' : isAutomotive ? 'Ej: Reparación Completa De Motor' : 'Ej: Fade + Barba'} 
                             placeholderTextColor={tColor.muted} 
                             value={portfolioFormTitle} 
                             onChangeText={t => setPortfolioFormTitle(toTitleCase(t))} 
@@ -3433,8 +4061,8 @@ export default function TenantDashboardScreen() {
                         <View style={{ marginBottom: 24 }}>
                           <Text style={[styles.inputLabel, { color: tColor.muted }]}>Descripción Detallada (Opcional)</Text>
                           <TextInput 
-                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 60 }]} 
-                            placeholder="Ej: Incluye Vapor De Ozono Y Toalla Caliente..." 
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 70 }]} 
+                            placeholder={isLegal ? 'Ej: Asesoría Integral Y Representación Ante Corte...' : isDental ? 'Ej: Tratamiento Estético En 2 Sesiones Sin Dolor...' : isAutomotive ? 'Ej: Diagnóstico Computarizado Y Repuestos Originales...' : 'Ej: Incluye Vapor De Ozono Y Toalla Caliente...'} 
                             placeholderTextColor={tColor.muted} 
                             multiline
                             value={portfolioFormDesc} 
@@ -3444,7 +4072,7 @@ export default function TenantDashboardScreen() {
 
                         <ContentTermsCheck value={acceptedContentTerms} onChange={setAcceptedContentTerms} tColor={tColor} brandColor={brandColor} />
 
-                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                        <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12 }}>
                            <TouchableOpacity style={[styles.secondaryButton, { flex: 1, backgroundColor: tColor.input, borderColor: tColor.border }]} onPress={handleCancelPortfolioForm}>
                             <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Cancelar</Text>
                           </TouchableOpacity>
@@ -3600,21 +4228,84 @@ export default function TenantDashboardScreen() {
                             </View>
 
                             <View style={[styles.serviceBox, { backgroundColor: tColor.input, borderColor: tColor.border }]}>
-                              <Text style={{ color: tColor.text, fontSize: 14, fontWeight: '700' }}>✨ {toTitleCase(order.service?.name || order.serviceType || 'Servicio General')}</Text>
+                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                                <Text style={{ color: tColor.text, fontSize: 14, fontWeight: '700' }}>✨ {toTitleCase(order.service?.name || order.serviceType || 'Servicio General')}</Text>
+                                {order.metadata?.bookedVia === 'vapi_voice_ai' ? (
+                                  <View style={{ backgroundColor: 'rgba(139, 92, 246, 0.2)', borderWidth: 1, borderColor: '#8B5CF6', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                                    <Feather name="phone-incoming" size={11} color="#A78BFA" />
+                                    <Text style={{ color: '#A78BFA', fontSize: 10, fontWeight: '900' }}>LLAMADA IA ({String(order.metadata?.callLanguage || 'ES').toUpperCase()})</Text>
+                                  </View>
+                                ) : null}
+                              </View>
+
+                              {/* Modalidad de la cita (Presencial, Llamada o Videollamada) */}
+                              {order.metadata?.modality ? (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                                  <Feather
+                                    name={order.metadata.modality === 'phone_call' ? 'phone' : order.metadata.modality === 'video_call' ? 'video' : 'map-pin'}
+                                    size={12}
+                                    color="#3B82F6"
+                                  />
+                                  <Text style={{ color: '#3B82F6', fontSize: 12, fontWeight: '800' }}>
+                                    Modalidad: {order.metadata.modality === 'phone_call' ? '📞 Llamada Telefónica' : order.metadata.modality === 'video_call' ? '💻 Videollamada' : '📍 Presencial en Oficina/Consultorio'}
+                                  </Text>
+                                </View>
+                              ) : null}
+
+                              {/* Datos de Triage Legal / Odontológico */}
+                              {order.metadata?.caseType ? (
+                                <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '700', marginTop: 4 }}>
+                                  {isLegal ? '⚖️ Área Legal:' : isDental ? '🦷 Motivo Dental:' : '📌 Motivo:'} <Text style={{ color: tColor.muted }}>{toTitleCase(order.metadata.caseType)}</Text>
+                                </Text>
+                              ) : null}
+                              {order.metadata?.opposingParty ? (
+                                <Text style={{ color: tColor.text, fontSize: 11.5, fontWeight: '700', marginTop: 2 }}>
+                                  {isLegal ? '🛡️ Contraparte:' : '🏥 Seguro / Cobertura:'} <Text style={{ color: tColor.muted }}>{toTitleCase(order.metadata.opposingParty)}</Text>
+                                </Text>
+                              ) : null}
+                              {order.metadata?.callSummary ? (
+                                <View style={{ marginTop: 8, padding: 10, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.25)', borderWidth: 1, borderColor: tColor.border }}>
+                                  <Text style={{ color: '#A78BFA', fontSize: 10.5, fontWeight: '900', marginBottom: 2 }}>🤖 RESUMEN DE LA LLAMADA IA:</Text>
+                                  <Text style={{ color: tColor.muted, fontSize: 11.5, fontStyle: 'italic', lineHeight: 16 }}>"{order.metadata.callSummary}"</Text>
+                                </View>
+                              ) : null}
+
                               {(() => {
                                 const stfId = order.staffId || order.metadata?.assignedStaffId;
                                 const stfObj = staffList.find(s => s.id === stfId);
                                 const stfName = stfObj?.name || order.metadata?.assignedStaffName;
                                 return stfName ? (
-                                  <Text style={{ color: brandColor, fontSize: 12, fontWeight: '800', marginTop: 6 }}>
+                                  <Text style={{ color: brandColor, fontSize: 12, fontWeight: '800', marginTop: 8 }}>
                                     👤 {staffTerm}: {toTitleCase(stfName)}
                                   </Text>
                                 ) : (
-                                  <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '600', marginTop: 6 }}>
+                                  <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '600', marginTop: 8 }}>
                                     👤 {staffTerm}: Cualquiera disponible
                                   </Text>
                                 );
                               })()}
+
+                              {/* Botones rápidos: Escuchar Grabación de Vapi + Agregar a Google Calendar */}
+                              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                                {order.metadata?.recordingUrl && Platform.OS === 'web' ? (
+                                  <TouchableOpacity
+                                    onPress={() => window.open(order.metadata.recordingUrl, '_blank')}
+                                    style={{ backgroundColor: 'rgba(139, 92, 246, 0.15)', borderWidth: 1, borderColor: '#8B5CF6', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 5 }}
+                                  >
+                                    <Feather name="play-circle" size={12} color="#A78BFA" />
+                                    <Text style={{ color: '#A78BFA', fontSize: 11, fontWeight: '900' }}>Escuchar Llamada</Text>
+                                  </TouchableOpacity>
+                                ) : null}
+                                {Platform.OS === 'web' ? (
+                                  <TouchableOpacity
+                                    onPress={() => window.open(buildGoogleCalendarUrl(order, tenantInfo?.name), '_blank')}
+                                    style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.4)', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 5 }}
+                                  >
+                                    <Feather name="calendar" size={12} color="#60A5FA" />
+                                    <Text style={{ color: '#60A5FA', fontSize: 11, fontWeight: '800' }}>+ Google Calendar</Text>
+                                  </TouchableOpacity>
+                                ) : null}
+                              </View>
                             </View>
                             {/* Estado de confirmación de asistencia (6h antes) */}
                             {(() => {
@@ -4251,7 +4942,88 @@ export default function TenantDashboardScreen() {
                       </View>
                       <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 80, marginTop: 16 }]} placeholder="Detalles Adicionales..." placeholderTextColor={tColor.muted} multiline value={quickNotes} onChangeText={t => setQuickNotes(toTitleCase(t))} />
                     </View>
-                  ) : null}
+                  ) : (
+                    <View style={{ backgroundColor: tColor.input, padding: 20, borderRadius: 16, marginBottom: 20, borderWidth: 1, borderColor: tColor.border }}>
+                      <Text style={{ fontSize: 15, color: brandColor, fontWeight: '900', marginBottom: 12 }}>
+                        {isLegal ? '⚖️ Modalidad y Detalles del Caso Legal' : isDental ? '🦷 Detalles de Valoración Odontológica' : '✨ Preferencias de tu Cita'}
+                      </Text>
+
+                      {/* Selector de Modalidad (Especialmente útil para Abogados y Consultas) */}
+                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Modalidad de Atención</Text>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 10, marginBottom: 16 }}>
+                        {[
+                          { id: 'in_person', label: isDental ? '📍 En Consultorio' : '📍 En Oficina / Local' },
+                          { id: 'phone_call', label: '📞 Por Llamada Telefónica' },
+                          { id: 'video_call', label: '💻 Videollamada (Zoom/Meet)' }
+                        ].map((mod) => {
+                          const activeMod = appointmentModality === mod.id;
+                          return (
+                            <TouchableOpacity
+                              key={mod.id}
+                              onPress={() => setAppointmentModality(mod.id as any)}
+                              style={{
+                                flex: 1,
+                                paddingVertical: 10,
+                                paddingHorizontal: 12,
+                                borderRadius: 10,
+                                borderWidth: 1,
+                                borderColor: activeMod ? brandColor : tColor.border,
+                                backgroundColor: activeMod ? `${brandColor}20` : 'transparent',
+                                alignItems: 'center'
+                              }}
+                            >
+                              <Text style={{ color: activeMod ? brandColor : tColor.text, fontWeight: '800', fontSize: 12.5 }}>{mod.label}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                        {isLegal ? 'Área del Caso (Selecciona o escribe):' : isDental ? 'Motivo de Consulta Dental:' : 'Motivo o Servicio Rápido:'}
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                        {clientQuickServices.map((qs, idx) => {
+                          const isSelectedChip = caseOrTreatmentArea === qs || quickNotes.includes(qs);
+                          return (
+                            <TouchableOpacity
+                              key={`${qs}-${idx}`}
+                              style={[styles.chip, { backgroundColor: tColor.input, borderColor: tColor.border, marginBottom: 4 }, isSelectedChip ? { backgroundColor: brandColor, borderColor: brandColor } : {}]}
+                              onPress={() => {
+                                setCaseOrTreatmentArea(qs);
+                                setQuickNotes((prev) => (prev.includes(qs) ? prev : `${prev} ${qs}`.trim()));
+                              }}
+                            >
+                              <Text style={[styles.chipText, { color: tColor.muted }, isSelectedChip ? styles.activeChipText : {}]}>+ {qs}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      {(isLegal || isDental) ? (
+                        <View style={{ marginBottom: 12 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                            {isLegal ? 'Nombre de la Contraparte (Para verificar conflicto de interés - Opcional)' : 'Seguro Dental / EPS o Particular (Opcional)'}
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder={isLegal ? 'Ej: Empresa XYZ o Nombre de contraparte' : 'Ej: Delta Dental / Particular / Primera Vez'}
+                            placeholderTextColor={tColor.muted}
+                            value={opposingPartyOrInsurance}
+                            onChangeText={(t) => setOpposingPartyOrInsurance(toTitleCase(t))}
+                          />
+                        </View>
+                      ) : null}
+
+                      <TextInput
+                        style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text, minHeight: 65 }]}
+                        placeholder={isLegal ? 'Describe brevemente tu situación o si tienes audiencia próxima...' : isDental ? 'Indica si tienes dolor agudo, sensibilidad o algún antecedente médico...' : 'Notas adicionales para tu profesional...'}
+                        placeholderTextColor={tColor.muted}
+                        multiline
+                        value={quickNotes}
+                        onChangeText={(t) => setQuickNotes(toTitleCase(t))}
+                      />
+                    </View>
+                  )}
 
                   <View style={{ marginBottom: 16 }}>
                     <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Nombre Completo (Ej: Cesar Lopez)" placeholderTextColor={tColor.muted} value={clientName} onChangeText={text => setClientName(toTitleCase(text))} />
@@ -4822,7 +5594,7 @@ const styles = StyleSheet.create({
   secondaryButtonText: { fontWeight: '800', fontSize: 14.5 },
   formInput: { borderWidth: 1, borderRadius: 12, padding: 14, fontSize: 14.5 },
   inputLabel: { fontSize: 12, fontWeight: 'bold', marginBottom: 8, textTransform: 'uppercase' },
-  tabsContainer: { flexDirection: 'row', gap: 12, flexWrap: 'wrap', marginBottom: 32, padding: 8, borderRadius: 16, minWidth: 800 },
+  tabsContainer: { flexDirection: 'row', gap: 10, flexWrap: 'wrap', marginBottom: 28, padding: 8, borderRadius: 16 },
   tab: { flex: 1, minWidth: 120, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
   tabText: { fontWeight: '800', fontSize: 14 },
   bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24, width: '100%' },

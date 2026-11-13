@@ -68,6 +68,8 @@ const getNicheIconProps = (niche?: string, primaryColor?: string | null) => {
   const n = (niche || '').toLowerCase();
   if (n === 'spa') return { family: 'Ionicons' as const, name: 'sparkles-outline', color: primaryColor || '#10B981' };
   if (n === 'barbershop') return { family: 'Feather' as const, name: 'scissors', color: primaryColor || '#FF5E00' };
+  if (n === 'legal') return { family: 'Feather' as const, name: 'shield', color: primaryColor || '#3B82F6' };
+  if (n === 'dental') return { family: 'MCI' as const, name: 'tooth-outline', color: primaryColor || '#06B6D4' };
   return { family: 'Ionicons' as const, name: 'car-sport-outline', color: primaryColor || '#FF5E00' };
 };
 
@@ -118,27 +120,6 @@ const DirectoryLogo = ({ logoUrl, niche, primaryColor }: { logoUrl: string | nul
   return <Image source={{ uri: resolvedUrl }} style={{ width: 56, height: 56, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', backgroundColor: '#000' }} resizeMode="cover" />;
 };
 
-// Extrae las reseñas desde loyaltyConfig (viene como objeto o como string JSON)
-const parseReviews = (rawLoyalty: any): any[] => {
-  try {
-    const loyalty = typeof rawLoyalty === 'string' ? JSON.parse(rawLoyalty || '{}') : (rawLoyalty || {});
-    return Array.isArray(loyalty?.reviews) ? loyalty.reviews : [];
-  } catch (e) {
-    return [];
-  }
-};
-
-// Mismas reglas que el panel del negocio, para que los números coincidan
-const getReviewStats = (reviews: any[]) => {
-  const count = reviews.length;
-  const avg = count > 0
-    ? (reviews.reduce((acc: number, r: any) => acc + Number(r.rating || 5), 0) / count).toFixed(1)
-    : '5.0';
-  const likes = reviews.filter((r: any) => r.reaction === 'like' || (!r.reaction && Number(r.rating) >= 4)).length;
-  const dislikes = reviews.filter((r: any) => r.reaction === 'dislike' || (!r.reaction && Number(r.rating) <= 2)).length;
-  return { count, avg, likes, dislikes };
-};
-
 export default function GlobalDirectory() {
   const router = useRouter();
   const { width } = useWindowDimensions();
@@ -158,8 +139,6 @@ export default function GlobalDirectory() {
   
   const [globalResults, setGlobalResults] = useState<Business[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  // Reseñas por negocio (respaldo cuando /directory/search no trae loyaltyConfig.reviews)
-  const [reviewsByBiz, setReviewsByBiz] = useState<Record<string, any[]>>({});
 
   const fetchDirectory = async (searchNiche = 'all') => {
     setIsSearching(true);
@@ -187,45 +166,6 @@ export default function GlobalDirectory() {
     fetchDirectory();
   }, []);
 
-  // 🌟 Completa calificación/likes/dislikes reales de cada negocio listado 🌟
-  useEffect(() => {
-    const pending = globalResults.filter(
-      (biz) => parseReviews(biz.loyaltyConfig || biz.loyalty_config).length === 0 && reviewsByBiz[biz.id] === undefined
-    );
-    if (pending.length === 0) return;
-
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(
-        pending.map(async (biz) => {
-          try {
-            const res = await fetch(`${API_URL}/tenants/info`, {
-              headers: { 'Content-Type': 'application/json', 'x-tenant-id': biz.id },
-            });
-            if (!res.ok) return [biz.id, []] as [string, any[]];
-            const json = await res.json();
-            return [biz.id, parseReviews(json?.tenant?.loyaltyConfig)] as [string, any[]];
-          } catch (e) {
-            return [biz.id, []] as [string, any[]];
-          }
-        })
-      );
-      if (cancelled) return;
-      setReviewsByBiz((prev) => {
-        const next = { ...prev };
-        entries.forEach(([id, revs]) => { next[id] = revs; });
-        return next;
-      });
-    })();
-
-    return () => { cancelled = true; };
-  }, [globalResults]);
-
-  // 👍/👎 desde la tarjeta: abre el negocio directo en Expediente para verificar al cliente y registrar la reacción
-  const goRateBusiness = (bizId: string, reaction: 'like' | 'dislike') => {
-    router.push(`/${bizId}?view=expediente&reaction=${reaction}` as any);
-  };
-
   const handleSearch = () => {
     setActiveCategory(null);
     setNameQuery('');
@@ -237,6 +177,8 @@ export default function GlobalDirectory() {
       automotive: globalResults.filter(b => b.niche === 'automotive').length,
       spa: globalResults.filter(b => b.niche === 'spa').length,
       barbershop: globalResults.filter(b => b.niche === 'barbershop').length,
+      legal: globalResults.filter(b => b.niche === 'legal').length,
+      dental: globalResults.filter(b => b.niche === 'dental').length,
     };
   }, [globalResults]);
 
@@ -253,7 +195,7 @@ export default function GlobalDirectory() {
     return (
       <View style={styles.appContainer}>
         {/* HEADER B2C CON ACCESO A SOCIOS (B2B) */}
-        <View style={styles.topNavbar}>
+        <View style={[styles.topNavbar, isMobile && { paddingHorizontal: 16, height: 64 }]}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <View style={{ backgroundColor: '#FF5E00', width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>A</Text>
@@ -357,13 +299,43 @@ export default function GlobalDirectory() {
                 </View>
               </View>
             </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%' }]} activeOpacity={0.7} onPress={() => setActiveCategory('legal')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="Feather" name="shield" color="#3B82F6" size={26} boxSize={56} />
+                <View style={[styles.countBadge, { borderColor: '#3B82F6', backgroundColor: 'rgba(59, 130, 246, 0.15)' }]}><Text style={[styles.countText, { color: '#3B82F6' }]}>{categoryCounts.legal} Cerca</Text></View>
+              </View>
+              <Text style={styles.cardTitle}>Abogados & Firmas</Text>
+              <Text style={styles.cardSubtitle}>Asesoría legal, inmigración, familia y contratos (Presencial / Teléfono).</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.footerLink, { color: '#3B82F6' }]}>Ver {categoryCounts.legal} bufetes</Text>
+                  <Feather name="arrow-right" size={16} color="#3B82F6" />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%' }]} activeOpacity={0.7} onPress={() => setActiveCategory('dental')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="MCI" name="tooth-outline" color="#06B6D4" size={28} boxSize={56} />
+                <View style={[styles.countBadge, { borderColor: '#06B6D4', backgroundColor: 'rgba(6, 182, 212, 0.15)' }]}><Text style={[styles.countText, { color: '#06B6D4' }]}>{categoryCounts.dental} Cerca</Text></View>
+              </View>
+              <Text style={styles.cardTitle}>Odontología & Clínicas</Text>
+              <Text style={styles.cardSubtitle}>Limpieza dental, ortodoncia, implantes y urgencias odontológicas.</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.footerLink, { color: '#06B6D4' }]}>Ver {categoryCounts.dental} clínicas</Text>
+                  <Feather name="arrow-right" size={16} color="#06B6D4" />
+                </View>
+              </View>
+            </TouchableOpacity>
           </View>
         </ScrollView>
       </View>
     );
   }
 
-  const categoryName = activeCategory === 'spa' ? 'Spas & Centros de Bienestar' : activeCategory === 'automotive' ? 'Talleres Automotrices' : 'Barberías';
+  const categoryName = activeCategory === 'spa' ? 'Spas & Centros de Bienestar' : activeCategory === 'automotive' ? 'Talleres Automotrices' : activeCategory === 'legal' ? 'Abogados & Firmas Legales' : activeCategory === 'dental' ? 'Centros Odontológicos & Clínicas' : 'Barberías';
   const activeHeaderIcon = getNicheIconProps(activeCategory);
 
   return (
@@ -410,37 +382,27 @@ export default function GlobalDirectory() {
 
               {/* 🌟 CALIFICACIÓN Y DISTANCIA VECTORIAL (ESQUINA SUPERIOR DERECHA) 🌟 */}
               {(() => {
-                const payloadReviews = parseReviews(biz.loyaltyConfig || biz.loyalty_config);
-                const reviews = payloadReviews.length > 0 ? payloadReviews : (reviewsByBiz[biz.id] || []);
-                const { avg, likes, dislikes, count } = getReviewStats(reviews);
+                const rawLoyalty = biz.loyaltyConfig || biz.loyalty_config || {};
+                const loyalty = typeof rawLoyalty === 'string' ? JSON.parse(rawLoyalty || '{}') : rawLoyalty;
+                const reviews = Array.isArray(loyalty.reviews) ? loyalty.reviews : [];
+                const avg = reviews.length > 0
+                  ? (reviews.reduce((acc: number, r: any) => acc + Number(r.rating || 5), 0) / reviews.length).toFixed(1)
+                  : '5.0';
+                const likes = reviews.filter((r: any) => r.reaction === 'like' || (!r.reaction && Number(r.rating) >= 4)).length;
 
                 const dist = biz.distance !== undefined && biz.distance !== null
                   ? Number(biz.distance).toFixed(1)
                   : '2.4';
 
                 return (
-                  <View style={{ position: 'absolute', top: 24, right: 24, alignItems: 'flex-end', gap: 8 }}>
+                  <View style={isMobile ? { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 } : { position: 'absolute', top: 24, right: 24, alignItems: 'flex-end', gap: 8 }}>
                     <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Ionicons name="star" size={13} color="#F59E0B" />
                       <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 13 }}>{avg}</Text>
                       <View style={{ width: 1, height: 11, backgroundColor: 'rgba(255,255,255,0.15)', marginHorizontal: 2 }} />
-                      <TouchableOpacity
-                        onPress={() => goRateBusiness(biz.id, 'like')}
-                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                        style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2, paddingHorizontal: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.4)', backgroundColor: 'rgba(16, 185, 129, 0.1)' }}
-                      >
-                        <Feather name="thumbs-up" size={12} color="#10B981" />
-                        <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12 }}>{likes}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        onPress={() => goRateBusiness(biz.id, 'dislike')}
-                        hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
-                        style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 2, paddingHorizontal: 6, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}
-                      >
-                        <Feather name="thumbs-down" size={12} color="#EF4444" />
-                        <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 12 }}>{dislikes}</Text>
-                      </TouchableOpacity>
-                      <Text style={{ color: '#94A3B8', fontSize: 11, fontWeight: '700' }}>({count})</Text>
+                      <Feather name="thumbs-up" size={12} color="#10B981" />
+                      <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12 }}>{likes}</Text>
+                      <Text style={{ color: '#94A3B8', fontSize: 11, fontWeight: '700' }}>({reviews.length})</Text>
                     </View>
                     <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 16, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
                       <Feather name="navigation" size={11} color="#60A5FA" />

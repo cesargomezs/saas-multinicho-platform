@@ -1,5 +1,18 @@
-import { pgTable, uuid, varchar, text, timestamp, jsonb, decimal, integer, boolean, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, text, timestamp, jsonb, decimal, integer, boolean, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
+
+// ============================================================================
+// 0. BUSINESS CATEGORIES (Catálogo Multi-Nicho: Talleres, Spa, Barbería, Legal, Dental)
+// ============================================================================
+export const businessCategories = pgTable('business_categories', {
+  code: varchar('code', { length: 50 }).primaryKey(),
+  name: varchar('name', { length: 120 }).notNull(),
+  shortTitle: varchar('short_title', { length: 80 }).notNull(),
+  icon: varchar('icon', { length: 60 }).default('briefcase'),
+  primaryColor: varchar('primary_color', { length: 20 }).default('#FF5E00'),
+  isActive: boolean('is_active').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
 
 // ============================================================================
 // 1. TENANTS (SaaS - Negocios Cliente)
@@ -52,7 +65,11 @@ export const tenants = pgTable('tenants', {
     referralActive: true,
     referralDiscountPercent: 20,
     reviews: [],
-    campaigns: []
+    campaigns: [],
+    vapiConfig: {
+      isActive: false,
+      languageMode: 'bilingual'
+    }
   }),
 
   createdAt: timestamp('created_at').defaultNow()
@@ -147,13 +164,19 @@ export const appointments = pgTable('appointments', {
   staffId: uuid('staff_id').references(() => staff.id),
   serviceId: uuid('service_id').references(() => services.id),
   scheduledAt: timestamp('scheduled_at').notNull(),
-  status: varchar('status', { length: 50 }).default('pending').notNull(),
+  status: varchar('status', { length: 50 }).default('pending').notNull(), // 'pending' | 'scheduled' | 'confirmed' | 'completed' | 'cancelled'
+  source: varchar('source', { length: 30 }).default('web'), // 'web' | 'vapi_voice_ai' | 'walk_in'
   estimatedCost: decimal('estimated_cost', { precision: 10, scale: 2 }),
   finalCost: decimal('final_cost', { precision: 10, scale: 2 }),
   notes: text('notes'),
   staffNotes: text('staff_notes'),
   mediaAndReports: jsonb('media_and_reports').default({}),
   createdAt: timestamp('created_at').defaultNow(),
+}, (table) => {
+  return {
+    tenantScheduledIdx: index('appointments_tenant_scheduled_idx').on(table.tenantId, table.scheduledAt),
+    tenantStatusIdx: index('appointments_tenant_status_idx').on(table.tenantId, table.status),
+  };
 });
 
 // ============================================================================
@@ -244,10 +267,12 @@ export const reviews = pgTable('reviews', {
 export const reports = pgTable('reports', {
   id: uuid('id').defaultRandom().primaryKey(),
   tenantId: uuid('tenant_id').references(() => tenants.id).notNull(),
-  reporterId: uuid('reporter_id').references(() => users.id).notNull(), 
+  reporterId: uuid('reporter_id').references(() => users.id), // Nullable para reportes de visitantes públicos
+  reporterContact: varchar('reporter_contact', { length: 150 }),
   targetType: varchar('target_type', { length: 50 }).notNull(), 
-  targetId: uuid('target_id').notNull(), 
+  targetId: text('target_id').notNull(), // Soporta tanto UUIDs como rutas de portafolio
   reason: text('reason').notNull(), 
+  details: text('details'),
   status: varchar('status', { length: 50 }).default('pending'), 
   createdAt: timestamp('created_at').defaultNow(),
 });
