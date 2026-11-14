@@ -8,6 +8,8 @@ import { createClient } from '@supabase/supabase-js';
 // ==========================================
 // ⚙️ CONFIGURACIÓN DE SUPABASE
 // ==========================================
+// 1. Agrega esta constante arriba en apps/mobile/app/register.tsx:
+const SAFE_TOP_INSET = Platform.OS === 'ios' ? 60 : Platform.OS === 'android' ? 42 : 0;
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hbofrqdubrtogwbuddsa.supabase.co';
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'tu-anon-key';
 
@@ -569,6 +571,18 @@ export default function B2BRegistrationScreen() {
 }
 
 const styles = StyleSheet.create({
+  topNavbar: {
+    paddingTop: SAFE_TOP_INSET,
+    height: (Platform.OS === 'web' ? 70 : 64) + SAFE_TOP_INSET,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: Platform.OS === 'web' ? 40 : 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(5, 7, 12, 0.94)',
+    zIndex: 100,
+  },
   root: { flex: 1, backgroundColor: '#05070C' },
   header: { height: 76, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: Platform.OS === 'web' ? 40 : 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
   contentArea: { paddingHorizontal: Platform.OS === 'web' ? 40 : 20, paddingTop: 40, paddingBottom: 80, alignSelf: 'center', width: '100%', alignItems: 'center' },
@@ -590,4 +604,5 @@ const styles = StyleSheet.create({
   primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
   secondaryButton: { backgroundColor: 'rgba(255,255,255,0.02)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
   secondaryButtonText: { color: '#E2E8F0', fontWeight: '800', fontSize: 15 }
+  
 });

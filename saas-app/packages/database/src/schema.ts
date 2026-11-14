@@ -40,6 +40,11 @@ export const tenants = pgTable('tenants', {
   pushLimitWeekly: integer('push_limit_weekly').default(0), 
   pushUsedThisWeek: integer('push_used_this_week').default(0),
 
+  // 📲 CANAL INTERNO DE TELEGRAM PARAMETRIZADO POR NEGOCIO / CONSULTORIO
+  telegramChatId: varchar('telegram_chat_id', { length: 100 }),
+  telegramBotToken: varchar('telegram_bot_token', { length: 255 }),
+  telegramEnabled: boolean('telegram_enabled').default(true),
+
   // 📍 GEOLOCALIZACIÓN Y CONTACTO
   phoneContact: varchar('phone_contact', { length: 50 }),
   address: varchar('address', { length: 255 }),
@@ -69,6 +74,12 @@ export const tenants = pgTable('tenants', {
     vapiConfig: {
       isActive: false,
       languageMode: 'bilingual'
+    },
+    telegramConfig: {
+      isActive: true,
+      chatId: '',
+      botToken: '',
+      channelName: ''
     }
   }),
 

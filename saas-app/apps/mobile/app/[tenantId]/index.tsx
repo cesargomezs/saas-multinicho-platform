@@ -408,13 +408,66 @@ function ResponsiveCarousel<T>({
 }
 
 // ==========================================
+// 🎨 COMPONENTE DE DEGRADADO DE LA MITAD PARA ABAJO (WEB + iOS + ANDROID)
+// ==========================================
+const GRADIENT_STEPS = [0.02, 0.05, 0.09, 0.14, 0.20, 0.28, 0.37, 0.47, 0.57, 0.67, 0.76, 0.84, 0.90, 0.95, 0.98];
+
+const BottomHalfGradientOverlay = ({
+  heightPct = '65%',
+  baseColor = '5, 7, 12'
+}: {
+  heightPct?: string;
+  baseColor?: string;
+}) => {
+  if (Platform.OS === 'web') {
+    return (
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: heightPct as any,
+          backgroundImage: `linear-gradient(180deg, rgba(${baseColor}, 0) 0%, rgba(${baseColor}, 0.32) 28%, rgba(${baseColor}, 0.74) 64%, rgba(${baseColor}, 0.94) 88%, rgba(${baseColor}, 0.98) 100%)`
+        } as any}
+      />
+    );
+  }
+
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: heightPct as any,
+        flexDirection: 'column'
+      }}
+    >
+      {GRADIENT_STEPS.map((op, i) => (
+        <View
+          key={i}
+          style={{
+            flex: 1,
+            backgroundColor: `rgba(${baseColor}, ${op})`
+          }}
+        />
+      ))}
+    </View>
+  );
+};
+
+// ==========================================
 // 🧩 ESTILOS WEB DINÁMICOS
 // ==========================================
 const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tColor: any, brandColor: string }) => {
   if (Platform.OS !== 'web') return null;
   return (
     <style dangerouslySetInnerHTML={{__html: `
-      body { background-color: ${tColor.bg}; color: ${tColor.text}; margin: 0; transition: background-color 0.3s ease; }
+      html, body { background-color: ${tColor.bg}; color: ${tColor.text}; margin: 0; padding: 0; overflow-x: hidden; max-width: 100vw; transition: background-color 0.3s ease; -webkit-font-smoothing: antialiased; }
       * { font-family: 'Inter', system-ui, sans-serif; box-sizing: border-box; }
       .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; max-height: 600px; overflow-y: auto; }
       .table-responsive::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -447,7 +500,8 @@ interface PortfolioItem { url: string; title: string; description: string; }
 interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; }
 interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; }
 interface VapiVoiceConfig { isActive?: boolean; phoneNumber?: string; privateApiKey?: string; phoneNumberId?: string; assistantId?: string; languageMode?: 'bilingual' | 'es' | 'en'; transferPhone?: string; webhookBaseUrl?: string; allowUrgentOverride?: boolean; lastSyncedAt?: string; }
-interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; }
+interface TelegramChannelConfig { isActive?: boolean; channelName?: string; chatId?: string; botToken?: string; notifyNewAppointments?: boolean; notifyRecordings?: boolean; notifyConfirmationsAndCancels?: boolean; notifyPOSClosures?: boolean; updatedAt?: string; }
+interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; telegramConfig?: TelegramChannelConfig; }
 interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
 interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
 interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
@@ -466,7 +520,7 @@ const REPORT_REASONS = [
 ];
 
 // Casilla obligatoria antes de que el negocio publique imágenes, servicios o campañas
-const ContentTermsCheck = ({ value, onChange, tColor, brandColor }: { value: boolean; onChange: (v: boolean) => void; tColor: any; brandColor: string }) => (
+const ContentTermsCheck = ({ value, onChange, tColor, brandColor, lang = 'es' }: { value: boolean; onChange: (v: boolean) => void; tColor: any; brandColor: string; lang?: 'es' | 'en' }) => (
   <TouchableOpacity
     activeOpacity={0.8}
     onPress={() => onChange(!value)}
@@ -476,8 +530,12 @@ const ContentTermsCheck = ({ value, onChange, tColor, brandColor }: { value: boo
       {value ? <Feather name="check" size={14} color="#FFFFFF" /> : null}
     </View>
     <Text style={{ flex: 1, color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
-      <Text style={{ color: tColor.text, fontWeight: '800' }}>Declaro que soy titular de los derechos o cuento con autorización </Text>
-      de las imágenes y textos que publico, que no son ofensivos, ilegales ni engañosos, y que asumo toda la responsabilidad por este contenido frente a terceros. AutoFlow solo aloja lo que publican los negocios, no lo verifica y puede retirar el contenido que sea reportado.
+      <Text style={{ color: tColor.text, fontWeight: '800' }}>
+        {lang === 'en' ? 'I declare that I hold the rights or have authorization ' : 'Declaro que soy titular de los derechos o cuento con autorización '}
+      </Text>
+      {lang === 'en'
+        ? 'for the images and texts I publish, that they are not offensive, illegal, or misleading, and that I assume full responsibility for this content before third parties. AutoFlow only hosts content published by businesses, does not verify it, and may remove reported content.'
+        : 'de las imágenes y textos que publico, que no son ofensivos, ilegales ni engañosos, y que asumo toda la responsabilidad por este contenido frente a terceros. AutoFlow solo aloja lo que publican los negocios, no lo verifica y puede retirar el contenido que sea reportado.'}
     </Text>
   </TouchableOpacity>
 );
@@ -489,6 +547,256 @@ export default function TenantDashboardScreen() {
   const isMobile = width <= 850;
 
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [lang, setLang] = useState<'es' | 'en'>(() => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem('autoflow_lang');
+        if (saved === 'en' || saved === 'es') return saved;
+      } catch (e) {}
+    }
+    return 'es';
+  });
+
+  const handleToggleLang = () => {
+    const nextLang = lang === 'es' ? 'en' : 'es';
+    setLang(nextLang);
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try { window.localStorage.setItem('autoflow_lang', nextLang); } catch (e) {}
+    }
+  };
+
+  // 🌐 Helper universal de traducción instantánea (Español / Inglés)
+  const tr = (esText: string, enText: string): string => (lang === 'en' ? enText : esText);
+
+  const t = useMemo(() => ({
+    es: {
+      navBookings: 'Reservas',
+      navRecords: 'Expediente',
+      navPortal: 'Portal Interno',
+      navBack: 'Volver',
+      navSupport: 'Soporte',
+      navLogout: 'Cerrar Sesión',
+      navMainTitle: 'Navegación Principal',
+      navPortalSections: 'Secciones del Portal Interno (Scroll)',
+      promoBadge: '📢 PROMO ACTIVA',
+      promoClaim: 'Aprovechar Ahora →',
+      heroTitle1: 'Servicios',
+      heroTitle2: 'Premium',
+      heroSubtitle: 'Reserva tu cita en línea en tiempo real con cualquiera de nuestros profesionales disponibles.',
+      distancePrefix: 'Estás a',
+      distanceSuffix: 'millas de',
+      ratePrompt: '¿Ya nos visitaste? Toca 👍 o 👎 para calificar →',
+      bookNow: 'Reservar Cita',
+      noActiveServices: 'El catálogo no tiene servicios activos.',
+      ourWork1: 'Nuestros',
+      ourWork2: 'Trabajos',
+      reviewsTitle1: 'Opiniones y Reacciones',
+      reviewsTitle2: 'Verificadas',
+      likesLabel: 'Me gusta',
+      dislikesLabel: 'No me gusta',
+      verifiedClients: 'clientes verificados',
+      likeBtn: 'Me gustó',
+      dislikeBtn: 'No me gustó',
+      onlyCompletedRule: '🔒 Solo clientes con un servicio completado pueden calificar.',
+      noReviewsTitle: 'Aún no hay valoraciones registradas',
+      noReviewsSub: 'Los clientes que completan su servicio pueden dar 👍 Like o dejar una reseña única directamente desde su Expediente.',
+      reportListing: 'Reportar publicación',
+      reportSent: 'Reporte enviado',
+      recordsTitle: 'Expediente',
+      recordsSubAuto: 'Ingresa la placa para consultar el historial.',
+      recordsSubOther: 'Ingresa el Teléfono o ID para consultar historial.',
+      platePlaceholder: 'Placa (Ej: JNT776)',
+      phoneIdPlaceholder: 'Teléfono o ID',
+      searchBtn: '🔍 Consultar',
+      searchingBtn: 'Buscando...',
+      newSearchBtn: '🔍 Otra Búsqueda',
+      bookFromRecordBtn: '📅 Agendar Cita',
+      officialRatingTitle: '⭐ Tu Calificación Oficial como Cliente',
+      vipPlanTitle: 'Plan de Incentivos VIP 🎁',
+      scheduledAptsTitle: '📅 Tus Citas Programadas',
+      confirmAttendanceBtn: 'Confirmar Asistencia',
+      confirmingBtn: 'Confirmando...',
+      cancelAptBtn: 'Cancelar Cita',
+      visitHistoryTitle: 'Historial de Visitas',
+      noClosedOrders: 'No registra órdenes cerradas.',
+      visitNum: 'Visita #',
+      servicePerformed: 'Servicio Realizado',
+      costPaid: 'Costo Pagado',
+      staffAccessTitle: 'Acceso Operativo',
+      staffOf: 'Personal de',
+      signInBtn: 'Ingresar',
+      wrongPin: 'PIN Incorrecto',
+      activeSessionBadge: '🟢 Sesión Operativa Activa',
+      supportActionBtn: 'Conectar con Soporte',
+      logoutActionBtn: 'Cerrar Sesión',
+      tabOrders: 'Órdenes',
+      tabUpcoming: 'Próximos',
+      tabReports: 'Reportes',
+      tabStaff: 'Personal',
+      tabCatalog: 'Catálogo',
+      tabHours: 'Horarios',
+      tabPortfolio: 'Portafolio',
+      tabLoyalty: 'Fidelidad',
+      tabAiReception: 'Recepción IA',
+      noScheduledOrders: 'No hay órdenes programadas.',
+      completeOrderBtn: '📋 Completar Orden',
+      cancelBtn: 'Cancelar',
+      reportsTitle: 'Facturación y Analítica de Tráfico',
+      hideChartBtn: '📊 Ocultar Gráfica de Tráfico',
+      showChartBtn: '📈 Ver Gráfica de Tráfico y Campañas',
+      kpiRevenue: 'TOTAL DE INGRESOS',
+      kpiCompleted: 'SERVICIOS COMPLETADOS',
+      kpiPromos: 'PROMOS / REFERIDOS APLICADOS',
+      staffMgmtTitle: 'Gestión de Equipo / Staff',
+      catalogMgmtTitle: 'Gestión de Catálogo',
+      newServiceBtn: '+ Nuevo Servicio',
+      hoursTitle: 'Horarios de Atención',
+      saveHoursBtn: '💾 Guardar Horarios',
+      closedLabel: 'CERRADO',
+      portfolioTitle: 'Portafolio Visual',
+      addWorkBtn: '+ Agregar Trabajo',
+      loyaltyTitle: 'Programas de Retención',
+      saveRulesBtn: '💾 Guardar Reglas',
+      aiReceptionTitle: 'Recepcionista Telefónica IA 24/7 (Bilingüe ES / EN)',
+      aiReceptionSub: 'Tu propio asistente de voz contesta llamadas, verifica qué profesional está libre, agenda en tu calendario y graba la llamada.',
+      connectAiBtn: '⚡ Conectar y Autoconfigurar Recepcionista IA',
+      tgChannelTitle: 'Canal Interno de Telegram (Exclusivo de este Consultorio / Negocio)',
+      saveTgBtn: '💾 Guardar Canal de Telegram en BD',
+      testTgBtn: '🔔 Enviar Alerta de Prueba al Consultorio',
+      helpSupportBtn: 'Ayuda / Soporte',
+      newBookingTitle: 'Nueva Reserva',
+      selectedServiceLabel: 'Servicio Seleccionado',
+      aptDateLabel: 'Día de la Cita',
+      aptTimeLabel: 'Hora de la Cita',
+      confirmBookingBtn: 'Confirmar Agendamiento',
+      processingBtn: 'Procesando...',
+      posTitle: 'Cierre de Servicio (POS)',
+      closeOrderBillBtn: '✅ Cerrar Orden y Facturar',
+      cancelModalTitle: 'Cancelar Cita y Liberar Turno',
+      confirmCancelBtn: 'Confirmar Cancelación',
+      supportModalTitle: 'Soporte y Acompañamiento AutoFlow',
+      supportModalSub: 'Atención directa del equipo técnico (Mensaje privado a AutoFlow)',
+      reportModalTitle: 'Reportar Contenido',
+      submitReportBtn: 'Enviar Reporte',
+    },
+    en: {
+      navBookings: 'Bookings',
+      navRecords: 'Records',
+      navPortal: 'Staff Portal',
+      navBack: 'Back',
+      navSupport: 'Support',
+      navLogout: 'Log Out',
+      navMainTitle: 'Main Navigation',
+      navPortalSections: 'Staff Portal Sections (Scroll)',
+      promoBadge: '📢 ACTIVE PROMO',
+      promoClaim: 'Claim Offer →',
+      heroTitle1: 'Premium',
+      heroTitle2: 'Services',
+      heroSubtitle: 'Book your appointment online in real time with any of our available professionals.',
+      distancePrefix: 'You are',
+      distanceSuffix: 'miles from',
+      ratePrompt: 'Already visited us? Tap 👍 or 👎 to rate →',
+      bookNow: 'Book Now',
+      noActiveServices: 'No active services in the catalog.',
+      ourWork1: 'Our',
+      ourWork2: 'Work',
+      reviewsTitle1: 'Verified',
+      reviewsTitle2: 'Reviews & Reactions',
+      likesLabel: 'Likes',
+      dislikesLabel: 'Dislikes',
+      verifiedClients: 'verified clients',
+      likeBtn: 'Like',
+      dislikeBtn: 'Dislike',
+      onlyCompletedRule: '🔒 Only clients with a completed service can rate.',
+      noReviewsTitle: 'No ratings registered yet',
+      noReviewsSub: 'Clients who complete a service can leave a 👍 Like or a verified review from their Records.',
+      reportListing: 'Report listing',
+      reportSent: 'Report sent',
+      recordsTitle: 'Client Records',
+      recordsSubAuto: 'Enter the license plate to check service history.',
+      recordsSubOther: 'Enter Phone Number or ID to check service history.',
+      platePlaceholder: 'Plate (e.g., JNT776)',
+      phoneIdPlaceholder: 'Phone or ID',
+      searchBtn: '🔍 Search',
+      searchingBtn: 'Searching...',
+      newSearchBtn: '🔍 New Search',
+      bookFromRecordBtn: '📅 Book Appointment',
+      officialRatingTitle: '⭐ Your Official Client Rating',
+      vipPlanTitle: 'VIP Loyalty Plan 🎁',
+      scheduledAptsTitle: '📅 Your Scheduled Appointments',
+      confirmAttendanceBtn: 'Confirm Attendance',
+      confirmingBtn: 'Confirming...',
+      cancelAptBtn: 'Cancel Appointment',
+      visitHistoryTitle: 'Visit History',
+      noClosedOrders: 'No completed visits found.',
+      visitNum: 'Visit #',
+      servicePerformed: 'Service Performed',
+      costPaid: 'Amount Paid',
+      staffAccessTitle: 'Staff Access',
+      staffOf: 'Staff of',
+      signInBtn: 'Sign In',
+      wrongPin: 'Incorrect PIN',
+      activeSessionBadge: '🟢 Active Staff Session',
+      supportActionBtn: 'Contact Support',
+      logoutActionBtn: 'Log Out',
+      tabOrders: 'Orders',
+      tabUpcoming: 'Upcoming',
+      tabReports: 'Reports',
+      tabStaff: 'Staff',
+      tabCatalog: 'Catalog',
+      tabHours: 'Hours',
+      tabPortfolio: 'Portfolio',
+      tabLoyalty: 'Loyalty',
+      tabAiReception: 'AI Reception',
+      noScheduledOrders: 'No scheduled orders.',
+      completeOrderBtn: '📋 Complete Order',
+      cancelBtn: 'Cancel',
+      reportsTitle: 'Billing & Traffic Analytics',
+      hideChartBtn: '📊 Hide Traffic Chart',
+      showChartBtn: '📈 View Traffic & Campaign Chart',
+      kpiRevenue: 'TOTAL REVENUE',
+      kpiCompleted: 'COMPLETED SERVICES',
+      kpiPromos: 'PROMOS / REFERRALS APPLIED',
+      staffMgmtTitle: 'Team / Staff Management',
+      catalogMgmtTitle: 'Catalog Management',
+      newServiceBtn: '+ New Service',
+      hoursTitle: 'Business Hours',
+      saveHoursBtn: '💾 Save Hours',
+      closedLabel: 'CLOSED',
+      portfolioTitle: 'Visual Portfolio',
+      addWorkBtn: '+ Add Work',
+      loyaltyTitle: 'Retention & Loyalty Programs',
+      saveRulesBtn: '💾 Save Rules',
+      aiReceptionTitle: '24/7 AI Phone Receptionist (Bilingual ES / EN)',
+      aiReceptionSub: 'Your own voice assistant answers calls, checks available professionals, books in your calendar, and records calls.',
+      connectAiBtn: '⚡ Connect & Auto-Configure AI Receptionist',
+      tgChannelTitle: 'Internal Telegram Channel (Exclusive to this Office / Business)',
+      saveTgBtn: '💾 Save Telegram Channel to DB',
+      testTgBtn: '🔔 Send Test Alert to Office',
+      helpSupportBtn: 'Help / Support',
+      newBookingTitle: 'New Booking',
+      selectedServiceLabel: 'Selected Service',
+      aptDateLabel: 'Appointment Date',
+      aptTimeLabel: 'Appointment Time',
+      confirmBookingBtn: 'Confirm Booking',
+      processingBtn: 'Processing...',
+      posTitle: 'Service Checkout (POS)',
+      closeOrderBillBtn: '✅ Close Order & Bill',
+      cancelModalTitle: 'Cancel Appointment & Free Slot',
+      confirmCancelBtn: 'Confirm Cancellation',
+      supportModalTitle: 'AutoFlow Support & Onboarding',
+      supportModalSub: 'Direct technical team assistance (Private message to AutoFlow)',
+      reportModalTitle: 'Report Content',
+      submitReportBtn: 'Submit Report',
+    }
+  })[lang], [lang]);
+
+  const handleStaffLogout = () => {
+    setIsMechanicAuth(false);
+    setMechanicPin('');
+    setIsMobileMenuOpen(false);
+    setIsSupportModalOpen(false);
+  };
   const tColor = useMemo(() => ({
     dark: { bg: '#05070C', card: 'rgba(18, 22, 28, 0.75)', text: '#FFFFFF', muted: '#94A3B8', border: 'rgba(255,255,255,0.08)', input: 'rgba(0, 0, 0, 0.4)', nav: 'rgba(5, 7, 12, 0.85)' },
     light: { bg: '#F1F5F9', card: 'rgba(255, 255, 255, 0.85)', text: '#0F131A', muted: '#475569', border: 'rgba(0,0,0,0.1)', input: 'rgba(255, 255, 255, 0.6)', nav: 'rgba(241, 245, 249, 0.85)' }
@@ -508,7 +816,7 @@ export default function TenantDashboardScreen() {
   const isAutomotive = !isSpa && !isBarbershop && !isLegal && !isDental; 
 
   const brandColor = tenantInfo?.primaryColor || (isLegal ? '#3B82F6' : isDental ? '#06B6D4' : '#FF5E00');
-  const staffTerm = isAutomotive ? 'Mecánico' : isBarbershop ? 'Barbero' : isLegal ? 'Abogado(a)' : isDental ? 'Odontólogo(a)' : 'Especialista';
+  const staffTerm = isAutomotive ? tr('Mecánico', 'Mechanic') : isBarbershop ? tr('Barbero', 'Barber') : isLegal ? tr('Abogado(a)', 'Attorney') : isDental ? tr('Odontólogo(a)', 'Dentist') : tr('Especialista', 'Specialist');
 
   const bgImage = useMemo(() => {
     if (isSpa) return 'https://images.unsplash.com/photo-1540555700478-4be289fbecef?q=80&w=2000&auto=format&fit=crop'; 
@@ -653,6 +961,29 @@ export default function TenantDashboardScreen() {
   const [isSyncingVapi, setIsSyncingVapi] = useState<boolean>(false);
   const [isSimulatingVoiceCall, setIsSimulatingVoiceCall] = useState<boolean>(false);
   const [vapiActivationNotice, setVapiActivationNotice] = useState<string | null>(null);
+
+  // 📲 Estados para Canal Interno de Telegram Parametrizado por Consultorio / Negocio
+  const [telegramConfig, setTelegramConfig] = useState<TelegramChannelConfig>({
+    isActive: true,
+    channelName: '',
+    chatId: '',
+    botToken: '',
+    notifyNewAppointments: true,
+    notifyRecordings: true,
+    notifyConfirmationsAndCancels: true,
+    notifyPOSClosures: true
+  });
+  const [isSavingTelegram, setIsSavingTelegram] = useState<boolean>(false);
+  const [isTestingTelegram, setIsTestingTelegram] = useState<boolean>(false);
+  const [isDetectingTelegramChat, setIsDetectingTelegramChat] = useState<boolean>(false);
+
+  // 🎧 Estados para Soporte y Acompañamiento Técnico AutoFlow
+  const [isSupportModalOpen, setIsSupportModalOpen] = useState<boolean>(false);
+  const [supportContactName, setSupportContactName] = useState<string>('');
+  const [supportContactPhone, setSupportContactPhone] = useState<string>('');
+  const [supportTopic, setSupportTopic] = useState<string>('🤖 Configurar Recepcionista IA (Vapi)');
+  const [supportMessage, setSupportMessage] = useState<string>('');
+  const [isSendingSupport, setIsSendingSupport] = useState<boolean>(false);
 
   // Expediente
   const [expedienteQuery, setExpedienteQuery] = useState('');
@@ -925,12 +1256,13 @@ export default function TenantDashboardScreen() {
     ) || null;
   }, [reviewsList, currentExpedienteClientKey, clientExpedienteData]);
 
-  // 🌟 REACCIÓN DE 1 CLIC (👍 LIKE / 👎 DISLIKE) ÚNICA POR CLIENTE 🌟
+  // 🌟 REACCIÓN DE 1 CLIC (👍 LIKE / 👎 DISLIKE) ÚNICA POR CLIENTE SINCRONIZADA CON BD 🌟
   const handleQuickClientReaction = async (reactionType: 'like' | 'dislike') => {
     if (!currentExpedienteClientKey) return;
     setIsSubmittingReview(true);
     try {
       const cName = toTitleCase(clientExpedienteData?.client?.name || 'Cliente Verificado');
+      const cPhone = clientExpedienteData?.client?.phone || expedienteQuery || '';
       const latestService = clientExpedienteData?.serviceHistory?.[0]?.service?.name || clientExpedienteData?.serviceHistory?.[0]?.serviceType || 'Cliente Verificado';
 
       const updatedReview: ReviewItem = {
@@ -945,19 +1277,40 @@ export default function TenantDashboardScreen() {
       };
 
       const filteredOthers = reviewsList.filter((r: any) =>
-        String(r.clientKey || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
+        String(r.clientKey || r.clientId || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
         String(r.clientName || '').toLowerCase() !== cName.toLowerCase()
       );
 
-      const updatedReviews = [updatedReview, ...filteredOthers];
-      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: updatedReviews, campaigns: pushCampaignsList };
+      let finalReviews = [updatedReview, ...filteredOthers];
 
+      try {
+        const resRev = await apiFetch('/api/reviews', {
+          method: 'POST',
+          body: JSON.stringify({
+            clientId: clientExpedienteData?.client?.id || currentExpedienteClientKey,
+            clientName: cName,
+            clientPhone: cPhone,
+            rating: updatedReview.rating,
+            reaction: reactionType,
+            comment: updatedReview.comment,
+            serviceName: latestService
+          })
+        });
+        if (resRev.ok) {
+          const dataRev = await resRev.json();
+          if (Array.isArray(dataRev.reviews)) {
+            finalReviews = dataRev.reviews;
+          }
+        }
+      } catch (_e) {}
+
+      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: finalReviews, campaigns: pushCampaignsList };
       await apiFetch('/api/tenants/config', {
         method: 'PUT',
         body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
       });
 
-      setReviewsList(updatedReviews);
+      setReviewsList(finalReviews);
       setLocalLoyalty(updatedLoyaltyConfig);
       setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
     } catch (e) {
@@ -973,33 +1326,56 @@ export default function TenantDashboardScreen() {
     setIsSubmittingReview(true);
     try {
       const cName = toTitleCase(clientExpedienteData?.client?.name || 'Cliente Verificado');
+      const cPhone = clientExpedienteData?.client?.phone || expedienteQuery || '';
       const latestService = clientExpedienteData?.serviceHistory?.[0]?.service?.name || clientExpedienteData?.serviceHistory?.[0]?.serviceType || 'Cliente Verificado';
+      const reactionVal: 'like' | 'dislike' = reviewRating >= 4 ? 'like' : 'dislike';
 
       const newReview: ReviewItem = {
         id: currentClientExistingReview?.id || `rev-${Date.now()}`,
         clientKey: currentExpedienteClientKey,
         clientName: cName,
         rating: reviewRating,
-        reaction: reviewRating >= 4 ? 'like' : 'dislike',
+        reaction: reactionVal,
         comment: toTitleCase(reviewComment.trim()),
         serviceName: latestService,
         createdAt: new Date().toISOString()
       };
 
       const filteredOthers = reviewsList.filter((r: any) =>
-        String(r.clientKey || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
+        String(r.clientKey || r.clientId || r.workOrderId || '').toLowerCase() !== currentExpedienteClientKey &&
         String(r.clientName || '').toLowerCase() !== cName.toLowerCase()
       );
 
-      const updatedReviews = [newReview, ...filteredOthers];
-      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: updatedReviews, campaigns: pushCampaignsList };
+      let finalReviews = [newReview, ...filteredOthers];
 
+      try {
+        const resRev = await apiFetch('/api/reviews', {
+          method: 'POST',
+          body: JSON.stringify({
+            clientId: clientExpedienteData?.client?.id || currentExpedienteClientKey,
+            clientName: cName,
+            clientPhone: cPhone,
+            rating: reviewRating,
+            reaction: reactionVal,
+            comment: newReview.comment,
+            serviceName: latestService
+          })
+        });
+        if (resRev.ok) {
+          const dataRev = await resRev.json();
+          if (Array.isArray(dataRev.reviews)) {
+            finalReviews = dataRev.reviews;
+          }
+        }
+      } catch (_e) {}
+
+      const updatedLoyaltyConfig: LoyaltyConfig = { ...localLoyalty, reviews: finalReviews, campaigns: pushCampaignsList };
       await apiFetch('/api/tenants/config', {
         method: 'PUT',
         body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
       });
 
-      setReviewsList(updatedReviews);
+      setReviewsList(finalReviews);
       setLocalLoyalty(updatedLoyaltyConfig);
       setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyaltyConfig } : prev));
       setIsEditingClientReview(false);
@@ -1032,7 +1408,7 @@ export default function TenantDashboardScreen() {
       if (resInfo.ok) {
         const dataInfo = await resInfo.json();
         if (dataInfo.success) {
-          let parsedLoyalty = dataInfo.tenant.loyaltyConfig;
+          let parsedLoyalty = dataInfo.tenant.loyaltyConfig || dataInfo.tenant.loyalty_config;
           if (typeof parsedLoyalty === 'string') {
              try { parsedLoyalty = JSON.parse(parsedLoyalty); } catch (e) {}
           }
@@ -1065,6 +1441,15 @@ export default function TenantDashboardScreen() {
             }
             if (parsedLoyalty.vapiConfig) {
               setVapiConfig((prev) => ({ ...prev, ...parsedLoyalty.vapiConfig }));
+            }
+            if (parsedLoyalty.telegramConfig || dataInfo.tenant?.telegramChatId || dataInfo.tenant?.telegram_chat_id) {
+              setTelegramConfig((prev) => ({
+                ...prev,
+                ...(parsedLoyalty.telegramConfig || {}),
+                chatId: parsedLoyalty.telegramConfig?.chatId || dataInfo.tenant?.telegramChatId || dataInfo.tenant?.telegram_chat_id || prev.chatId || '',
+                botToken: parsedLoyalty.telegramConfig?.botToken || dataInfo.tenant?.telegramBotToken || dataInfo.tenant?.telegram_bot_token || prev.botToken || '',
+                channelName: parsedLoyalty.telegramConfig?.channelName || dataInfo.tenant?.name || prev.channelName || ''
+              }));
             }
           }
           if (dataInfo.tenant?.id) {
@@ -2043,6 +2428,139 @@ export default function TenantDashboardScreen() {
     }
   };
 
+  // 📲 FUNCIONES PARA PARAMETRIZAR Y PROBAR EL CANAL INTERNO DE TELEGRAM DEL CONSULTORIO / NEGOCIO
+  const handleDetectTelegramChatId = async () => {
+    setIsDetectingTelegramChat(true);
+    try {
+      const res = await apiFetch('/api/tenants/telegram-detect-chat', {
+        method: 'POST',
+        body: JSON.stringify({ botToken: telegramConfig.botToken || '' })
+      });
+      const data = await res.json();
+      if (res.ok && data.success && data.chatId) {
+        setTelegramConfig((prev) => ({
+          ...prev,
+          chatId: String(data.chatId),
+          channelName: prev.channelName || data.channelName || tenantInfo?.name || 'Canal Interno'
+        }));
+        alert(data.message || `✅ Chat ID detectado: ${data.chatId}`);
+      } else {
+        alert(data.message || 'No se encontraron mensajes recientes en el Bot. Envía "hola" en tu grupo de Telegram e inténtalo de nuevo.');
+      }
+    } catch (e) {
+      alert('Error de red al intentar detectar el Chat ID de Telegram.');
+    } finally {
+      setIsDetectingTelegramChat(false);
+    }
+  };
+
+  const handleSaveTelegramChannel = async () => {
+    if (!telegramConfig.chatId?.trim()) {
+      alert('Por favor ingresa o autodetecta el "Telegram Chat ID" del grupo o usuario del consultorio.');
+      return;
+    }
+    setIsSavingTelegram(true);
+    try {
+      const res = await apiFetch('/api/tenants/telegram-config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          telegramConfig: {
+            ...telegramConfig,
+            channelName: telegramConfig.channelName?.trim() || tenantInfo?.name || 'Canal Interno'
+          }
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        const savedTg = data.telegramConfig || telegramConfig;
+        setTelegramConfig(savedTg);
+        const updatedLoyalty = { ...localLoyalty, reviews: reviewsList, campaigns: pushCampaignsList, vapiConfig, telegramConfig: savedTg };
+        setLocalLoyalty(updatedLoyalty);
+        setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyalty } : prev));
+        alert(data.message || '✅ Canal interno de Telegram guardado en la base de datos.');
+      } else {
+        alert(data.message || 'Error guardando la configuración de Telegram.');
+      }
+    } catch (e) {
+      alert('Error de red al guardar el canal de Telegram.');
+    } finally {
+      setIsSavingTelegram(false);
+    }
+  };
+
+  const handleTestTelegramChannel = async () => {
+    setIsTestingTelegram(true);
+    try {
+      const res = await apiFetch('/api/tenants/telegram-test', {
+        method: 'POST',
+        body: JSON.stringify({
+          telegramConfig: {
+            ...telegramConfig,
+            channelName: telegramConfig.channelName?.trim() || tenantInfo?.name || 'Canal Interno'
+          },
+          businessName: tenantInfo?.name || 'Consultorio / Negocio'
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(data.message || '🚀 ¡Mensaje de prueba enviado a tu grupo de Telegram!');
+      } else {
+        alert(data.message || 'No se pudo enviar el mensaje de prueba. Verifica el Chat ID.');
+      }
+    } catch (e) {
+      alert('Error de red al probar el canal de Telegram.');
+    } finally {
+      setIsTestingTelegram(false);
+    }
+  };
+
+  const openSupportModal = (defaultTopic?: string) => {
+    setSupportContactName((prev) => prev || activeStaffList[0]?.name || tenantInfo?.name || '');
+    setSupportContactPhone((prev) => prev || (tenantInfo as any)?.phoneContact || vapiConfig?.transferPhone || '');
+    if (defaultTopic) setSupportTopic(defaultTopic);
+    setSupportMessage('');
+    setIsSupportModalOpen(true);
+  };
+
+  const handleSendAutoFlowSupport = async () => {
+    if (!supportContactPhone.trim() && !supportMessage.trim()) {
+      alert('Por favor indícanos tu teléfono/WhatsApp o una breve nota para comunicarnos contigo.');
+      return;
+    }
+    setIsSendingSupport(true);
+    try {
+      const sectionLabel = activeView === 'mecanico'
+        ? `Portal Interno ➔ ${agendaFilter}`
+        : activeView === 'expediente'
+          ? 'Expediente'
+          : 'Reservas';
+
+      const res = await apiFetch('/api/support/autoflow', {
+        method: 'POST',
+        body: JSON.stringify({
+          businessName: tenantInfo?.name || 'Negocio / Consultorio',
+          contactName: supportContactName.trim() || activeStaffList[0]?.name || 'Encargado',
+          contactPhone: supportContactPhone.trim(),
+          topic: supportTopic,
+          message: supportMessage.trim() || `Solicito acompañamiento paso a paso para: ${supportTopic}`,
+          currentSection: sectionLabel
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setIsSupportModalOpen(false);
+        setSupportMessage('');
+        alert(data.message || '🎧 ¡Solicitud enviada al equipo de Soporte AutoFlow! En breve te contactaremos.');
+      } else {
+        alert(data.message || 'No se pudo enviar la solicitud a Soporte AutoFlow.');
+      }
+    } catch (e) {
+      alert('Error de red al conectar con Soporte AutoFlow.');
+    } finally {
+      setIsSendingSupport(false);
+    }
+  };
+
   // 📞 SIMULADOR LOCAL DE LLAMADA ENTRANTE IA (PARA PROBAR AGENDAMIENTO TELEFÓNICO + TELEGRAM + PUSH SIN GASTAR SALDO)
   const handleSimulatePhoneBooking = async (lang: 'es' | 'en' = 'es') => {
     setIsSimulatingVoiceCall(true);
@@ -2407,146 +2925,208 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       <Image key={`${bgImage}-${theme}`} source={{ uri: bgImage }} style={[StyleSheet.absoluteFill, { width: '100%', height: '100%', opacity: theme === 'dark' ? 0.15 : 0.05 } as any]} resizeMode="cover" />
       <WebStyles theme={theme} tColor={tColor} brandColor={brandColor} />
 
-      {/* 🌟 MENÚ SUPERIOR RESPONSIVE (MÓVIL + TABLET + DESKTOP) 🌟 */}
+      {/* 🌟 MENÚ SUPERIOR RESPONSIVE VERTICAL (WEB + iOS SAFE AREA + ANDROID STATUS BAR) 🌟 */}
       <View style={[styles.header, { 
         position: Platform.OS === 'web' ? ('sticky' as any) : 'relative', top: 0, zIndex: 200,
         backgroundColor: tColor.nav, backdropFilter: Platform.OS === 'web' ? 'blur(16px)' : 'none',
-        paddingHorizontal: isMobile ? 16 : 40, paddingTop: isMobile ? 14 : 20, paddingBottom: isMobile ? 14 : 20,
+        paddingHorizontal: isMobile ? 14 : 40,
+        paddingTop: Platform.OS === 'ios' ? 56 : Platform.OS === 'android' ? 42 : (isMobile ? 12 : 18),
+        paddingBottom: isMobile ? 12 : 18,
         borderBottomWidth: 1, borderBottomColor: tColor.border, display: isPrinting ? 'none' : 'flex',
-        gap: isMobile ? 10 : 16
+        flexWrap: isMobile ? 'nowrap' : 'wrap',
+        gap: isMobile ? 8 : 16
       }]}>
         
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: isMobile ? 1 : undefined, minWidth: isMobile ? 180 : undefined }}>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => tenantInfo?.logoUrl ? setExpandedImage({ path: tenantInfo.logoUrl, alt: tenantInfo?.name || 'Logo' }) : handleNavigate('servicios')}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 10 : 12, flex: 1, minWidth: 0 }}
+        >
           {tenantInfo?.logoUrl ? (
-             <View style={{ width: isMobile ? 34 : 40, height: isMobile ? 34 : 40, borderRadius: 10, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: '#000' }}>
+             <View style={{ width: isMobile ? 42 : 48, height: isMobile ? 42 : 48, borderRadius: 12, overflow: 'hidden', borderWidth: 1.5, borderColor: brandColor, backgroundColor: '#000', flexShrink: 0 }}>
                <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo.name || 'Logo'} />
              </View>
           ) : (
-             <View style={{ backgroundColor: brandColor, width: isMobile ? 34 : 36, height: isMobile ? 34 : 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }}>
-               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: isMobile ? 16 : 18 }}>{tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}</Text>
+             <View style={{ backgroundColor: brandColor, width: isMobile ? 42 : 48, height: isMobile ? 42 : 48, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+               <Text style={{ color: '#FFF', fontWeight: '900', fontSize: isMobile ? 18 : 20 }}>{tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}</Text>
              </View>
           )}
-          <View style={{ flex: isMobile ? 1 : undefined }}>
-            <Text style={{ fontSize: isMobile ? 16 : 20, fontWeight: '900', color: tColor.text }} numberOfLines={1}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={{ fontSize: isMobile ? 15 : 20, fontWeight: '900', color: tColor.text }} numberOfLines={1} ellipsizeMode="tail">
               {tenantInfo?.name || 'AutoFlow'}
             </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 3 }}>
-              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                <Ionicons name="star" size={11} color="#F59E0B" />
-                <Text style={{ color: '#F59E0B', fontSize: 11, fontWeight: '900' }}>{ratingSummary.avg}</Text>
-                <View style={{ width: 1, height: 9, backgroundColor: 'rgba(255,255,255,0.15)' }} />
-                <Feather name="thumbs-up" size={10} color="#10B981" />
-                <Text style={{ color: '#10B981', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.likes}</Text>
-                {ratingSummary.dislikes > 0 ? (
-                  <>
-                    <Feather name="thumbs-down" size={10} color="#EF4444" />
-                    <Text style={{ color: '#EF4444', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
-                  </>
-                ) : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'nowrap', marginTop: 2 }}>
+              {/* ⭐ Insignia con Promedio, Likes (👍) y Dislikes (👎) siempre visibles */}
+              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 7, paddingVertical: 1.5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <Ionicons name="star" size={10} color="#F59E0B" />
+                <Text style={{ color: '#F59E0B', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.avg}</Text>
+                <View style={{ width: 1, height: 8, backgroundColor: 'rgba(255,255,255,0.18)' }} />
+                <Feather name="thumbs-up" size={9.5} color="#10B981" />
+                <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>{ratingSummary.likes}</Text>
+                <Feather name="thumbs-down" size={9.5} color="#EF4444" style={{ marginLeft: 2 }} />
+                <Text style={{ color: '#EF4444', fontSize: 10, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
               </View>
               {clientDistanceMiles ? (
-                <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                  <Feather name="navigation" size={10} color="#60A5FA" />
-                  <Text style={{ color: tColor.text, fontSize: 10.5, fontWeight: '800' }}>{clientDistanceMiles} mi</Text>
+                <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 7, paddingVertical: 1.5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                  <Feather name="navigation" size={9.5} color="#60A5FA" />
+                  <Text style={{ color: tColor.text, fontSize: 10, fontWeight: '800' }}>{clientDistanceMiles} mi</Text>
                 </View>
               ) : null}
             </View>
           </View>
-        </View>
+        </TouchableOpacity>
 
         {!isMobile ? (
           <View style={{ flexDirection: 'row', gap: 20, alignItems: 'center' }}>
             <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('servicios')}>
               <Feather name="calendar" size={15} color={activeView === 'servicios' ? brandColor : tColor.muted} />
-              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: '800' }}>Reservas</Text>
+              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: '800' }}>{t.navBookings}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('expediente')}>
               <Feather name="file-text" size={15} color={activeView === 'expediente' ? brandColor : tColor.muted} />
-              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: '800' }}>Expediente</Text>
+              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: '800' }}>{t.navRecords}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 7, paddingVertical: 8 }} onPress={() => handleNavigate('mecanico')}>
               <Feather name="sliders" size={15} color={activeView === 'mecanico' ? brandColor : tColor.muted} />
-              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: '800' }}>Portal Interno</Text>
+              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: '800' }}>{t.navPortal}</Text>
             </TouchableOpacity>
           </View>
         ) : null}
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12 }}>
-          <TouchableOpacity onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: isMobile ? 38 : 42, height: isMobile ? 38 : 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: 12 }}>
-            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={17} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 6 : 10, flexShrink: 0 }}>
+          {/* 🌐 Selector Bilingüe Profesional (ES | EN) */}
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={handleToggleLang}
+            accessibilityLabel="Cambiar idioma / Switch language"
+            style={{
+              height: isMobile ? 36 : 42,
+              paddingHorizontal: 4,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: tColor.input,
+              borderWidth: 1,
+              borderColor: tColor.border,
+              borderRadius: isMobile ? 10 : 12,
+              flexDirection: 'row',
+              gap: 2
+            }}
+          >
+            <View style={{ paddingHorizontal: isMobile ? 6 : 9, paddingVertical: isMobile ? 4 : 5, borderRadius: 7, backgroundColor: lang === 'es' ? brandColor : 'transparent' }}>
+              <Text style={{ color: lang === 'es' ? '#FFFFFF' : tColor.muted, fontWeight: '900', fontSize: isMobile ? 11 : 11.5 }}>ES</Text>
+            </View>
+            <View style={{ paddingHorizontal: isMobile ? 6 : 9, paddingVertical: isMobile ? 4 : 5, borderRadius: 7, backgroundColor: lang === 'en' ? brandColor : 'transparent' }}>
+              <Text style={{ color: lang === 'en' ? '#FFFFFF' : tColor.muted, fontWeight: '900', fontSize: isMobile ? 11 : 11.5 }}>EN</Text>
+            </View>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, flexDirection: 'row', gap: 6, paddingVertical: isMobile ? 9 : 14, paddingHorizontal: isMobile ? 12 : 24 }]} onPress={() => {
-            if (router.canGoBack()) {
-              router.back();
-            } else {
-              router.push(`/?category=${dbNiche}`);
-            }
-          }}>
-            <Feather name="arrow-left" size={15} color={tColor.text} />
-            <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: isMobile ? 13 : 14.5 }]}>Volver</Text>
+
+          <TouchableOpacity
+            onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            style={{ width: isMobile ? 36 : 42, height: isMobile ? 36 : 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: isMobile ? 10 : 12 }}
+          >
+            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={isMobile ? 16 : 17} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.secondaryButton, {
+              backgroundColor: tColor.input,
+              borderColor: tColor.border,
+              flexDirection: 'row',
+              gap: 5,
+              height: isMobile ? 36 : 42,
+              paddingVertical: 0,
+              paddingHorizontal: isMobile ? 10 : 18,
+              borderRadius: isMobile ? 10 : 12
+            }]}
+            onPress={() => {
+              if (router.canGoBack()) {
+                router.back();
+              } else {
+                router.push(`/?category=${dbNiche}`);
+              }
+            }}
+          >
+            <Feather name="arrow-left" size={14} color={tColor.text} />
+            <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: isMobile ? 12.5 : 14 }]}>{t.navBack}</Text>
+          </TouchableOpacity>
+
           {isMobile ? (
             <TouchableOpacity
-              style={{ width: 38, height: 38, alignItems: 'center', justifyContent: 'center', backgroundColor: isMobileMenuOpen ? brandColor : tColor.border, borderRadius: 12 }}
+              style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: isMobileMenuOpen ? brandColor : tColor.border, borderRadius: 10 }}
               onPress={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
             >
-              <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={19} color={isMobileMenuOpen ? '#FFFFFF' : tColor.text} />
+              <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={18} color={isMobileMenuOpen ? '#FFFFFF' : tColor.text} />
             </TouchableOpacity>
           ) : null}
         </View>
       </View>
 
-      {/* 📱 MENÚ DESPLEGABLE MÓVIL CON SCROLL VERTICAL (INCLUYE SECCIONES DE PORTAL INTERNO) 📱 */}
+      {/* 📱 MENÚ DESPLEGABLE MÓVIL CON BACKDROP Y SAFE AREA PARA iOS / ANDROID 📱 */}
       {isMobile && isMobileMenuOpen ? (
-        <View style={{
-          position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
-          top: 72,
-          left: 16,
-          right: 16,
-          maxHeight: '78vh' as any,
-          backgroundColor: theme === 'dark' ? 'rgba(15, 20, 28, 0.98)' : 'rgba(255, 255, 255, 0.98)',
-          zIndex: 250,
-          borderRadius: 18,
-          borderWidth: 1,
-          borderColor: tColor.border,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 12 },
-          shadowOpacity: 0.35,
-          shadowRadius: 24,
-          overflow: 'hidden'
-        }}>
+        <>
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={() => setIsMobileMenuOpen(false)}
+            style={{
+              position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
+              top: Platform.OS === 'ios' ? 108 : Platform.OS === 'android' ? 94 : 64,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(2, 6, 23, 0.65)',
+              backdropFilter: Platform.OS === 'web' ? 'blur(6px)' : undefined,
+              zIndex: 240
+            } as any}
+          />
+          <View style={{
+            position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
+            top: Platform.OS === 'ios' ? 112 : Platform.OS === 'android' ? 98 : 68,
+            left: 14,
+            right: 14,
+            maxHeight: '78vh' as any,
+            backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+            zIndex: 250,
+            borderRadius: 18,
+            borderWidth: 1,
+            borderColor: tColor.border,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 16 },
+            shadowOpacity: 0.45,
+            shadowRadius: 28,
+            overflow: 'hidden'
+          }}>
           <ScrollView showsVerticalScrollIndicator={true} contentContainerStyle={{ padding: 16 }}>
             <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', marginBottom: 6, letterSpacing: 0.8 }}>
-              Navegación Principal
+              {t.navMainTitle}
             </Text>
             <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('servicios')}>
               <Feather name="calendar" size={18} color={activeView === 'servicios' ? brandColor : tColor.text} />
-              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Reservas</Text>
+              <Text style={{ color: activeView === 'servicios' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>{t.navBookings}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('expediente')}>
               <Feather name="file-text" size={18} color={activeView === 'expediente' ? brandColor : tColor.text} />
-              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Expediente</Text>
+              <Text style={{ color: activeView === 'expediente' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>{t.navRecords}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={{ paddingVertical: 14, borderBottomWidth: isMechanicAuth ? 1 : 0, borderBottomColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => handleNavigate('mecanico')}>
               <Feather name="sliders" size={18} color={activeView === 'mecanico' ? brandColor : tColor.text} />
-              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>Portal Interno</Text>
+              <Text style={{ color: activeView === 'mecanico' ? brandColor : tColor.text, fontWeight: 'bold', fontSize: 15 }}>{t.navPortal}</Text>
             </TouchableOpacity>
 
             {isMechanicAuth ? (
               <View style={{ marginTop: 14 }}>
                 <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', marginBottom: 8, letterSpacing: 0.8 }}>
-                  Secciones del Portal Interno (Scroll)
+                  {t.navPortalSections}
                 </Text>
                 {[
-                  { key: 'today', label: 'Órdenes de Hoy', icon: 'check-square' },
-                  { key: 'upcoming', label: 'Próximos Turnos', icon: 'calendar' },
-                  { key: 'reports', label: 'Reportes y Tráfico', icon: 'bar-chart-2' },
-                  { key: 'staff', label: `Personal (${staffTerm}s)`, icon: 'users' },
-                  { key: 'catalogo', label: 'Catálogo de Servicios', icon: 'tag' },
-                  { key: 'horarios', label: 'Horarios de Atención', icon: 'clock' },
-                  { key: 'portafolio', label: 'Portafolio Visual', icon: 'image' },
-                  { key: 'fidelidad', label: 'Fidelidad y Campañas', icon: 'gift' },
-                  { key: 'recepcion_ia', label: 'Recepción IA (Llamadas)', icon: 'phone-call' },
+                  { key: 'today', label: t.tabOrders, icon: 'check-square' },
+                  { key: 'upcoming', label: t.tabUpcoming, icon: 'calendar' },
+                  { key: 'reports', label: t.tabReports, icon: 'bar-chart-2' },
+                  { key: 'staff', label: `${t.tabStaff} (${staffTerm})`, icon: 'users' },
+                  { key: 'catalogo', label: t.tabCatalog, icon: 'tag' },
+                  { key: 'horarios', label: t.tabHours, icon: 'clock' },
+                  { key: 'portafolio', label: t.tabPortfolio, icon: 'image' },
+                  { key: 'fidelidad', label: t.tabLoyalty, icon: 'gift' },
+                  { key: 'recepcion_ia', label: t.tabAiReception, icon: 'phone-call' },
                 ].map((sec) => {
                   const isActiveSec = activeView === 'mecanico' && agendaFilter === sec.key;
                   return (
@@ -2575,127 +3155,407 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </TouchableOpacity>
                   );
                 })}
+                <View style={{ flexDirection: 'row', gap: 10, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                  <TouchableOpacity
+                    onPress={() => { setIsMobileMenuOpen(false); openSupportModal(); }}
+                    style={{ flex: 1, paddingVertical: 11, borderRadius: 10, backgroundColor: 'rgba(56, 189, 248, 0.14)', borderWidth: 1, borderColor: '#38BDF8', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                  >
+                    <Feather name="headphones" size={15} color="#38BDF8" />
+                    <Text style={{ color: '#38BDF8', fontWeight: '900', fontSize: 13 }}>{t.navSupport}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={handleStaffLogout}
+                    style={{ flex: 1, paddingVertical: 11, borderRadius: 10, backgroundColor: 'rgba(239, 68, 68, 0.14)', borderWidth: 1, borderColor: '#EF4444', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                  >
+                    <Feather name="log-out" size={15} color="#EF4444" />
+                    <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>{t.navLogout}</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             ) : null}
           </ScrollView>
         </View>
+        </>
       ) : null}
 
-      <ScrollView contentContainerStyle={[styles.contentArea, { paddingTop: 20 }]} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.contentArea,
+          {
+            paddingHorizontal: isMobile ? 16 : 40,
+            paddingTop: isMobile ? 16 : 24,
+            paddingBottom: isMobile ? 48 : 64
+          }
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
 
         {/* ============================================================== */}
         {/* VISTA 1: B2C SERVICIOS, PORTAFOLIO Y RESEÑAS VERIFICADAS       */}
         {/* ============================================================== */}
         {activeView === 'servicios' ? (
-          <View>
+          <View style={{ width: '100%', minWidth: 0 }}>
             {/* 🌟 BANNER EN VIVO DE CAMPAÑA PUSH ACTIVA (SOLO SE MUESTRA SI ESTÁ ACTIVA) 🌟 */}
             {pushCampaignsList.filter(c => c.is_active !== false).slice(0, 1).map((activeCamp) => (
-              <View key={`${activeCamp.id}-banner`} style={{ backgroundColor: 'rgba(255, 94, 0, 0.12)', borderWidth: 1, borderColor: brandColor, borderRadius: 16, padding: 18, marginBottom: 28, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', gap: 12 }}>
-                <View style={{ flex: 1 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <View key={`${activeCamp.id}-banner`} style={{ backgroundColor: 'rgba(255, 94, 0, 0.12)', borderWidth: 1, borderColor: brandColor, borderRadius: 16, padding: isMobile ? 16 : 18, marginBottom: 20, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 12 }}>
+                <View style={{ flex: 1, paddingRight: isMobile ? 24 : 0 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
                     <View style={{ backgroundColor: brandColor, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
-                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>📢 PROMO ACTIVA</Text>
+                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>{t.promoBadge}</Text>
                     </View>
-                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16 }}>{toTitleCase(activeCamp.title)}</Text>
+                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>{toTitleCase(activeCamp.title)}</Text>
                   </View>
-                  <Text style={{ color: tColor.muted, fontSize: 13 }}>{toTitleCase(activeCamp.message)}</Text>
+                  <Text style={{ color: tColor.muted, fontSize: 13, lineHeight: 18 }}>{toTitleCase(activeCamp.message)}</Text>
                 </View>
                 {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
-                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 10, paddingHorizontal: 16 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
-                  <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>Aprovechar Ahora →</Text>
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 11, paddingHorizontal: 16 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
+                  <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>{t.promoClaim}</Text>
                 </TouchableOpacity>
               </View>
             ))}
 
-            <View style={{ marginBottom: 48, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-end', gap: 16 }}>
-              <View>
-                <Text style={{ fontSize: 32, fontWeight: '900', color: tColor.text, marginBottom: 12 }}>Servicios <Text style={{ color: brandColor }}>Premium</Text></Text>
-                <Text style={{ color: tColor.muted }}>Reserva tu cita en línea en tiempo real con cualquiera de nuestros profesionales disponibles.</Text>
-              </View>
-              <View style={{ alignItems: isMobile ? 'flex-start' : 'flex-end', gap: 10 }}>
-                {clientDistanceMiles ? (
-                  <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.14)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.45)', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Feather name="navigation" size={13} color="#60A5FA" />
-                    <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '900' }}>
-                      Estás a {clientDistanceMiles} millas de {tenantInfo?.name || 'este negocio'}
+            {/* 🖼️ HERO BANNER VERTICAL (1 SOLA IMAGEN, SIN CORAZÓN, SIN PUNTOS ● ○ ○ Y CON LIKES/DISLIKES VISIBLES) 🖼️ */}
+            <View
+              style={{
+                width: '100%',
+                height: isMobile ? 310 : 360,
+                borderRadius: isMobile ? 24 : 30,
+                overflow: 'hidden',
+                borderWidth: 1,
+                borderColor: tColor.border,
+                backgroundColor: '#05070C',
+                marginBottom: 18,
+                position: 'relative',
+                ...Platform.select({
+                  web: { boxShadow: theme === 'dark' ? '0 22px 48px -12px rgba(0,0,0,0.7)' : '0 18px 36px -10px rgba(15,23,42,0.18)' } as any,
+                  ios: { shadowColor: '#000', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.35, shadowRadius: 20 },
+                  android: { elevation: 10 }
+                })
+              }}
+            >
+              {tenantInfo?.logoUrl ? (
+                <TouchableOpacity
+                  activeOpacity={0.95}
+                  onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
+                  style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
+                >
+                  <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo?.name || 'Portada'} />
+                </TouchableOpacity>
+              ) : (
+                <Image
+                  source={{ uri: bgImage }}
+                  style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
+                  resizeMode="cover"
+                />
+              )}
+
+              {Platform.OS === 'web' ? (
+                <View
+                  pointerEvents="none"
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: 90,
+                    backgroundImage: 'linear-gradient(180deg, rgba(5,7,12,0.65) 0%, rgba(5,7,12,0) 100%)'
+                  } as any}
+                />
+              ) : (
+                <View
+                  pointerEvents="none"
+                  style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 65, backgroundColor: 'rgba(5,7,12,0.35)' }}
+                />
+              )}
+
+              <BottomHalfGradientOverlay heightPct="68%" baseColor="5, 7, 12" />
+
+              {/* Barra flotante superior dentro del Hero Banner (Sin botón de corazón) */}
+              <View
+                style={{
+                  position: 'absolute',
+                  top: isMobile ? 14 : 20,
+                  left: isMobile ? 14 : 24,
+                  right: isMobile ? 14 : 24,
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                  zIndex: 10
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 }}>
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(255,255,255,0.22)',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 20,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
+                    }}
+                  >
+                    <Feather
+                      name={isLegal ? 'briefcase' : isDental ? 'heart' : isBarbershop ? 'scissors' : isSpa ? 'sun' : 'tool'}
+                      size={12}
+                      color={brandColor}
+                    />
+                    <Text style={{ color: '#FFFFFF', fontSize: 11.5, fontWeight: '900' }}>
+                      {isLegal
+                        ? tr('Firma Legal', 'Law Firm')
+                        : isDental
+                          ? tr('Clínica Dental', 'Dental Clinic')
+                          : isBarbershop
+                            ? tr('Barbería & Estilo', 'Barbershop')
+                            : isSpa
+                              ? tr('Spa & Bienestar', 'Spa & Wellness')
+                              : tr('Taller Especializado', 'Auto Service')}
                     </Text>
                   </View>
-                ) : null}
-                <TouchableOpacity 
-                  onPress={() => handleNavigate('expediente')}
-                  style={{ backgroundColor: tColor.card, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 14 }}
-                >
-                  <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: `${brandColor}18`, borderWidth: 1, borderColor: `${brandColor}40`, alignItems: 'center', justifyContent: 'center' }}>
-                    <Feather name="award" size={20} color={brandColor} />
-                  </View>
-                  <View>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <Ionicons name="star" size={14} color="#F59E0B" />
-                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{ratingSummary.avg}</Text>
-                      </View>
-                      <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.4)', backgroundColor: 'rgba(16, 185, 129, 0.1)' }}>
-                        <Feather name="thumbs-up" size={13} color="#10B981" />
-                        <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 13 }}>{ratingSummary.likes}</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}>
-                        <Feather name="thumbs-down" size={13} color="#EF4444" />
-                        <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>{ratingSummary.dislikes}</Text>
-                      </TouchableOpacity>
-                      <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: 'bold' }}>({ratingSummary.count})</Text>
+
+                  {clientDistanceMiles ? (
+                    <View
+                      style={{
+                        backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                        borderWidth: 1,
+                        borderColor: 'rgba(96, 165, 250, 0.45)',
+                        paddingHorizontal: 11,
+                        paddingVertical: 6,
+                        borderRadius: 20,
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 5,
+                        ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
+                      }}
+                    >
+                      <Feather name="navigation" size={11} color="#60A5FA" />
+                      <Text style={{ color: '#FFFFFF', fontSize: 11.5, fontWeight: '800' }}>
+                        {clientDistanceMiles} mi
+                      </Text>
                     </View>
-                    <Text style={{ color: brandColor, fontSize: 11, fontWeight: 'bold', marginTop: 3 }}>¿Ya nos visitaste? Toca 👍 o 👎 para calificar →</Text>
+                  ) : null}
+
+                  {/* ⭐ Píldora en vivo de Likes (👍) y Dislikes (👎) reflejada en la Portada */}
+                  <View
+                    style={{
+                      backgroundColor: 'rgba(15, 23, 42, 0.78)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(245, 158, 11, 0.45)',
+                      paddingHorizontal: 11,
+                      paddingVertical: 6,
+                      borderRadius: 20,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
+                    }}
+                  >
+                    <Ionicons name="star" size={11} color="#F59E0B" />
+                    <Text style={{ color: '#F59E0B', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.avg}</Text>
+                    <View style={{ width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.2)' }} />
+                    <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
+                      <Feather name="thumbs-up" size={11} color="#10B981" />
+                      <Text style={{ color: '#10B981', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.likes}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginLeft: 2 }}>
+                      <Feather name="thumbs-down" size={11} color="#EF4444" />
+                      <Text style={{ color: '#EF4444', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
+                    </TouchableOpacity>
                   </View>
-                </TouchableOpacity>
+                </View>
+
+                {tenantInfo?.logoUrl ? (
+                  <TouchableOpacity
+                    onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 18,
+                      backgroundColor: 'rgba(15, 23, 42, 0.72)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(255,255,255,0.22)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
+                    }}
+                  >
+                    <Feather name="maximize-2" size={15} color="#FFFFFF" />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              {/* Contenido Inferior sobre el Degradado (Sin los 3 puntos ● ○ ○) */}
+              <View
+                style={{
+                  position: 'absolute',
+                  left: isMobile ? 16 : 28,
+                  right: isMobile ? 16 : 28,
+                  bottom: isMobile ? 18 : 24,
+                  zIndex: 10
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+                  {tenantInfo?.logoUrl ? (
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Logo' })}
+                      style={{
+                        width: isMobile ? 48 : 56,
+                        height: isMobile ? 48 : 56,
+                        borderRadius: 14,
+                        overflow: 'hidden',
+                        borderWidth: 2,
+                        borderColor: brandColor,
+                        backgroundColor: '#000',
+                        flexShrink: 0
+                      }}
+                    >
+                      <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo?.name || 'Logo'} />
+                    </TouchableOpacity>
+                  ) : (
+                    <View
+                      style={{
+                        width: isMobile ? 48 : 56,
+                        height: isMobile ? 48 : 56,
+                        borderRadius: 14,
+                        backgroundColor: brandColor,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        borderWidth: 2,
+                        borderColor: 'rgba(255,255,255,0.35)',
+                        flexShrink: 0
+                      }}
+                    >
+                      <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: isMobile ? 20 : 24 }}>
+                        {tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}
+                      </Text>
+                    </View>
+                  )}
+
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text
+                        style={{ color: '#FFFFFF', fontSize: isMobile ? 18 : 22, fontWeight: '900' }}
+                        numberOfLines={1}
+                      >
+                        {tenantInfo?.name || 'AutoFlow'}
+                      </Text>
+                      <Ionicons name="checkmark-circle" size={17} color={brandColor} />
+                    </View>
+                    <Text style={{ color: '#CBD5E1', fontSize: isMobile ? 12 : 13, fontWeight: '600', marginTop: 1 }} numberOfLines={1}>
+                      {clientDistanceMiles
+                        ? `${t.distancePrefix} ${clientDistanceMiles} ${t.distanceSuffix} ${tenantInfo?.name || 'AutoFlow'}`
+                        : tr('Agenda Abierta 24/7 en Tiempo Real', '24/7 Real-Time Online Booking')}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text style={{ fontSize: isMobile ? 26 : 34, fontWeight: '900', color: '#FFFFFF', marginBottom: 4, lineHeight: isMobile ? 31 : 40 }}>
+                  {t.heroTitle1} <Text style={{ color: brandColor }}>{t.heroTitle2}</Text>
+                </Text>
+                <Text style={{ color: '#E2E8F0', fontSize: isMobile ? 12.5 : 14, lineHeight: isMobile ? 18 : 20 }} numberOfLines={2}>
+                  {t.heroSubtitle}
+                </Text>
               </View>
             </View>
 
-            <View style={styles.bentoGrid}>
+            {/* ⭐ BARRA INTERACTIVA DE CALIFICACIÓN Y REACCIONES RÁPIDAS (100% RESPONSIVE) ⭐ */}
+            <TouchableOpacity
+              activeOpacity={0.88}
+              onPress={() => handleNavigate('expediente')}
+              style={{
+                backgroundColor: tColor.card,
+                borderWidth: 1,
+                borderColor: tColor.border,
+                paddingHorizontal: isMobile ? 14 : 20,
+                paddingVertical: isMobile ? 12 : 14,
+                borderRadius: 18,
+                marginBottom: isMobile ? 28 : 40,
+                flexDirection: isMobile ? 'column' : 'row',
+                alignItems: isMobile ? 'stretch' : 'center',
+                justifyContent: 'space-between',
+                gap: 12
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                <View style={{ width: 38, height: 38, borderRadius: 11, backgroundColor: `${brandColor}18`, borderWidth: 1, borderColor: `${brandColor}40`, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Feather name="award" size={18} color={brandColor} />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Ionicons name="star" size={14} color="#F59E0B" />
+                      <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{ratingSummary.avg}</Text>
+                    </View>
+                    <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.4)', backgroundColor: 'rgba(16, 185, 129, 0.1)' }}>
+                      <Feather name="thumbs-up" size={12} color="#10B981" />
+                      <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12.5 }}>{ratingSummary.likes}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.4)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}>
+                      <Feather name="thumbs-down" size={12} color="#EF4444" />
+                      <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 12.5 }}>{ratingSummary.dislikes}</Text>
+                    </TouchableOpacity>
+                    <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: 'bold' }}>({ratingSummary.count})</Text>
+                  </View>
+                  <Text style={{ color: brandColor, fontSize: 11.5, fontWeight: '800', marginTop: 4 }} numberOfLines={1}>
+                    {t.ratePrompt}
+                  </Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <View style={[styles.bentoGrid, { gap: isMobile ? 16 : 24 }]}>
               {activeCatalogServices.length > 0 ? activeCatalogServices.map((srv, idx) => (
-                <View key={`${srv.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden' }]}>
+                <View key={`${srv.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden', minWidth: isMobile ? '100%' : 300 }]}>
                   {srv.imageUrl ? (
-                    <TouchableOpacity style={{ width: '100%', height: 200, backgroundColor: tColor.input, borderBottomWidth: 1, borderColor: tColor.border }} onPress={() => setExpandedImage({ path: srv.imageUrl!, alt: srv.name })}>
+                    <TouchableOpacity style={{ width: '100%', height: 205, backgroundColor: tColor.input, position: 'relative' }} onPress={() => setExpandedImage({ path: srv.imageUrl!, alt: srv.name })}>
                        <PrivateSupabaseImage path={srv.imageUrl} alt={srv.name} />
+                       <BottomHalfGradientOverlay heightPct="55%" baseColor="5, 7, 12" />
                     </TouchableOpacity>
                   ) : null}
                   {renderReportButton({ type: 'service', id: srv.id, title: srv.name, excerpt: String(srv.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
-                  <View style={{ padding: 32 }}>
-                    <Text style={{ fontSize: 20, fontWeight: '800', color: tColor.text, marginBottom: 12 }}>{toTitleCase(srv.name)}</Text>
+                  <View style={{ padding: isMobile ? 20 : 28 }}>
+                    <Text style={{ fontSize: isMobile ? 18 : 20, fontWeight: '800', color: tColor.text, marginBottom: 10, paddingRight: 28 }}>{toTitleCase(srv.name)}</Text>
                     {srv.description ? (
-                      <Text style={{ color: tColor.muted, marginBottom: 24, lineHeight: 22 }}>{toTitleCase(srv.description)}</Text>
+                      <Text style={{ color: tColor.muted, marginBottom: 20, lineHeight: 21, fontSize: 13.5 }}>{toTitleCase(srv.description)}</Text>
                     ) : (
-                      <Text style={{ color: tColor.muted, marginBottom: 24 }}>⏱️ {srv.durationMinutes || 30} minutos</Text>
+                      <Text style={{ color: tColor.muted, marginBottom: 20, fontSize: 13.5 }}>⏱️ {srv.durationMinutes || 30} {tr('minutos', 'minutes')}</Text>
                     )}
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: tColor.border, paddingTop: 20 }}>
-                      <Text style={{ fontSize: 24, fontWeight: '900', color: brandColor }}>${srv.price}</Text>
-                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }]} onPress={() => { setSelectedServiceType(srv.id); setIsBookingModalOpen(true); setIsPlateSearched(false); }}><Text style={styles.primaryButtonText}>Reservar Cita</Text></TouchableOpacity>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: tColor.border, paddingTop: 16, gap: 12 }}>
+                      <Text style={{ fontSize: isMobile ? 22 : 24, fontWeight: '900', color: brandColor }}>${srv.price}</Text>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: isMobile ? 12 : 14, paddingHorizontal: isMobile ? 18 : 24 }]} onPress={() => { setSelectedServiceType(srv.id); setIsBookingModalOpen(true); setIsPlateSearched(false); }}><Text style={styles.primaryButtonText}>{t.bookNow}</Text></TouchableOpacity>
                     </View>
                   </View>
                 </View>
-              )) : (<View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>El catálogo no tiene servicios activos.</Text></View>)}
+              )) : (<View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>{t.noActiveServices}</Text></View>)}
             </View>
 
             {localPortfolio.length > 0 ? (
-              <View style={{ marginTop: 60, marginBottom: 20 }}>
-                <Text style={{ fontSize: 28, fontWeight: '900', color: tColor.text, marginBottom: 24 }}>Nuestros <Text style={{ color: brandColor }}>Trabajos</Text></Text>
+              <View style={{ marginTop: isMobile ? 40 : 60, marginBottom: 20, width: '100%' }}>
+                <Text style={{ fontSize: isMobile ? 24 : 28, fontWeight: '900', color: tColor.text, marginBottom: 20 }}>{t.ourWork1} <Text style={{ color: brandColor }}>{t.ourWork2}</Text></Text>
                 <ResponsiveCarousel
                   data={localPortfolio}
-                  gap={24}
-                  minItemWidth={280}
+                  gap={isMobile ? 16 : 24}
+                  minItemWidth={260}
                   maxCols={4}
                   tColor={tColor}
                   brandColor={brandColor}
                   arrowTop="34%"
                   renderItem={(item, idx, itemWidth) => (
                     <View style={{ flex: 1, borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: tColor.card }}>
-                      <TouchableOpacity style={{ width: '100%', height: Math.min(340, Math.max(240, Math.round(itemWidth * 0.9))), backgroundColor: tColor.input }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
+                      <TouchableOpacity style={{ width: '100%', height: Math.min(340, Math.max(230, Math.round(itemWidth * 0.88))), backgroundColor: tColor.input, position: 'relative' }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
                         <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx + 1}`} />
+                        <BottomHalfGradientOverlay heightPct="50%" baseColor="5, 7, 12" />
                       </TouchableOpacity>
                       {renderReportButton({ type: 'portfolio', id: item.url, title: item.title, excerpt: String(item.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
-                      <View style={{ padding: 20 }}>
-                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 18, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
+                      <View style={{ padding: 18 }}>
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 17, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
                         {item.description ? (
-                          <Text style={{ color: tColor.muted, fontSize: 14, marginBottom: 12 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
+                          <Text style={{ color: tColor.muted, fontSize: 13.5, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
                         ) : null}
                       </View>
                     </View>
@@ -2705,35 +3565,65 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
             ) : null}
 
             {/* 🌟 SECCIÓN PÚBLICA DE REACCIONES (👍/👎) Y RESEÑAS DE CLIENTES VERIFICADOS 🌟 */}
-            <View style={{ marginTop: 48, marginBottom: 40 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-                <View>
-                  <Text style={{ fontSize: 26, fontWeight: '900', color: tColor.text }}>
-                    Opiniones y Reacciones <Text style={{ color: brandColor }}>Verificadas</Text>
-                  </Text>
-                  <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4 }}>
-                    👍 {ratingSummary.likes} Me gusta  •  👎 {ratingSummary.dislikes} No me gusta  •  ⭐ Promedio {ratingSummary.avg} ({ratingSummary.count} clientes verificados)
-                  </Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
-                    <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.12)' }}>
-                      <Text style={{ fontSize: 14 }}>👍</Text>
-                      <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12 }}>Me gustó</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: '#EF4444', backgroundColor: 'rgba(239, 68, 68, 0.12)' }}>
-                      <Text style={{ fontSize: 14 }}>👎</Text>
-                      <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 12 }}>No me gustó</Text>
-                    </TouchableOpacity>
-                    <Text style={{ color: tColor.muted, fontSize: 11.5, flexShrink: 1 }}>🔒 Solo clientes con un servicio completado pueden calificar.</Text>
-                  </View>
+            <View style={{ marginTop: isMobile ? 36 : 48, marginBottom: 40, width: '100%', minWidth: 0 }}>
+              <View style={{ marginBottom: 22, width: '100%', minWidth: 0 }}>
+                <Text style={{ fontSize: isMobile ? 22 : 26, fontWeight: '900', color: tColor.text, lineHeight: isMobile ? 28 : 32 }}>
+                  {t.reviewsTitle1} <Text style={{ color: brandColor }}>{t.reviewsTitle2}</Text>
+                </Text>
+                <Text style={{ color: tColor.muted, fontSize: isMobile ? 12 : 13, marginTop: 6, lineHeight: 18 }}>
+                  👍 {ratingSummary.likes} {t.likesLabel}  •  👎 {ratingSummary.dislikes} {t.dislikesLabel}  •  ⭐ {ratingSummary.avg} ({ratingSummary.count} {t.verifiedClients})
+                </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14, width: '100%' }}>
+                  <TouchableOpacity
+                    onPress={() => startReactionFlow('like')}
+                    style={{
+                      flex: isMobile ? 1 : undefined,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                      paddingVertical: 10,
+                      paddingHorizontal: 16,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: '#10B981',
+                      backgroundColor: 'rgba(16, 185, 129, 0.12)'
+                    }}
+                  >
+                    <Text style={{ fontSize: 14 }}>👍</Text>
+                    <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12.5 }}>{t.likeBtn}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => startReactionFlow('dislike')}
+                    style={{
+                      flex: isMobile ? 1 : undefined,
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                      paddingVertical: 10,
+                      paddingHorizontal: 16,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: '#EF4444',
+                      backgroundColor: 'rgba(239, 68, 68, 0.12)'
+                    }}
+                  >
+                    <Text style={{ fontSize: 14 }}>👎</Text>
+                    <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 12.5 }}>{t.dislikeBtn}</Text>
+                  </TouchableOpacity>
                 </View>
+                <Text style={{ color: tColor.muted, fontSize: 11.5, marginTop: 10, lineHeight: 16 }}>
+                  {t.onlyCompletedRule}
+                </Text>
               </View>
 
               {reviewsList.length === 0 ? (
                 <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 28, alignItems: 'center' }]}>
                   <Text style={{ fontSize: 32, marginBottom: 8 }}>👍</Text>
-                  <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 16 }}>Aún no hay valoraciones registradas</Text>
+                  <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 16 }}>{t.noReviewsTitle}</Text>
                   <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 4, textAlign: 'center' }}>
-                    Los clientes que completan su servicio pueden dar 👍 Like o dejar una reseña única directamente desde su Expediente.
+                    {t.noReviewsSub}
                   </Text>
                 </View>
               ) : (
@@ -2755,7 +3645,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                                 <View style={{ backgroundColor: isLike ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1, borderColor: isLike ? '#10B981' : '#EF4444' }}>
                                   <Text style={{ color: isLike ? '#10B981' : '#EF4444', fontSize: 11, fontWeight: '900' }}>
-                                    {isLike ? '👍 Me gustó' : '👎 Por mejorar'}
+                                    {isLike ? tr('👍 Me gustó', '👍 Liked') : tr('👎 Por mejorar', '👎 Needs improvement')}
                                   </Text>
                                 </View>
                                 <Text style={{ color: '#F59E0B', fontSize: 13, letterSpacing: 1 }}>
@@ -2775,7 +3665,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               </Text>
                             ) : (
                               <Text style={{ color: tColor.muted, fontSize: 13, fontStyle: 'italic', marginBottom: 16 }}>
-                                {isLike ? 'El cliente recomendó este negocio con un 👍.' : 'El cliente calificó este negocio sin dejar comentario.'}
+                                {isLike ? tr('El cliente recomendó este negocio con un 👍.', 'The client recommended this business with a 👍.') : tr('El cliente calificó este negocio sin dejar comentario.', 'The client rated this business without leaving a comment.')}
                               </Text>
                             )}
                           </View>
@@ -2796,7 +3686,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
             <View style={{ borderTopWidth: 1, borderTopColor: tColor.border, paddingTop: 20, paddingBottom: 12, alignItems: 'center', gap: 8 }}>
               {renderReportButton({ type: 'business', id: tenantInfo?.id || String(safeTenantId), title: tenantInfo?.name || 'Negocio' })}
               <Text style={{ color: tColor.muted, fontSize: 11, textAlign: 'center', maxWidth: 560, lineHeight: 16 }}>
-                AutoFlow aloja contenido publicado por los negocios y no verifica su titularidad. Si crees que algo infringe tus derechos o es inapropiado, repórtalo y lo revisaremos.
+                {tr('AutoFlow aloja contenido publicado por los negocios y no verifica su titularidad. Si crees que algo infringe tus derechos o es inapropiado, repórtalo y lo revisaremos.', 'AutoFlow hosts content published by businesses and does not verify ownership. If you believe anything infringes your rights or is inappropriate, report it and we will review it.')}
               </Text>
             </View>
           </View>
@@ -3505,7 +4395,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>Copia la "Private Key" (Arriba)</Text>
                         </View>
                         <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                          En el menú izquierdo entra a <Text style={{ color: tColor.text, fontWeight: 'bold' }}>🔒 Claves API</Text> y copia la <Text style={{ color: '#F59E0B', fontWeight: '900' }}>Private Key</Text> (la primera de arriba que tiene punticos <Text style={{ fontWeight: 'bold' }}>••••••••</Text>).{''}
+                          En el menú izquierdo entra a <Text style={{ color: tColor.text, fontWeight: 'bold' }}>🔒 Claves API</Text> y copia la <Text style={{ color: '#F59E0B', fontWeight: '900' }}>Private Key</Text> (la primera de arriba que tiene punticos <Text style={{ fontWeight: 'bold' }}>••••••••</Text>).{'\n'}
                           <Text style={{ color: '#EF4444', fontWeight: '800', fontSize: 11.5 }}>⚠️ No copies la Public Key de abajo.</Text>
                         </Text>
                       </View>
@@ -3632,8 +4522,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           🧠 Conocimiento que AutoFlow inyecta automáticamente en tu IA ({isLegal ? 'Modo Bufete Legal' : isDental ? 'Modo Clínica Odontológica' : 'Modo Recepción Pro'}):
                         </Text>
                         <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Profesionales activos ({activeStaffList.length}):</Text> {activeStaffList.map((s) => s.name).join(', ') || 'Cualquiera disponible'}{''}
-                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Servicios y Tarifas ({activeCatalogServices.length}):</Text> {activeCatalogServices.map((s) => `${s.name} (${Number(s.price) === 0 ? 'Evaluación Gratis' : '$' + s.price})`).join(', ') || 'Catálogo general'}{''}
+                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Profesionales activos ({activeStaffList.length}):</Text> {activeStaffList.map((s) => s.name).join(', ') || 'Cualquiera disponible'}{'\n'}
+                          • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Servicios y Tarifas ({activeCatalogServices.length}):</Text> {activeCatalogServices.map((s) => `${s.name} (${Number(s.price) === 0 ? 'Evaluación Gratis' : '$' + s.price})`).join(', ') || 'Catálogo general'}{'\n'}
                           • <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Protocolo de Preguntas:</Text> {isLegal ? 'Pregunta nombre completo, correo electrónico (para enviar confirmación y Google Calendar), área del caso (Inmigración, Familia, Civil, Penal, Laboral) y modalidad (Presencial, Llamada o Videollamada).' : isDental ? 'Pregunta nombre completo, correo electrónico (para enviar confirmación), motivo o urgencia dental, y fecha/hora deseada.' : 'Pregunta nombre, servicio deseado y verifica disponibilidad respetando las 3 horas de anticipación.'}
                         </Text>
                       </View>
@@ -3673,6 +4563,183 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             </Text>
                           </TouchableOpacity>
                         </View>
+                      </View>
+                    </View>
+
+                    {/* ===================================================================== */}
+                    {/* 📲 CANAL INTERNO DE TELEGRAM PARAMETRIZADO POR CONSULTORIO / NEGOCIO  */}
+                    {/* ===================================================================== */}
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, marginBottom: 28 }]}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, marginBottom: 18, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: tColor.border }}>
+                        <View style={{ flex: 1, minWidth: 240 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                            <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: 'rgba(14, 165, 233, 0.18)', borderWidth: 1, borderColor: '#0EA5E9', alignItems: 'center', justifyContent: 'center' }}>
+                              <Feather name="send" size={16} color="#0EA5E9" />
+                            </View>
+                            <Text style={{ color: tColor.text, fontSize: 19, fontWeight: '900' }}>
+                              Canal Interno de Telegram (Exclusivo de este Consultorio / Negocio)
+                            </Text>
+                          </View>
+                          <Text style={{ color: tColor.muted, fontSize: 13, marginTop: 2 }}>
+                            Parametriza en la base de datos a qué grupo o chat privado de Telegram llegarán las citas, grabaciones de voz IA y cierres de caja de <Text style={{ color: tColor.text, fontWeight: 'bold' }}>{tenantInfo?.name || 'este negocio'}</Text>.
+                          </Text>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                          <View style={{ backgroundColor: telegramConfig.chatId ? 'rgba(16, 185, 129, 0.15)' : 'rgba(14, 165, 233, 0.15)', borderWidth: 1, borderColor: telegramConfig.chatId ? '#10B981' : '#0EA5E9', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 }}>
+                            <Text style={{ color: telegramConfig.chatId ? '#10B981' : '#38BDF8', fontWeight: '900', fontSize: 11.5 }}>
+                              {telegramConfig.chatId ? `🟢 CANAL PROPIO (${telegramConfig.chatId})` : '🔵 CANAL GLOBAL (.ENV)'}
+                            </Text>
+                          </View>
+                          <Switch
+                            value={telegramConfig.isActive !== false}
+                            onValueChange={(val) => setTelegramConfig({ ...telegramConfig, isActive: val })}
+                            trackColor={{ false: '#3e3e3e', true: '#0EA5E9' }}
+                          />
+                        </View>
+                      </View>
+
+                      {/* Mini guía de 3 pasos para crear el grupo del consultorio */}
+                      <View style={[styles.bentoGrid, { marginBottom: 20, gap: 14 }]}>
+                        <View style={{ flex: 1, minWidth: 220, backgroundColor: tColor.input, padding: 16, borderRadius: 14, borderWidth: 1, borderColor: tColor.border }}>
+                          <Text style={{ color: '#38BDF8', fontWeight: '900', fontSize: 12.5, marginBottom: 4 }}>
+                            PASO 1: Crea el Grupo del Consultorio
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
+                            En Telegram crea un grupo con tu equipo (ej. <Text style={{ color: tColor.text, fontWeight: 'bold' }}>"Agenda {tenantInfo?.name || 'Consultorio'}"</Text>) y agrega como miembro a nuestro Bot oficial de AutoFlow (o a tu propio Bot).
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1, minWidth: 220, backgroundColor: tColor.input, padding: 16, borderRadius: 14, borderWidth: 1, borderColor: tColor.border }}>
+                          <Text style={{ color: '#38BDF8', fontWeight: '900', fontSize: 12.5, marginBottom: 4 }}>
+                            PASO 2: Autodetecta el Chat ID en 1 Clic
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
+                            Escribe un mensaje cualquiera en ese grupo (ej. <Text style={{ color: '#10B981', fontWeight: 'bold' }}>"hola"</Text>) y pulsa abajo el botón <Text style={{ color: '#38BDF8', fontWeight: 'bold' }}>🔍 Autodetectar Chat ID</Text>. El código se llenará solo.
+                          </Text>
+                        </View>
+                        <View style={{ flex: 1, minWidth: 220, backgroundColor: tColor.input, padding: 16, borderRadius: 14, borderWidth: 1, borderColor: tColor.border }}>
+                          <Text style={{ color: '#38BDF8', fontWeight: '900', fontSize: 12.5, marginBottom: 4 }}>
+                            PASO 3: Guarda y Prueba en Vivo
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
+                            Pulsa <Text style={{ color: tColor.text, fontWeight: 'bold' }}>Guardar Canal en BD</Text> y luego <Text style={{ color: '#10B981', fontWeight: 'bold' }}>Enviar Alerta de Prueba</Text>. Todas las citas de este negocio llegarán directo a ese grupo.
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 18 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                            🏷️ Nombre Identificador del Canal / Consultorio
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder={`Ej: Recepción ${tenantInfo?.name || 'Consultorio'}`}
+                            placeholderTextColor={tColor.muted}
+                            value={telegramConfig.channelName || ''}
+                            onChangeText={(t) => setTelegramConfig({ ...telegramConfig, channelName: t })}
+                          />
+                        </View>
+
+                        <View style={{ flex: 1.4 }}>
+                          <Text style={[styles.inputLabel, { color: '#38BDF8' }]}>
+                            🆔 Telegram Chat ID del Grupo o Consultorio (Ej: -10019283746 o 8819436619)
+                          </Text>
+                          <View style={{ flexDirection: 'row', gap: 8 }}>
+                            <TextInput
+                              style={[styles.formInput, { flex: 1, backgroundColor: tColor.input, borderColor: '#0EA5E9', color: tColor.text, fontWeight: 'bold' }]}
+                              placeholder="Pega el Chat ID o pulsa Autodetectar 👉"
+                              placeholderTextColor={tColor.muted}
+                              value={telegramConfig.chatId || ''}
+                              onChangeText={(t) => setTelegramConfig({ ...telegramConfig, chatId: t.trim() })}
+                            />
+                            <TouchableOpacity
+                              onPress={handleDetectTelegramChatId}
+                              disabled={isDetectingTelegramChat}
+                              style={{ backgroundColor: 'rgba(14, 165, 233, 0.16)', borderWidth: 1, borderColor: '#0EA5E9', borderRadius: 12, paddingHorizontal: 14, justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 6 }}
+                            >
+                              <Feather name="search" size={14} color="#38BDF8" />
+                              <Text style={{ color: '#38BDF8', fontWeight: '900', fontSize: 12 }}>
+                                {isDetectingTelegramChat ? 'Buscando...' : 'Autodetectar'}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      </View>
+
+                      <View style={{ marginBottom: 18 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>
+                          🤖 Token de Bot Propio en @BotFather (Opcional — Déjalo vacío para usar el Bot Oficial de AutoFlow)
+                        </Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                          placeholder="Opcional (Marca Blanca): Ej. 8761446131:AAE84W20I... (Si lo dejas vacío usa el Bot central de AutoFlow)"
+                          placeholderTextColor={tColor.muted}
+                          secureTextEntry
+                          value={telegramConfig.botToken || ''}
+                          onChangeText={(t) => setTelegramConfig({ ...telegramConfig, botToken: t.trim() })}
+                        />
+                      </View>
+
+                      {/* Filtros de qué eventos notificar al grupo del consultorio */}
+                      <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 10 }]}>
+                        🔔 ¿Qué alertas deseas recibir en el grupo de Telegram de este negocio?
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 22 }}>
+                        {[
+                          { key: 'notifyNewAppointments', label: '📅 Nuevas Citas (Web + Voz IA)' },
+                          { key: 'notifyRecordings', label: '🎙️ Audio y Resumen de Llamadas IA' },
+                          { key: 'notifyConfirmationsAndCancels', label: '✅ Confirmaciones (6h) y Cancelaciones' },
+                          { key: 'notifyPOSClosures', label: '💰 Cierres de Servicio y Cobros (POS)' }
+                        ].map((evItem) => {
+                          const isChecked = (telegramConfig as any)[evItem.key] !== false;
+                          return (
+                            <TouchableOpacity
+                              key={evItem.key}
+                              onPress={() => setTelegramConfig({ ...telegramConfig, [evItem.key]: !isChecked })}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 8,
+                                paddingVertical: 9,
+                                paddingHorizontal: 14,
+                                borderRadius: 10,
+                                borderWidth: 1,
+                                borderColor: isChecked ? '#0EA5E9' : tColor.border,
+                                backgroundColor: isChecked ? 'rgba(14, 165, 233, 0.14)' : tColor.input
+                              }}
+                            >
+                              <Feather name={isChecked ? 'check-square' : 'square'} size={15} color={isChecked ? '#38BDF8' : tColor.muted} />
+                              <Text style={{ color: isChecked ? tColor.text : tColor.muted, fontSize: 12.5, fontWeight: '800' }}>
+                                {evItem.label}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14 }}>
+                        <TouchableOpacity
+                          style={[styles.primaryButton, { backgroundColor: '#0EA5E9', flex: 1, flexDirection: 'row', gap: 8, paddingVertical: 15 }]}
+                          onPress={handleSaveTelegramChannel}
+                          disabled={isSavingTelegram}
+                        >
+                          <Feather name="save" size={16} color="#FFFFFF" />
+                          <Text style={styles.primaryButtonText}>
+                            {isSavingTelegram ? 'Guardando en BD...' : '💾 Guardar Canal de Telegram en BD'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, { backgroundColor: 'rgba(16, 185, 129, 0.14)', borderColor: '#10B981', flex: 1, flexDirection: 'row', gap: 8, paddingVertical: 15 }]}
+                          onPress={handleTestTelegramChannel}
+                          disabled={isTestingTelegram}
+                        >
+                          <Feather name="send" size={16} color="#10B981" />
+                          <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 14 }}>
+                            {isTestingTelegram ? 'Enviando prueba...' : '🔔 Enviar Alerta de Prueba al Consultorio'}
+                          </Text>
+                        </TouchableOpacity>
                       </View>
                     </View>
                   </View>
@@ -5077,7 +6144,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         Garantía de Puntualidad y Reserva Responsable
                       </Text>
                       <Text style={{ color: tColor.muted, fontSize: 11.5, lineHeight: 17 }}>
-                        • Las reservas se programan con al menos <Text style={{ color: '#F59E0B', fontWeight: '900' }}>3 horas de anticipación</Text> para organizar tu atención sin contratiempos.{''}
+                        • Las reservas se programan con al menos <Text style={{ color: '#F59E0B', fontWeight: '900' }}>3 horas de anticipación</Text> para organizar tu atención sin contratiempos.{'\n'}
                         • Recibirás un recordatorio <Text style={{ color: '#10B981', fontWeight: '900' }}>6 horas antes</Text> de tu cita para confirmar tu asistencia en 1 clic o liberar el turno si no puedes asistir.
                       </Text>
                     </View>
@@ -5566,9 +6633,77 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         </View>
       ) : null}
 
+      {isSupportModalOpen ? (
+        <View style={[StyleSheet.absoluteFill, styles.modalOverlay]}>
+          <ScrollView contentContainerStyle={styles.modalContentWrapper}>
+            <View style={[styles.modalContent, { backgroundColor: tColor.bg, borderColor: tColor.border, maxWidth: 520, padding: 28 }]}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                  <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: 'rgba(56, 189, 248, 0.16)', borderWidth: 1, borderColor: '#38BDF8', alignItems: 'center', justifyContent: 'center' }}>
+                    <Feather name="headphones" size={20} color="#38BDF8" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: tColor.text, fontSize: 19, fontWeight: '900' }}>{t.supportModalTitle}</Text>
+                    <Text style={{ color: '#38BDF8', fontSize: 11.5, fontWeight: '700' }}>{t.supportModalSub}</Text>
+                  </View>
+                </View>
+                <TouchableOpacity onPress={() => setIsSupportModalOpen(false)}>
+                  <Feather name="x" size={22} color={tColor.text} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={[styles.inputLabel, { color: tColor.muted, marginTop: 8 }]}>{tr('Tu Nombre o Encargado', 'Your Name or Manager')}</Text>
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginBottom: 14 }]}
+                placeholder="Ej: Cesar Gomez"
+                placeholderTextColor={tColor.muted}
+                value={supportContactName}
+                onChangeText={setSupportContactName}
+              />
+
+              <Text style={[styles.inputLabel, { color: tColor.muted }]}>{tr('Tu Teléfono / WhatsApp Directo', 'Your Direct Phone / WhatsApp')}</Text>
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginBottom: 14 }]}
+                placeholder="Ej: +1 909 555 0199"
+                placeholderTextColor={tColor.muted}
+                value={supportContactPhone}
+                onChangeText={setSupportContactPhone}
+              />
+
+              <Text style={[styles.inputLabel, { color: tColor.muted }]}>{tr('¿En qué te acompañamos?', 'How can we help you?')}</Text>
+              <TextInput
+                style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, minHeight: 80, marginBottom: 18 }]}
+                placeholder={tr('Escribe tu duda o solicita acompañamiento paso a paso...', 'Write your question or request step-by-step assistance...')}
+                placeholderTextColor={tColor.muted}
+                multiline
+                value={supportMessage}
+                onChangeText={setSupportMessage}
+              />
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <TouchableOpacity
+                  style={[styles.secondaryButton, { flex: 1, backgroundColor: tColor.input, borderColor: tColor.border }]}
+                  onPress={() => setIsSupportModalOpen(false)}
+                >
+                  <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>{t.cancelBtn}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.primaryButton, { flex: 1.5, backgroundColor: '#0EA5E9', flexDirection: 'row', gap: 8 }]}
+                  onPress={handleSendAutoFlowSupport}
+                  disabled={isSendingSupport}
+                >
+                  <Feather name="send" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryButtonText}>{isSendingSupport ? t.processingBtn : tr('Enviar a Soporte', 'Send to Support')}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      ) : null}
+
       {expandedImage ? (
         <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.95)', zIndex: 2000, justifyContent: 'center', alignItems: 'center' }]}>
-          <TouchableOpacity style={{ position: 'absolute', top: 24, right: 24, backgroundColor: 'rgba(255,255,255,0.1)', width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', zIndex: 2100 }} onPress={() => setExpandedImage(null)}>
+          <TouchableOpacity style={{ position: 'absolute', top: Platform.OS === 'ios' ? 56 : 24, right: 24, backgroundColor: 'rgba(255,255,255,0.1)', width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', zIndex: 2100 }} onPress={() => setExpandedImage(null)}>
             <Text style={{ color: '#FFF', fontSize: 20 }}>✕</Text>
           </TouchableOpacity>
           <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '900', marginBottom: 16 }}>{expandedImage.alt}</Text>
@@ -5583,34 +6718,34 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  contentArea: { padding: Platform.OS === 'web' ? 40 : 20, maxWidth: 1200, alignSelf: 'center', width: '100%', minHeight: '100%' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 },
-  pageTitle: { fontSize: 32, fontWeight: '900', marginBottom: 8 },
-  sectionTitle: { fontSize: 24, fontWeight: '900', marginBottom: 24 },
-  primaryButton: { paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  root: { flex: 1, width: '100%', overflow: 'hidden' as any },
+  contentArea: { padding: 20, maxWidth: 1200, alignSelf: 'center', width: '100%', minHeight: '100%' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, width: '100%' },
+  pageTitle: { fontSize: 28, fontWeight: '900', marginBottom: 8 },
+  sectionTitle: { fontSize: 22, fontWeight: '900', marginBottom: 20 },
+  primaryButton: { paddingVertical: 14, paddingHorizontal: 22, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 14.5 },
-  secondaryButton: { borderWidth: 1, paddingVertical: 14, paddingHorizontal: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  secondaryButton: { borderWidth: 1, paddingVertical: 14, paddingHorizontal: 22, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   secondaryButtonText: { fontWeight: '800', fontSize: 14.5 },
-  formInput: { borderWidth: 1, borderRadius: 12, padding: 14, fontSize: 14.5 },
+  formInput: { borderWidth: 1, borderRadius: 12, padding: 14, fontSize: 14.5, width: '100%' },
   inputLabel: { fontSize: 12, fontWeight: 'bold', marginBottom: 8, textTransform: 'uppercase' },
   tabsContainer: { flexDirection: 'row', gap: 10, flexWrap: 'wrap', marginBottom: 28, padding: 8, borderRadius: 16 },
   tab: { flex: 1, minWidth: 120, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
   tabText: { fontWeight: '800', fontSize: 14 },
-  bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 24, width: '100%' },
-  glassCard: { borderWidth: 1, borderRadius: 24, padding: 32 },
-  flexCard: { borderWidth: 1, borderRadius: 24, padding: 32, flex: 1, minWidth: 320 },
+  bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 20, width: '100%' },
+  glassCard: { borderWidth: 1, borderRadius: 22, padding: 22, width: '100%', maxWidth: '100%' },
+  flexCard: { borderWidth: 1, borderRadius: 22, padding: 22, flex: 1, minWidth: 260, maxWidth: '100%' },
   modalOverlay: { backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 1000 },
-  modalContentWrapper: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: Platform.OS === 'web' ? 40 : 20 },
-  modalContent: { borderWidth: 1, borderRadius: 24, padding: 32, width: '100%', maxWidth: 750 },
-  closeBtn: { position: 'absolute', top: 24, right: 24, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', zIndex: 10 },
-  chip: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, marginRight: 10, marginBottom: 10 },
+  modalContentWrapper: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16 },
+  modalContent: { borderWidth: 1, borderRadius: 24, padding: 24, width: '100%', maxWidth: 750 },
+  closeBtn: { position: 'absolute', top: 20, right: 20, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', zIndex: 10 },
+  chip: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, marginRight: 8, marginBottom: 8 },
   chipText: { fontWeight: 'bold', fontSize: 13 },
   activeChipText: { color: '#FFFFFF' },
-  filterGroup: { flex: 1, minWidth: 150 },
+  filterGroup: { flex: 1, minWidth: 140 },
   cardTitle: { fontSize: 18, fontWeight: '800', marginBottom: 16 },
   emptyText: { textAlign: 'center', fontWeight: 'bold', fontSize: 16 },
-  orderCard: { borderWidth: 1, borderRadius: 16, padding: 24, flex: 1, minWidth: 320, display: 'flex', flexDirection: 'column' },
+  orderCard: { borderWidth: 1, borderRadius: 16, padding: 20, flex: 1, minWidth: 260, maxWidth: '100%', display: 'flex', flexDirection: 'column' },
   orderHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
   plateBadge: { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8 },
   plateText: { color: '#FFFFFF', fontWeight: '900', fontSize: 16, letterSpacing: 1.5 },

@@ -2,34 +2,146 @@ import { Request, Response } from 'express';
 import { db, users, appointments, services, vehicles, workOrders, tenants } from '@taller/database';
 import { eq, and, gte, lt, ne, inArray, ilike, sql } from 'drizzle-orm'; 
 
-// 📱 Función utilitaria para enviar notificación a Telegram
-const sendTelegramNotification = async (message: string) => {
-  const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-  const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-  
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn("⚠️ Credenciales de Telegram no configuradas en el backend (.env).");
-    return;
-  }
-  
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: 'HTML' // Permite enviar negritas y emojis
-      })
-    });
-    
-    if (!response.ok) {
-      console.error("Error en respuesta de Telegram:", await response.text());
+// 📱 MOTOR MULTI-BOT Y MULTI-TENANT DE TELEGRAM (ENVÍA AL BOT DEL CONSULTORIO + BOT CENTRAL .ENV)
+export type TelegramEventType = 'appointment' | 'recording' | 'status' | 'pos' | 'campaign' | 'system';
+
+export const sendTelegramNotification = async (
+  message: string,
+  tenantId?: string | null,
+  eventType: TelegramEventType = 'appointment'
+): Promise<{ sent: boolean; chatIdUsed?: string; error?: string }> => {
+  const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const envChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+
+  let customToken = '';
+  let customChatId = '';
+  let businessHeader = '';
+  let isChannelEnabled = true;
+
+  if (tenantId) {
+    try {
+      // Consultamos únicamente columnas base garantizadas (name y loyaltyConfig) para que jamás falle el SELECT
+      const [tenantRow] = await db
+        .select({ name: tenants.name, loyaltyConfig: tenants.loyaltyConfig })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId));
+
+      if (tenantRow) {
+        const loyaltyObj =
+          typeof tenantRow.loyaltyConfig === 'string'
+            ? JSON.parse(tenantRow.loyaltyConfig || '{}')
+            : (tenantRow.loyaltyConfig || {});
+        const tgConf = loyaltyObj?.telegramConfig || {};
+
+        if (tgConf.isActive === false) {
+          isChannelEnabled = false;
+        }
+
+        // Filtros granulares por tipo de evento configurados por el consultorio/negocio
+        if (eventType === 'appointment' && tgConf.notifyNewAppointments === false) isChannelEnabled = false;
+        if (eventType === 'recording' && tgConf.notifyRecordings === false) isChannelEnabled = false;
+        if (eventType === 'status' && tgConf.notifyConfirmationsAndCancels === false) isChannelEnabled = false;
+        if (eventType === 'pos' && tgConf.notifyPOSClosures === false) isChannelEnabled = false;
+
+        customChatId = String(tgConf.chatId || '').trim();
+        customToken = String(tgConf.botToken || '').trim();
+
+        const channelLabel = tgConf.channelName || tenantRow.name || '';
+        if (channelLabel && !message.includes(tenantRow.name)) {
+          businessHeader = `🏥 <b>[${channelLabel}]</b>\n`;
+        }
+      }
+    } catch (dbErr) {
+      console.warn('⚠️ Aviso leyendo config de Telegram del tenant:', dbErr);
     }
-  } catch (error) {
-    console.error("Excepción enviando Telegram:", error);
   }
+
+  if (!isChannelEnabled) {
+    return { sent: false, error: 'Notificaciones desactivadas para este evento.' };
+  }
+
+  // Helper interno que envía a un Bot y, si falta el chatId o falla, lo autodescubre vía getUpdates
+  const dispatchToBot = async (botToken: string, targetChatId: string): Promise<{ ok: boolean; chatId?: string; err?: string }> => {
+    if (!botToken) return { ok: false, err: 'Sin Bot Token' };
+    let finalChatId = targetChatId;
+
+    const trySend = async (cid: string) => {
+      return fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: cid,
+          text: `${businessHeader}${message.trim()}`,
+          parse_mode: 'HTML'
+        })
+      });
+    };
+
+    try {
+      if (finalChatId) {
+        const firstTry = await trySend(finalChatId);
+        if (firstTry.ok) return { ok: true, chatId: finalChatId };
+      }
+
+      // Si el bot nuevo no tenía Chat ID o dio error, autodescubrimos su último chat activo en vivo
+      const updRes = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?limit=20`);
+      if (updRes.ok) {
+        const updData = await updRes.json();
+        const list: any[] = Array.isArray(updData?.result) ? updData.result : [];
+        for (let i = list.length - 1; i >= 0; i--) {
+          const u = list[i];
+          const detectedId =
+            u?.message?.chat?.id ||
+            u?.channel_post?.chat?.id ||
+            u?.my_chat_member?.chat?.id ||
+            u?.callback_query?.message?.chat?.id;
+          if (detectedId) {
+            finalChatId = String(detectedId);
+            const retry = await trySend(finalChatId);
+            if (retry.ok) return { ok: true, chatId: finalChatId };
+            break;
+          }
+        }
+      }
+      return { ok: false, chatId: finalChatId, err: 'El Bot no encontró un chat activo. Envía "hola" o "/start" al Bot en Telegram.' };
+    } catch (e: any) {
+      return { ok: false, chatId: finalChatId, err: e?.message || String(e) };
+    }
+  };
+
+  const targetsToSend: { token: string; chatId: string }[] = [];
+
+  // 1. Bot/Canal específico configurado en el Consultorio/Negocio
+  if (customToken || customChatId) {
+    targetsToSend.push({
+      token: customToken || envToken,
+      chatId: customChatId || envChatId
+    });
+  }
+
+  // 2. Bot Central del .env (siempre recibe copia de respaldo si es distinto al personalizado)
+  if (envToken && (envToken !== customToken || envChatId !== customChatId)) {
+    targetsToSend.push({
+      token: envToken,
+      chatId: envChatId
+    });
+  }
+
+  let anySent = false;
+  let lastChatId = '';
+  let lastErr = '';
+
+  for (const target of targetsToSend) {
+    const res = await dispatchToBot(target.token, target.chatId);
+    if (res.ok) {
+      anySent = true;
+      lastChatId = res.chatId || target.chatId;
+    } else if (res.err) {
+      lastErr = res.err;
+    }
+  }
+
+  return { sent: anySent, chatIdUsed: lastChatId, error: anySent ? undefined : lastErr };
 };
 
 // 🛠️ Helper seguro para parsear JSON que pudo haber quedado doblemente stringificado en BD
@@ -175,8 +287,27 @@ export async function createAppointment(req: Request, res: Response) {
     // Usamos appointmentDate (que viene del front) o scheduledAt por compatibilidad
     const finalDateStr = appointmentDate || req.body.scheduledAt;
 
-    if (!clientEmail || !clientName || !serviceId || !finalDateStr) {
-      return res.status(400).json({ error: 'Faltan campos obligatorios (Email, Nombre, Servicio, Fecha).' });
+    if (!clientEmail || !clientName || !finalDateStr) {
+      return res.status(400).json({ error: 'Faltan campos obligatorios (Email, Nombre, Fecha).' });
+    }
+
+    let resolvedServiceId = serviceId;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(resolvedServiceId || ''));
+    if (!isUuid) {
+      const existingServices = await db.select().from(services).where(eq(services.tenantId, tenantId));
+      if (existingServices.length > 0) {
+        resolvedServiceId = existingServices[0].id;
+      } else {
+        const [createdDefaultSrv] = await db.insert(services).values({
+          tenantId,
+          name: 'Consulta / Servicio General',
+          description: 'Servicio principal del negocio',
+          price: '50.00',
+          durationMinutes: 30,
+          isActive: true
+        } as any).returning();
+        resolvedServiceId = createdDefaultSrv.id;
+      }
     }
 
     const cleanMetadata = safeParseJSON(metadata);
@@ -246,7 +377,7 @@ export async function createAppointment(req: Request, res: Response) {
       tenantId, 
       clientId: user.id, 
       staffId: safeDbStaffId, 
-      serviceId, 
+      serviceId: resolvedServiceId, 
       scheduledAt: parsedDate, 
       status: 'scheduled', 
       staffNotes: notes || 'Sin notas', 
@@ -276,7 +407,7 @@ ${refPhone ? `🤝 <b>Referido por:</b> ${refPhone}
 ` : ''}📅 <a href="${gcalUrl}"><b>+ Agregar a Google Calendar en 1 Clic</b></a>
     `;
     
-    sendTelegramNotification(telegramMsg);
+    await sendTelegramNotification(telegramMsg, tenantId, 'appointment');
 
     return res.status(201).json({ success: true, appointment: apt });
   } catch (error: any) { 
@@ -540,11 +671,19 @@ export async function completeWorkOrder(req: Request, res: Response) {
         
         console.log(`✅ [REFERIDO] Premio guardado para el usuario: ${referrer.name} (Total cupones: ${earned}) por referir a ${client?.name}`);
         
-        sendTelegramNotification(`🎉 <b>¡Referido Exitoso!</b>\nEl usuario ${referrer.name} acaba de ganar +1 punto de fidelidad y 1 CUPÓN DE DESCUENTO (Disponibles: ${earned}) porque su referido (${client?.name}) completó su primera cita.`);
+        sendTelegramNotification(`🎉 <b>¡Referido Exitoso!</b>\nEl usuario ${referrer.name} acaba de ganar +1 punto de fidelidad y 1 CUPÓN DE DESCUENTO (Disponibles: ${earned}) porque su referido (${client?.name}) completó su primera cita.`, tenantId, 'pos');
       } else {
         console.log(`❌ [REFERIDO] No se encontró referidor válido con el número: ${cleanPhone}`);
       }
     }
+
+    sendTelegramNotification(`
+💰 <b>¡SERVICIO COMPLETADO Y FACTURADO (POS)!</b> ✅
+👤 <b>Cliente/Paciente:</b> ${client?.name || 'Cliente'}
+💵 <b>Total Cobrado:</b> $${finalCost ? String(finalCost) : '0.00'}
+📝 <b>Notas / Diagnóstico:</b> ${mechanicNotes || 'Sin observaciones'}
+${nextServiceDate ? `📅 <b>Próximo Control/Visita:</b> ${nextServiceDate}` : ''}
+    `, tenantId, 'pos').catch(() => {});
 
     return res.status(200).json({ 
       success: true, 
@@ -704,7 +843,7 @@ export async function createPushCampaign(req: Request, res: Response) {
     const rows = Array.isArray(result) ? result : (result as any).rows || [];
     const created = rows[0];
 
-    sendTelegramNotification(`📢 <b>¡CAMPAÑA PUSH ENVIADA!</b>\n🎯 <b>Audiencia:</b> ${target_audience}\n📌 <b>Título:</b> ${title}\n💬 <b>Mensaje:</b> ${message}`);
+    await sendTelegramNotification(`📢 <b>¡CAMPAÑA PUSH ENVIADA!</b>\n🎯 <b>Audiencia:</b> ${target_audience}\n📌 <b>Título:</b> ${title}\n💬 <b>Mensaje:</b> ${message}`, tenantId, 'campaign');
 
     return res.status(201).json({ success: true, campaign: created });
   } catch (error: any) {
@@ -799,20 +938,27 @@ export async function cancelAppointment(req: Request, res: Response) {
     const cancelReason = reason ? String(reason).trim() : 'Sin motivo especificado';
     const whoCancelled = cancelledBy === 'client' ? 'Cliente (desde Expediente)' : 'Personal del Negocio (Portal Interno)';
 
-    // 1. Marcar como 'cancelled' en PostgreSQL (libera automáticamente el turno y la silla del profesional)
-    const [cancelledApt] = await db.update(appointments)
-      .set({
-        status: 'cancelled',
-        staffNotes: `❌ CANCELADA (${whoCancelled}): ${cancelReason}`,
-        mediaAndReports: {
-          ...existingMeta,
-          cancelledAt: new Date().toISOString(),
-          cancelledBy: cancelledBy || 'staff',
-          cancelReason
-        }
-      })
-      .where(eq(appointments.id, appointmentId))
-      .returning();
+    // 1. Marcar como 'cancelled' en PostgreSQL (con fallback seguro si el enum de status no tiene 'cancelled')
+    let cancelledApt: any = null;
+    try {
+      const [updated] = await db.update(appointments)
+        .set({
+          status: 'cancelled',
+          staffNotes: `❌ CANCELADA (${whoCancelled}): ${cancelReason}`,
+          mediaAndReports: {
+            ...existingMeta,
+            cancelledAt: new Date().toISOString(),
+            cancelledBy: cancelledBy || 'staff',
+            cancelReason
+          }
+        })
+        .where(eq(appointments.id, appointmentId))
+        .returning();
+      cancelledApt = updated;
+    } catch (enumErr) {
+      await db.delete(appointments).where(eq(appointments.id, appointmentId));
+      cancelledApt = { ...currentApt, status: 'cancelled' };
+    }
 
     const finalClientName = client?.name || clientName || 'Cliente';
     const finalClientPhone = client?.phone || clientPhone || 'N/A';
@@ -830,7 +976,7 @@ export async function cancelAppointment(req: Request, res: Response) {
 📝 <b>Motivo:</b> ${cancelReason}
 ✅ <i>El horario ya quedó disponible nuevamente en la agenda.</i>
     `;
-    sendTelegramNotification(telegramMsg);
+    await sendTelegramNotification(telegramMsg, tenantId, 'status');
 
     // 3. Disparar Notificación Push vía Expo a los dispositivos registrados en public.user_devices
     try {
@@ -927,7 +1073,7 @@ export async function confirmAppointment(req: Request, res: Response) {
 🛠️ <b>Servicio:</b> ${finalServiceName}
 🔒 <i>El cliente confirmó su asistencia (Política 6h/3h). Turno 100% asegurado.</i>
     `;
-    sendTelegramNotification(telegramMsg);
+    await sendTelegramNotification(telegramMsg, tenantId, 'status');
 
     // 2. Enviar Notificación Push vía Expo a los dispositivos del negocio
     try {
@@ -1016,7 +1162,7 @@ export async function sendAppointmentReminder(req: Request, res: Response) {
 🛠️ <b>Servicio:</b> ${finalServiceName}
 📲 <i>Se solicitó al cliente confirmar su asistencia en Expediente o cancelar con mínimo 3 horas de anticipación para no perder el espacio.</i>
     `;
-    sendTelegramNotification(telegramMsg);
+    await sendTelegramNotification(telegramMsg, tenantId, 'status');
 
     // Enviar Push a dispositivos activos
     try {
@@ -1349,8 +1495,9 @@ const resolveValidTenantIdForWebhook = async (candidateTenantId?: string | null,
 
 // =========================================================================
 // ⚡ AUTOCONFIGURADOR 1-CLIC DE RECEPCIONISTA IA EN VAPI.AI (MODELO BYOK)
-// - Pide Nombre, Correo, Motivo y Fecha/Hora en lenguaje 100% natural (PROHIBIDO pedir formato especial)
-// - Envía notificación de activación del Agente Virtual a Telegram y al navegador
+// - Payload 100% compatible con Vapi (sin propiedades rechazadas por DTO)
+// - Pide Nombre, Correo, Motivo y Día/Hora en lenguaje natural (sin contraparte ni formatos especiales)
+// - Envía notificación de activación a todos los Bots de Telegram configurados
 // =========================================================================
 export async function configureTenantVapiAssistant(req: Request, res: Response) {
   try {
@@ -1370,20 +1517,6 @@ export async function configureTenantVapiAssistant(req: Request, res: Response) 
     const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
     if (!tenant) return res.status(404).json({ success: false, message: 'Negocio no encontrado.' });
 
-    // 🧹 Limpieza automática en BD de citas duplicadas previas
-    try {
-      await db.execute(sql`
-        DELETE FROM public.appointments
-        WHERE tenant_id = ${tenantId}::uuid
-          AND id NOT IN (
-            SELECT MIN(id::text)::uuid
-            FROM public.appointments
-            WHERE tenant_id = ${tenantId}::uuid
-            GROUP BY client_id, scheduled_at
-          )
-      `);
-    } catch (cleanErr) {}
-
     const currentNiche = String(niche || (tenant as any).niche || 'automotive').toLowerCase();
     const bizTitle = businessName || tenant.name || 'AutoFlow';
     const staffSummary = Array.isArray(staffListInput) && staffListInput.length > 0
@@ -1395,29 +1528,28 @@ export async function configureTenantVapiAssistant(req: Request, res: Response) 
 
     const calendarCheatSheet = buildNaturalCalendarReferenceForPrompt();
 
-    // 🌟 PROTOCOLO CONVERSACIONAL HUMANO: SIN CONTRAPARTE, PIDE CORREO Y HABLA DE FECHAS DE FORMA NATURAL
     const roleInstruction = currentNiche === 'legal'
-      ? `Eres la recepcionista legal bilingüe (Español e Inglés) del bufete de abogados "${bizTitle}". Conversa de forma cálida, breve y humana. Pregunta: 1) Nombre y apellido del cliente, 2) Correo electrónico para enviarle la notificación de su cita, 3) Área o motivo de su consulta (Inmigración, Familia, Laboral, Civil, Penal o Contratos), y 4) Qué día y a qué hora le gustaría su cita y si la prefiere Presencial, por Llamada Telefónica o Videollamada.`
+      ? `Eres la recepcionista legal bilingüe (Español e Inglés) del bufete de abogados "${bizTitle}". Conversa de forma cálida, breve y humana. Pregunta: 1) Nombre y apellido del cliente, 2) Correo electrónico para enviarle la confirmación de su cita, 3) Área o motivo de su consulta (Inmigración, Familia, Laboral, Civil, Penal o Contratos), y 4) Qué día y a qué hora le gustaría su cita y si la prefiere Presencial, por Llamada Telefónica o Videollamada.`
       : currentNiche === 'dental'
         ? `Eres la recepcionista virtual bilingüe (Español e Inglés) de la clínica odontológica "${bizTitle}". Conversa de forma cálida y humana. Pregunta: 1) Nombre y apellido del paciente, 2) Correo electrónico para enviarle la confirmación, 3) Motivo de su consulta (Limpieza, Dolor o Urgencia dental, Ortodoncia, Implantes o Valoración), y 4) Qué día y a qué hora le queda bien.`
         : `Eres la recepcionista virtual bilingüe (Español e Inglés) de "${bizTitle}". Conversa de forma cálida y humana. Pregunta: 1) Nombre y apellido del cliente, 2) Correo electrónico para enviarle la confirmación, 3) Servicio que desea, y 4) Qué día y a qué hora le gustaría venir.`;
 
     const systemPrompt = `${roleInstruction}
 
-CALENDARIO DE REFERENCIA AUTOMÁTICO (Usa esta guía para saber qué fecha es cada día):
+CALENDARIO DE REFERENCIA AUTOMÁTICO (Usa esta guía para traducir días hablados a fecha):
 ${calendarCheatSheet}
 
 Profesionales activos en el equipo: ${staffSummary}.
 Catálogo de servicios y tarifas: ${servicesSummary}.
+Horario de atención: Lunes a Sábado de 9:00 AM a 5:00 PM.
 
-REGLAS DE ORO DE CONVERSACIÓN NATURAL:
+REGLAS DE CONVERSACIÓN NATURAL:
 1. PROHIBIDO pedirle al cliente que diga la fecha o la hora en un formato especial. NUNCA menciones palabras como "formato año-mes-día", "YYYY-MM-DD", "formato de 24 horas" ni "HH:mm".
-2. Deja que el cliente diga el día y la hora con sus propias palabras (por ejemplo: "mañana a las 2 de la tarde", "el viernes a las 10 de la mañana", "el 15 de noviembre a las 4"). Tú conviertes eso silenciosamente por dentro usando el Calendario de Referencia.
-3. NO preguntes por nombre de contraparte ni datos largos.
+2. Deja que el cliente diga el día y la hora con sus propias palabras (por ejemplo: "mañana a las 2 de la tarde", "el viernes a las 10 de la mañana", "el 19 de noviembre a las 4"). Tú lo conviertes silenciosamente usando el Calendario de Referencia.
+3. NO preguntes por nombre de contraparte ni datos innecesarios.
 4. Si el cliente habla en inglés, respóndele en inglés fluido. Si habla en español, respóndele en español.
-5. Apenas el cliente te confirme su nombre, correo, día y hora, invoca la herramienta "book_appointment" UNA SOLA VEZ y confírmale verbalmente que su cita ya quedó agendada.`;
+5. Apenas el cliente te confirme su nombre, correo electrónico, motivo/servicio, día y hora, invoca INMEDIATAMENTE la función "book_appointment" UNA SOLA VEZ para guardar la cita en la base de datos.`;
 
-    // Permitir URL personalizada desde la pantalla o desde el archivo .env
     const rawWebhookBase = String(
       vapiConfig?.webhookBaseUrl?.trim() ||
       process.env.PUBLIC_API_URL ||
@@ -1428,73 +1560,75 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
     if (rawWebhookBase.includes('xxxx')) {
       return res.status(400).json({
         success: false,
-        message: '⚠️ Tu URL de túnel todavía dice "https://xxxx.lhr.life". Pega la URL real de tu terminal (ej. https://b5b46f7862d679.lhr.life) en la casilla "URL Pública del Túnel HTTPS" o en tu archivo apps/api/.env.'
+        message: '⚠️ Tu URL de túnel todavía dice "https://xxxx.lhr.life". Pega la URL real de tu terminal (ej. https://6aeb640668651b.lhr.life) en la casilla "URL Pública del Túnel HTTPS".'
       });
     }
 
     const webhookUrl = `${rawWebhookBase}/api/vapi/webhook?tenantId=${tenantId}`;
     const isHttpsWebhook = webhookUrl.startsWith('https://');
 
-    let remoteAssistantId = vapiConfig?.assistantId || '';
+    if (!isHttpsWebhook) {
+      return res.status(400).json({
+        success: false,
+        message: `⚠️ Vapi requiere una URL pública con HTTPS para agendar citas y tu URL actual es "${rawWebhookBase}". Pega tu link https://....lhr.life en la casilla "URL Pública del Túnel HTTPS".`
+      });
+    }
+
+    const oldAssistantId = vapiConfig?.assistantId || '';
+    let remoteAssistantId = '';
     let detectedPhoneNumber = vapiConfig?.phoneNumber?.trim() || '';
     let detectedPhoneNumberId = vapiConfig?.phoneNumberId || '';
-    let vapiApiMessage = '✅ Configuración guardada localmente.';
+    let vapiApiMessage = '✅ Configuración guardada.';
 
     if (apiKeyClean.length >= 10) {
-      const toolsArray = isHttpsWebhook
-        ? [
-            {
-              type: 'function',
-              function: {
-                name: 'check_availability',
-                description: 'Consulta los horarios disponibles para un día determinado.',
-                parameters: {
-                  type: 'object',
-                  properties: {
-                    date: { type: 'string', description: 'Día o fecha solicitada por el cliente (ej. mañana, viernes, o 2026-11-13)' }
-                  },
-                  required: ['date']
-                }
+      const toolsArray = [
+        {
+          type: 'function',
+          function: {
+            name: 'check_availability',
+            description: 'Consulta los horarios disponibles para una fecha o día.',
+            parameters: {
+              type: 'object',
+              properties: {
+                date: { type: 'string', description: 'Fecha en YYYY-MM-DD o día solicitado' }
               },
-              server: { url: webhookUrl }
-            },
-            {
-              type: 'function',
-              function: {
-                name: 'book_appointment',
-                description: 'Registra la cita del cliente en el calendario y envía la notificación a Telegram.',
-                parameters: {
-                  type: 'object',
-                  properties: {
-                    clientName: { type: 'string', description: 'Nombre y apellido del cliente' },
-                    clientEmail: { type: 'string', description: 'Correo electrónico del cliente' },
-                    clientPhone: { type: 'string', description: 'Teléfono del cliente (opcional)' },
-                    appointmentDate: { type: 'string', description: 'Fecha acordada (ej. 2026-11-13 o mañana o viernes)' },
-                    appointmentTime: { type: 'string', description: 'Hora acordada (ej. 14:00 o 2:00 PM)' },
-                    serviceName: { type: 'string', description: 'Nombre del servicio o consulta' },
-                    staffName: { type: 'string', description: 'Nombre del profesional asignado' },
-                    modality: { type: 'string', enum: ['in_person', 'phone_call', 'video_call'] },
-                    caseType: { type: 'string', description: 'Motivo breve de la consulta' },
-                    language: { type: 'string', enum: ['es', 'en'] }
-                  },
-                  required: ['clientName', 'appointmentDate', 'appointmentTime']
-                }
-              },
-              server: { url: webhookUrl }
+              required: ['date']
             }
-          ]
-        : undefined;
+          },
+          server: { url: webhookUrl }
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'book_appointment',
+            description: 'Guarda la cita del cliente en la base de datos y envía la notificación a Telegram.',
+            parameters: {
+              type: 'object',
+              properties: {
+                clientName: { type: 'string', description: 'Nombre y apellido real del cliente' },
+                clientEmail: { type: 'string', description: 'Correo electrónico del cliente' },
+                clientPhone: { type: 'string', description: 'Teléfono del cliente (opcional)' },
+                appointmentDate: { type: 'string', description: 'Fecha acordada en YYYY-MM-DD o día hablado (ej. mañana, viernes)' },
+                appointmentTime: { type: 'string', description: 'Hora acordada en HH:mm 24h (ej. 14:00) o hablada (ej. 2:00 PM)' },
+                serviceName: { type: 'string', description: 'Nombre del servicio o tipo de consulta' },
+                staffName: { type: 'string', description: 'Nombre del profesional asignado' },
+                modality: { type: 'string', description: 'in_person, phone_call o video_call' },
+                caseType: { type: 'string', description: 'Motivo breve de la consulta o área del caso' },
+                language: { type: 'string', description: 'es o en' }
+              },
+              required: ['clientName', 'appointmentDate', 'appointmentTime']
+            }
+          },
+          server: { url: webhookUrl }
+        }
+      ];
 
+      // Payload limpio con las propiedades exactas soportadas por Vapi DTO
       const vapiPayload: any = {
         name: `AutoFlow - ${bizTitle}`.slice(0, 40),
-        metadata: {
-          tenantId,
-          businessName: bizTitle,
-          niche: currentNiche
-        },
         firstMessage: vapiConfig?.languageMode === 'en'
-          ? `Hello! Thank you for calling ${bizTitle}. Who do I have the pleasure of speaking with, and how can I help you today?`
-          : `¡Hola! Gracias por llamar a ${bizTitle}. ¿Con quién tengo el gusto de hablar y en qué te puedo colaborar hoy?`,
+          ? `Hello! Thank you for calling ${bizTitle}. Who do I have the pleasure of speaking with, and how can I help you schedule your appointment today?`
+          : `¡Hola! Gracias por comunicarte con ${bizTitle}. ¿Con quién tengo el gusto de hablar y en qué te puedo colaborar hoy con tu cita?`,
         transcriber: {
           provider: 'deepgram',
           model: 'nova-2',
@@ -1504,61 +1638,26 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
           provider: 'openai',
           model: 'gpt-4o-mini',
           messages: [{ role: 'system', content: systemPrompt }],
-          ...(toolsArray ? { tools: toolsArray } : {})
+          tools: toolsArray
         },
         serverMessages: ['tool-calls', 'function-call', 'end-of-call-report'],
         artifactPlan: {
           recordingEnabled: true,
           transcriptPlan: { enabled: true }
         },
-        analysisPlan: {
-          structuredDataPlan: {
-            enabled: true,
-            schema: {
-              type: 'object',
-              properties: {
-                clientName: { type: 'string', description: 'Nombre completo del cliente que llamó' },
-                clientEmail: { type: 'string', description: 'Correo electrónico del cliente' },
-                clientPhone: { type: 'string', description: 'Teléfono mencionado por el cliente' },
-                appointmentDate: { type: 'string', description: 'Fecha o día acordado para la cita' },
-                appointmentTime: { type: 'string', description: 'Hora acordada para la cita' },
-                serviceName: { type: 'string', description: 'Servicio o consulta solicitada' },
-                modality: { type: 'string', description: 'in_person, phone_call o video_call' },
-                caseType: { type: 'string', description: 'Motivo de la consulta' },
-                appointmentConfirmed: { type: 'boolean', description: 'true si el cliente pidió o acordó agendar cita' }
-              }
-            }
-          }
-        },
-        ...(isHttpsWebhook ? { serverUrl: webhookUrl } : {}),
+        serverUrl: webhookUrl,
         ...(vapiConfig?.transferPhone?.trim() ? { forwardingPhoneNumber: vapiConfig.transferPhone.trim() } : {})
       };
 
-      // PASO A: Crear o actualizar el Agente (Assistant) en Vapi
-      let vapiRes = await fetch(
-        remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-')
-          ? `https://api.vapi.ai/assistant/${remoteAssistantId}`
-          : 'https://api.vapi.ai/assistant',
-        {
-          method: remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-') ? 'PATCH' : 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKeyClean}`
-          },
-          body: JSON.stringify(vapiPayload)
-        }
-      );
-
-      if (vapiRes.status === 404) {
-        vapiRes = await fetch('https://api.vapi.ai/assistant', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKeyClean}`
-          },
-          body: JSON.stringify(vapiPayload)
-        });
-      }
+      // PASO A: Crear un Agente NUEVO en Vapi para garantizar que el webhookUrl nuevo quede activo sin caché viejo
+      let vapiRes = await fetch('https://api.vapi.ai/assistant', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKeyClean}`
+        },
+        body: JSON.stringify(vapiPayload)
+      });
 
       if (vapiRes.status === 401 || vapiRes.status === 403) {
         return res.status(400).json({
@@ -1567,18 +1666,28 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
         });
       }
 
-      if (vapiRes.ok) {
-        const vapiData = await vapiRes.json();
-        if (vapiData?.id) {
-          remoteAssistantId = vapiData.id;
-        }
-      } else {
+      if (!vapiRes.ok) {
         const errTxt = await vapiRes.text();
-        console.warn('⚠️ Respuesta de Vapi creando asistente:', errTxt);
+        console.error('❌ Error de Vapi creando asistente:', errTxt);
+        return res.status(400).json({
+          success: false,
+          message: `⚠️ Vapi rechazó la configuración (${vapiRes.status}): ${errTxt}`
+        });
       }
 
-      // PASO B: Vincular el Número de Teléfono en Vapi con el Agente actualizado
-      if (remoteAssistantId && !remoteAssistantId.startsWith('vapi-ast-')) {
+      const vapiData = await vapiRes.json();
+      remoteAssistantId = vapiData.id;
+
+      // Eliminar el asistente anterior en segundo plano para no acumular agentes viejos en Vapi
+      if (oldAssistantId && !oldAssistantId.startsWith('vapi-ast-') && oldAssistantId !== remoteAssistantId) {
+        fetch(`https://api.vapi.ai/assistant/${oldAssistantId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${apiKeyClean}` }
+        }).catch(() => {});
+      }
+
+      // PASO B: Vincular el Número de Teléfono en Vapi con el Nuevo Agente creado
+      if (remoteAssistantId) {
         try {
           const phonesRes = await fetch('https://api.vapi.ai/phone-number', {
             method: 'GET',
@@ -1597,7 +1706,7 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
                 detectedPhoneNumberId = matchedPhone.id;
                 detectedPhoneNumber = matchedPhone.number || detectedPhoneNumber;
 
-                await fetch(`https://api.vapi.ai/phone-number/${matchedPhone.id}`, {
+                const phonePatchRes = await fetch(`https://api.vapi.ai/phone-number/${matchedPhone.id}`, {
                   method: 'PATCH',
                   headers: {
                     'Content-Type': 'application/json',
@@ -1605,15 +1714,15 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
                   },
                   body: JSON.stringify({
                     assistantId: remoteAssistantId,
-                    serverUrl: isHttpsWebhook ? webhookUrl : undefined,
+                    serverUrl: webhookUrl,
                     name: `Línea AutoFlow - ${bizTitle}`.slice(0, 40)
                   })
                 });
+                if (!phonePatchRes.ok) {
+                  console.warn('⚠️ Aviso PATCH phone-number Vapi:', await phonePatchRes.text());
+                }
 
-                vapiApiMessage = `🤖 ¡Agente Virtual IA Activado con Éxito!
-📞 Línea enlazada: ${detectedPhoneNumber}
-🌐 Webhook activo: ${rawWebhookBase}
-✨ Fecha y hora en lenguaje 100% natural.`;
+                vapiApiMessage = `🤖 ¡Agente Virtual IA Activado con Éxito!\n🆔 Nuevo ID: ${remoteAssistantId}\n📞 Línea enlazada: ${detectedPhoneNumber}\n🌐 Webhook activo: ${rawWebhookBase}`;
               }
             }
           }
@@ -1621,6 +1730,48 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
           console.warn('⚠️ Aviso vinculando número en Vapi:', phoneErr);
         }
       }
+    }
+
+    // 🩺 AUTO-VERIFICACIÓN EN VIVO DEL TÚNEL HTTPS (Compruebe que internet llega hasta este backend)
+    let tunnelVerified = false;
+    let tunnelPingError = '';
+    try {
+      const pingController = new AbortController();
+      const pingTimeout = setTimeout(() => pingController.abort(), 6000);
+      const pingRes = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ healthcheck: true, tenantId }),
+        signal: pingController.signal
+      });
+      clearTimeout(pingTimeout);
+      if (pingRes.ok) {
+        const pingJson = await pingRes.json().catch(() => ({}));
+        if (pingJson?.ok) {
+          tunnelVerified = true;
+        } else {
+          tunnelPingError = `Respuesta inesperada del túnel (HTTP ${pingRes.status})`;
+        }
+      } else {
+        tunnelPingError = `El túnel devolvió HTTP ${pingRes.status} (verifica que localhost.run siga abierto en tu terminal)`;
+      }
+    } catch (pingErr: any) {
+      tunnelPingError = pingErr?.message || 'No se pudo conectar al túnel HTTPS desde internet';
+    }
+
+    if (!tunnelVerified) {
+      await sendTelegramNotification(`
+🚨 <b>¡ALERTA DE CONEXIÓN EN RECEPCIÓN IA!</b> 🚨
+🏢 <b>Negocio:</b> ${bizTitle}
+🌐 <b>Túnel probado:</b> ${rawWebhookBase}
+❌ <b>Problema detectado:</b> ${tunnelPingError}
+💡 <i>Vapi creó el agente (${remoteAssistantId}), pero el túnel HTTPS no respondió a la prueba de conexión. Verifica tu terminal de localhost.run.</i>
+      `, tenantId, 'system');
+
+      return res.status(400).json({
+        success: false,
+        message: `⚠️ El Agente se creó en Vapi (${remoteAssistantId}), pero tu túnel HTTPS (${rawWebhookBase}) NO respondió a la prueba de conexión (${tunnelPingError}). Revisa que el túnel esté activo en tu terminal y vuelve a pulsar el botón.`
+      });
     }
 
     const existingLoyalty = safeParseJSON((tenant as any).loyaltyConfig);
@@ -1631,7 +1782,7 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
       phoneNumberId: detectedPhoneNumberId,
       privateApiKey: apiKeyClean,
       isActive: true,
-      assistantId: remoteAssistantId || vapiConfig?.assistantId || `vapi-ast-${tenantId.slice(0, 8)}`,
+      assistantId: remoteAssistantId || `vapi-ast-${tenantId.slice(0, 8)}`,
       lastSyncedAt: new Date().toISOString()
     };
 
@@ -1645,15 +1796,15 @@ REGLAS DE ORO DE CONVERSACIÓN NATURAL:
       .where(eq(tenants.id, tenantId));
 
     // 🔔 DISPARAR SIEMPRE LA NOTIFICACIÓN DE ACTIVACIÓN DEL AGENTE VIRTUAL A TELEGRAM
-    sendTelegramNotification(`
+    await sendTelegramNotification(`
 🤖 <b>¡AGENTE VIRTUAL IA ACTIVADO Y SINCRONIZADO!</b> 🚀
 🏢 <b>Negocio:</b> ${bizTitle}
 📞 <b>Línea IA:</b> ${updatedVapiConfig.phoneNumber}
 🆔 <b>Agente Vapi ID:</b> ${updatedVapiConfig.assistantId}
 🌐 <b>Túnel / Webhook:</b> ${rawWebhookBase}
 🌎 <b>Idioma:</b> ${String(updatedVapiConfig.languageMode || 'bilingual').toUpperCase()}
-✅ <i>Conversación 100% natural activada (Nombre, Correo, Motivo y Día/Hora sin pedir formatos especiales).</i>
-    `);
+✅ <i>Conversación 100% natural activada y apuntando al túnel actual.</i>
+    `, tenantId, 'system');
 
     return res.status(200).json({
       success: true,
@@ -1745,14 +1896,26 @@ const upsertVoiceClientAndAppointment = async (params: {
   const finalClientPhone = resolveValidVoicePhone(callerIdPhone, spokenPhone, targetUser?.phone);
 
   if (!targetUser) {
-    const [insertedUser] = await db.insert(users).values({
-      tenantId,
-      name: finalClientName,
-      email: normalizedEmail,
-      phone: finalClientPhone,
-      role: 'client'
-    }).returning();
-    targetUser = insertedUser;
+    try {
+      const [insertedUser] = await db.insert(users).values({
+        tenantId,
+        name: finalClientName,
+        email: normalizedEmail,
+        phone: finalClientPhone,
+        role: 'client'
+      }).returning();
+      targetUser = insertedUser;
+    } catch (userInsertErr) {
+      // Si hubo colisión concurrente por índice único (tenantId, email), recuperamos el usuario existente
+      const [retryUser] = await db.select().from(users).where(
+        and(eq(users.tenantId, tenantId), eq(users.email, normalizedEmail))
+      );
+      if (retryUser) {
+        targetUser = retryUser;
+      } else {
+        throw userInsertErr;
+      }
+    }
   } else {
     let emailToUpdate = targetUser.email;
     if (isRealEmail && normalizedEmail !== targetUser.email) {
@@ -1780,7 +1943,10 @@ const upsertVoiceClientAndAppointment = async (params: {
   if (resolvedServiceId) {
     const foundSrv = tenantServices.find((s) => s.id === resolvedServiceId);
     if (foundSrv) resolvedServiceName = foundSrv.name;
-  } else if (tenantServices.length > 0) {
+    else resolvedServiceId = '';
+  }
+
+  if (!resolvedServiceId && tenantServices.length > 0) {
     const searchTerm = String(serviceName || rawCaseType || '').toLowerCase().trim();
     const matchedByName = (searchTerm
       ? tenantServices.find((s) => s.name.toLowerCase().includes(searchTerm) || searchTerm.includes(s.name.toLowerCase()))
@@ -1794,7 +1960,7 @@ const upsertVoiceClientAndAppointment = async (params: {
       tenantId,
       name: resolvedServiceName,
       description: 'Consulta agendada por Recepcionista IA',
-      price: '0.00',
+      price: '50.00',
       durationMinutes: 30,
       isActive: true
     } as any).returning();
@@ -1802,9 +1968,14 @@ const upsertVoiceClientAndAppointment = async (params: {
   }
 
   // 6. Normalizar Fecha y Hora (Acepta "mañana", "viernes", "2 de la tarde", etc.)
-  const datePart = normalizeVoiceDate(rawDate);
-  const timePart = normalizeVoiceTime(rawTime);
-  const parsedDate = parseWallClockAppointmentDate(`${datePart}T${timePart}:00.000Z`, datePart, timePart);
+  let datePart = normalizeVoiceDate(rawDate);
+  let timePart = normalizeVoiceTime(rawTime);
+  let parsedDate = parseWallClockAppointmentDate(`${datePart}T${timePart}:00.000Z`, datePart, timePart);
+  if (isNaN(parsedDate.getTime())) {
+    datePart = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    timePart = '14:00';
+    parsedDate = new Date(`${datePart}T${timePart}:00.000Z`);
+  }
   const safeDbStaffId = await resolveSafeUserStaffId(staffId);
 
   const cleanModality = String(rawModality || '').toLowerCase();
@@ -1820,14 +1991,14 @@ const upsertVoiceClientAndAppointment = async (params: {
     rawCallSummary ||
     `Cita agendada por Recepcionista IA (${callLanguage.toUpperCase()})${caseType ? ` — Motivo: ${caseType}` : ''}`;
 
-  // 7. Evitar duplicados (por callId o por mismo cliente + misma fecha/hora)
-  const clientApts = await db.select().from(appointments).where(
+  // 7. Evitar duplicados filtrando en memoria para no chocar con enums de status en PostgreSQL
+  const rawClientApts = await db.select().from(appointments).where(
     and(
       eq(appointments.tenantId, tenantId),
-      eq(appointments.clientId, targetUser.id),
-      ne(appointments.status, 'cancelled')
+      eq(appointments.clientId, targetUser.id)
     )
   );
+  const clientApts = rawClientApts.filter((a) => a.status !== 'cancelled');
 
   const existingSameApt = clientApts.find((a) => {
     const m = safeParseJSON(a.mediaAndReports);
@@ -1846,6 +2017,7 @@ const upsertVoiceClientAndAppointment = async (params: {
     modality,
     caseType,
     callSummary,
+    attendanceConfirmed: true,
     recordingUrl: recordingUrl || undefined,
     callTranscript: callTranscript || undefined,
     assignedStaffId: staffId || null,
@@ -1865,14 +2037,14 @@ const upsertVoiceClientAndAppointment = async (params: {
       .returning();
     apt = updatedApt;
   } else {
-    // IMPORTANTE: No enviamos columnas opcionales que puedan no estar compiladas en @taller/database (todo viaja seguro en mediaAndReports)
+    // Usamos status: 'scheduled' (idéntico a createAppointment) para garantizar compatibilidad con el ENUM de PostgreSQL
     const [insertedApt] = await db.insert(appointments).values({
       tenantId,
       clientId: targetUser.id,
       staffId: safeDbStaffId,
       serviceId: resolvedServiceId,
       scheduledAt: parsedDate,
-      status: 'confirmed',
+      status: 'scheduled',
       staffNotes: callSummary,
       mediaAndReports: mediaPayload,
       estimatedCost: '0.00',
@@ -1908,8 +2080,7 @@ const upsertVoiceClientAndAppointment = async (params: {
 ${caseType ? `📌 <b>Motivo:</b> ${caseType}\n` : ''}💬 <b>Resumen IA:</b> <i>"${callSummary}"</i>
 📅 <a href="${gcalLink}"><b>+ Agregar a Google Calendar en 1 Clic</b></a>
     `;
-    // No bloqueamos la respuesta HTTP a Vapi mientras sale el mensaje a Telegram
-    sendTelegramNotification(telegramMsg).catch(() => {});
+    await sendTelegramNotification(telegramMsg, tenantId, 'appointment');
   }
 
   return {
@@ -1924,15 +2095,24 @@ ${caseType ? `📌 <b>Motivo:</b> ${caseType}\n` : ''}💬 <b>Resumen IA:</b> <i
 };
 
 // =========================================================================
-// 📞 WEBHOOK BILINGÜE (ES/EN) DE VAPI.AI + RESPALDO AUTOMÁTICO AL COLGAR
+// 📞 WEBHOOK BILINGÜE (ES/EN) DE VAPI.AI + LOGS EN TERMINAL
 // =========================================================================
 export async function handleVapiVoiceWebhook(req: Request, res: Response) {
+  let resolvedTenantIdForAlert: string | null = null;
   try {
     const body = req.body || {};
+
+    // Respuesta inmediata para auto-verificación de conectividad del túnel
+    if (body.healthcheck === true) {
+      return res.status(200).json({ ok: true, reachable: true, timestamp: new Date().toISOString() });
+    }
+
     const isFromVapiServer = Boolean(body.message);
     const vapiMessage = body.message || {};
     const messageType = String(vapiMessage.type || (body.simulated ? 'direct_voice_booking' : ''));
     const callId = String(vapiMessage.call?.id || body.callId || '');
+
+    console.log(`📞 [VAPI WEBHOOK] Evento recibido: "${messageType}" | CallID: ${callId}`);
 
     const rawCandidateTenantId =
       (req.query.tenantId as string) ||
@@ -1942,6 +2122,7 @@ export async function handleVapiVoiceWebhook(req: Request, res: Response) {
       null;
     const incomingAssistantId = vapiMessage.call?.assistantId || vapiMessage.assistant?.id || null;
     const tenantId = await resolveValidTenantIdForWebhook(rawCandidateTenantId, incomingAssistantId);
+    resolvedTenantIdForAlert = tenantId;
 
     const callerIdNumber =
       vapiMessage.call?.customer?.number ||
@@ -1999,28 +2180,6 @@ export async function handleVapiVoiceWebhook(req: Request, res: Response) {
           const [foundCli] = await db.select().from(users).where(eq(users.id, existingApt.clientId));
           matchedClient = foundCli;
         }
-        if (matchedClient) {
-          const updatedName = formatVoiceAiClientName(structured?.clientName, matchedClient.name);
-          const updatedPhone = resolveValidVoicePhone(callerIdNumber, structured?.clientPhone, matchedClient.phone);
-          const { email: extractedEmail, isReal: hasRealEmail } = normalizeSpokenEmail(structured?.clientEmail, cleanCaller10);
-
-          let emailToSave = matchedClient.email;
-          if (hasRealEmail && extractedEmail !== matchedClient.email) {
-            const [conflictEmail] = await db.select().from(users).where(
-              and(eq(users.tenantId, tenantId), eq(users.email, extractedEmail))
-            );
-            if (!conflictEmail || conflictEmail.id === matchedClient.id) {
-              emailToSave = extractedEmail;
-            }
-          }
-
-          const [savedCli] = await db.update(users)
-            .set({ name: updatedName, phone: updatedPhone, email: emailToSave })
-            .where(eq(users.id, matchedClient.id))
-            .returning();
-          matchedClient = savedCli;
-        }
-
         const meta = safeParseJSON(existingApt.mediaAndReports);
         await db.update(appointments)
           .set({
@@ -2028,42 +2187,33 @@ export async function handleVapiVoiceWebhook(req: Request, res: Response) {
             mediaAndReports: {
               ...meta,
               vapiCallId: callId || meta.vapiCallId,
-              clientPhone: matchedClient?.phone || meta.clientPhone,
-              clientEmail: matchedClient?.email || meta.clientEmail,
               recordingUrl: recordingUrl || meta.recordingUrl,
               callSummary: summary || meta.callSummary,
               callTranscript: transcript || meta.callTranscript
             }
           })
           .where(eq(appointments.id, existingApt.id));
-      } else if (
-        structured?.appointmentConfirmed ||
-        structured?.appointmentDate ||
-        structured?.appointmentTime ||
-        structured?.clientName
-      ) {
-        const fallbackResult = await upsertVoiceClientAndAppointment({
-          tenantId,
-          rawClientName: structured?.clientName,
-          rawClientEmail: structured?.clientEmail,
-          callerIdPhone: callerIdNumber,
-          spokenPhone: structured?.clientPhone,
-          rawDate: structured?.appointmentDate,
-          rawTime: structured?.appointmentTime,
-          serviceName: structured?.serviceName,
-          modality: structured?.modality,
-          caseType: structured?.caseType,
-          callSummary: summary || undefined,
-          recordingUrl,
-          callTranscript: transcript,
-          callId,
-          sendTelegram: true
-        });
-        existingApt = fallbackResult.apt;
-        matchedClient = fallbackResult.user;
       }
 
-      if (recordingUrl || summary) {
+      const lowerTranscript = `${summary} ${transcript}`.toLowerCase();
+      const hadTechnicalProblemInCall =
+        !existingApt &&
+        (lowerTranscript.includes('problema técnico') ||
+          lowerTranscript.includes('problema tecnico') ||
+          lowerTranscript.includes('technical problem') ||
+          lowerTranscript.includes('no pude agendar') ||
+          lowerTranscript.includes('error'));
+
+      if (hadTechnicalProblemInCall) {
+        const displayPhone = resolveValidVoicePhone(callerIdNumber, structured?.clientPhone);
+        await sendTelegramNotification(`
+🚨 <b>¡ALERTA: PROBLEMA TÉCNICO EN LLAMADA DE VOZ IA!</b> 🚨
+📞 <b>Teléfono del llamante:</b> ${displayPhone}
+🆔 <b>Call ID:</b> ${callId || 'N/A'}
+⚠️ <b>Estado:</b> La llamada terminó sin registrar la cita en la base de datos.
+${summary ? `📝 <b>Resumen de la conversación:</b> <i>"${summary}"</i>\n` : ''}${transcript ? `💬 <b>Transcripción:</b> <i>"${String(transcript).slice(0, 400)}"</i>\n` : ''}${recordingUrl ? `🎧 <a href="${recordingUrl}"><b>▶️ Escuchar Audio de la Llamada</b></a>` : ''}
+        `, tenantId, 'system');
+      } else if (recordingUrl || summary) {
         const displayPhone = matchedClient?.phone || resolveValidVoicePhone(callerIdNumber, structured?.clientPhone);
         const displayName = matchedClient?.name || formatVoiceAiClientName(structured?.clientName);
         const displayEmail =
@@ -2077,7 +2227,7 @@ export async function handleVapiVoiceWebhook(req: Request, res: Response) {
 📞 <b>Teléfono:</b> ${displayPhone}
 ${displayEmail ? `📧 <b>Correo:</b> ${displayEmail}\n` : ''}${summary ? `📝 <b>Resumen IA:</b> <i>"${summary}"</i>\n` : ''}${transcript ? `💬 <b>Transcripción:</b> <i>"${String(transcript).slice(0, 280)}${String(transcript).length > 280 ? '...' : ''}"</i>\n` : ''}${recordingUrl ? `🎧 <a href="${recordingUrl}"><b>▶️ Escuchar Grabación de la Llamada (Audio)</b></a>` : ''}
         `;
-        sendTelegramNotification(tgRecordingMsg).catch(() => {});
+        await sendTelegramNotification(tgRecordingMsg, tenantId, 'recording');
       }
 
       return res.status(200).json({ success: true, updatedAppointmentId: existingApt?.id || null });
@@ -2140,24 +2290,26 @@ ${displayEmail ? `📧 <b>Correo:</b> ${displayEmail}\n` : ''}${summary ? `📝 
       });
     }
 
-    const results: { toolCallId: string; result: string }[] = [];
+    const results: { name: string; toolCallId: string; result: string }[] = [];
 
     for (const tc of rawToolCallsList) {
       const tcId = String(tc?.id || tc?.toolCallId || 'tool-call-1');
       const fnName = String(tc?.function?.name || tc?.name || 'book_appointment');
       const fnArgs = safeParseJSON(tc?.function?.arguments ?? tc?.arguments ?? tc?.parameters ?? {});
 
+      console.log(`🛠️ [VAPI TOOL] Ejecutando "${fnName}" con args:`, fnArgs);
+
       if (fnName === 'check_availability') {
         try {
           const targetDate = normalizeVoiceDate(fnArgs.date || fnArgs.appointmentDate);
-          const dayApts = await db.select().from(appointments).where(
+          const rawDayApts = await db.select().from(appointments).where(
             and(
               eq(appointments.tenantId, tenantId),
               gte(appointments.scheduledAt, new Date(`${targetDate}T00:00:00Z`)),
-              lt(appointments.scheduledAt, new Date(`${targetDate}T23:59:59Z`)),
-              ne(appointments.status, 'cancelled')
+              lt(appointments.scheduledAt, new Date(`${targetDate}T23:59:59Z`))
             )
           );
+          const dayApts = rawDayApts.filter((a) => a.status !== 'cancelled');
           const bookedHours = dayApts.map((a) => a.scheduledAt.toISOString().split('T')[1].substring(0, 5));
           const standardSlots = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00'];
           const freeSlots = standardSlots.filter((s) => !bookedHours.includes(s));
@@ -2166,9 +2318,10 @@ ${displayEmail ? `📧 <b>Correo:</b> ${displayEmail}\n` : ''}${summary ? `📝 
             ? `Horarios disponibles para ${targetDate}: ${freeSlots.join(', ')}`
             : `No hay horarios libres el ${targetDate}. Por favor ofrécele otro día al cliente.`;
 
-          results.push({ toolCallId: tcId, result: resultText });
+          results.push({ name: fnName, toolCallId: tcId, result: resultText });
         } catch (availErr) {
           results.push({
+            name: fnName,
             toolCallId: tcId,
             result: 'Horarios disponibles: 09:00, 10:00, 11:00, 14:00, 15:00, 16:00, 17:00'
           });
@@ -2204,23 +2357,345 @@ ${displayEmail ? `📧 <b>Correo:</b> ${displayEmail}\n` : ''}${summary ? `📝 
               ? `Appointment successfully booked for ${booked.finalClientName} on ${booked.datePart} at ${booked.timePart} for ${booked.resolvedServiceName}.`
               : `Cita agendada con éxito para ${booked.finalClientName} el día ${booked.datePart} a las ${booked.timePart} para ${booked.resolvedServiceName}.`;
 
-          results.push({ toolCallId: tcId, result: confirmText });
+          console.log(`✅ [VAPI TOOL] Cita guardada en BD: ID ${booked.apt?.id}`);
+          results.push({ name: fnName, toolCallId: tcId, result: confirmText });
         } catch (bookErr: any) {
-          console.error('Error en tool book_appointment:', bookErr);
+          console.error('❌ Error en tool book_appointment:', bookErr);
+          const errDetail = bookErr?.message || String(bookErr || 'Error desconocido en BD');
+          await sendTelegramNotification(`
+🚨 <b>¡ERROR TÉCNICO AL AGENDAR CITA POR VOZ IA!</b> 🚨
+⚠️ <b>Detalle del Error:</b> <code>${errDetail}</code>
+👤 <b>Cliente:</b> ${fnArgs.clientName || fnArgs.name || 'No capturado'}
+📞 <b>Teléfono:</b> ${callerIdNumber || fnArgs.clientPhone || 'N/A'}
+📧 <b>Correo:</b> ${fnArgs.clientEmail || fnArgs.email || 'N/A'}
+🗓️ <b>Fecha / Hora solicitada:</b> ${fnArgs.appointmentDate || 'N/A'} — ${fnArgs.appointmentTime || 'N/A'}
+🛠️ <b>Servicio / Motivo:</b> ${fnArgs.serviceName || fnArgs.caseType || 'N/A'}
+💡 <i>El backend recibió la llamada de Vapi pero falló al guardar en PostgreSQL. Revisa el error arriba para agendar manualmente si es necesario.</i>
+          `, tenantId, 'system');
+
           results.push({
+            name: fnName,
             toolCallId: tcId,
-            result: 'La solicitud de cita fue recibida y registrada por recepción.'
+            result: `Error técnico interno al guardar la cita: ${errDetail}`
           });
         }
         continue;
       }
 
-      results.push({ toolCallId: tcId, result: 'OK' });
+      results.push({ name: fnName, toolCallId: tcId, result: 'OK' });
     }
 
-    return res.status(200).json({ results });
+    return res.status(200).json({
+      result: results[0]?.result || 'OK',
+      results
+    });
   } catch (error: any) {
-    console.error('Error en handleVapiVoiceWebhook:', error);
-    return res.status(200).json({ results: [], ok: true });
+    console.error('❌ Error general en handleVapiVoiceWebhook:', error);
+    await sendTelegramNotification(`
+🚨 <b>¡EXCEPCIÓN CRÍTICA EN WEBHOOK DE VOZ IA!</b> 🚨
+⚠️ <b>Error:</b> <code>${error?.message || String(error)}</code>
+📦 <b>Payload recibido:</b> <code>${JSON.stringify(req.body || {}).slice(0, 350)}</code>
+    `, resolvedTenantIdForAlert, 'system').catch(() => {});
+    return res.status(200).json({ result: 'Error interno en webhook', results: [], ok: true });
+  }
+}
+
+
+// =========================================================================
+// 📲 GESTIÓN DEL CANAL INTERNO DE TELEGRAM PARAMETRIZADO POR CONSULTORIO / NEGOCIO
+// 1. configureTenantTelegramChannel: Guarda Chat ID, Bot Token opcional y filtros en BD
+// 2. detectTenantTelegramChatId: Detecta automáticamente el Chat ID del grupo del consultorio (1 clic)
+// 3. testTenantTelegramChannel: Envía un mensaje de prueba en vivo al grupo/canal del consultorio
+// =========================================================================
+export async function configureTenantTelegramChannel(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    if (!tenantId) return res.status(400).json({ success: false, message: 'Falta x-tenant-id en los headers.' });
+
+    const { telegramConfig } = req.body || {};
+    const chatIdClean = String(telegramConfig?.chatId || '').trim();
+    const botTokenClean = String(telegramConfig?.botToken || '').trim();
+    const isActive = telegramConfig?.isActive !== false;
+
+    const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+    if (!tenant) return res.status(404).json({ success: false, message: 'Negocio no encontrado.' });
+
+    const existingLoyalty = safeParseJSON((tenant as any).loyaltyConfig);
+    const savedTelegramConfig = {
+      isActive,
+      channelName: String(telegramConfig?.channelName || tenant.name || 'Canal Interno').trim(),
+      chatId: chatIdClean,
+      botToken: botTokenClean,
+      notifyNewAppointments: telegramConfig?.notifyNewAppointments !== false,
+      notifyRecordings: telegramConfig?.notifyRecordings !== false,
+      notifyConfirmationsAndCancels: telegramConfig?.notifyConfirmationsAndCancels !== false,
+      notifyPOSClosures: telegramConfig?.notifyPOSClosures !== false,
+      updatedAt: new Date().toISOString()
+    };
+
+    const updatedLoyalty = {
+      ...existingLoyalty,
+      telegramConfig: savedTelegramConfig
+    };
+
+    // Guardar en loyalty_config JSONB y también en las columnas dedicadas de public.tenants
+    await db.update(tenants)
+      .set({ loyaltyConfig: updatedLoyalty } as any)
+      .where(eq(tenants.id, tenantId));
+
+    try {
+      await db.execute(sql`
+        UPDATE public.tenants
+        SET telegram_chat_id = ${chatIdClean || null},
+            telegram_bot_token = ${botTokenClean || null},
+            telegram_enabled = ${isActive}
+        WHERE id = ${tenantId}::uuid
+      `);
+    } catch (colErr) {}
+
+    return res.status(200).json({
+      success: true,
+      message: '✅ Canal interno de Telegram parametrizado y guardado en la base de datos.',
+      telegramConfig: savedTelegramConfig
+    });
+  } catch (error: any) {
+    console.error('Error guardando configuración de Telegram:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+export async function detectTenantTelegramChatId(req: Request, res: Response) {
+  try {
+    const { botToken } = req.body || {};
+    const tokenToUse = String(botToken || process.env.TELEGRAM_BOT_TOKEN || '').trim();
+
+    if (!tokenToUse) {
+      return res.status(400).json({
+        success: false,
+        message: 'No hay un Bot Token configurado en el servidor (.env) ni en la casilla de Bot propio.'
+      });
+    }
+
+    const tgRes = await fetch(`https://api.telegram.org/bot${tokenToUse}/getUpdates?limit=25`);
+    if (!tgRes.ok) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token de Bot inválido o rechazado por Telegram. Verifica el Bot Token.'
+      });
+    }
+
+    const tgData = await tgRes.json();
+    const updates: any[] = Array.isArray(tgData?.result) ? tgData.result : [];
+
+    // Buscamos desde el mensaje más reciente hacia atrás cualquier grupo, supergrupo, canal o chat directo
+    const detectedChats: { chatId: string; title: string; type: string }[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = updates.length - 1; i >= 0; i--) {
+      const u = updates[i];
+      const chatObj =
+        u?.message?.chat ||
+        u?.channel_post?.chat ||
+        u?.my_chat_member?.chat ||
+        u?.callback_query?.message?.chat;
+
+      if (chatObj && chatObj.id) {
+        const cid = String(chatObj.id);
+        if (!seenIds.has(cid)) {
+          seenIds.add(cid);
+          const title =
+            chatObj.title ||
+            [chatObj.first_name, chatObj.last_name].filter(Boolean).join(' ') ||
+            chatObj.username ||
+            `Chat ${cid}`;
+          detectedChats.push({
+            chatId: cid,
+            title,
+            type: chatObj.type || 'private'
+          });
+        }
+      }
+    }
+
+    if (detectedChats.length === 0) {
+      return res.status(200).json({
+        success: false,
+        message: '⚠️ Aún no detectamos mensajes recientes. Entra a tu grupo de Telegram donde agregaste al Bot, envía la palabra "hola" o "/activar" y vuelve a pulsar este botón.'
+      });
+    }
+
+    // Preferimos un grupo/supergrupo si existe, o el chat más reciente
+    const preferredGroup = detectedChats.find((c) => c.type === 'supergroup' || c.type === 'group' || c.type === 'channel') || detectedChats[0];
+
+    return res.status(200).json({
+      success: true,
+      chatId: preferredGroup.chatId,
+      channelName: preferredGroup.title,
+      type: preferredGroup.type,
+      allDetectedChats: detectedChats,
+      message: `✅ ¡Canal detectado automáticamente! "${preferredGroup.title}" (ID: ${preferredGroup.chatId}).`
+    });
+  } catch (error: any) {
+    console.error('Error detectando Chat ID de Telegram:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+export async function testTenantTelegramChannel(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const { telegramConfig, businessName } = req.body || {};
+
+    // Si envió datos en pantalla sin guardar aún, los guardamos primero para que la prueba use lo que está en pantalla
+    if (tenantId && telegramConfig) {
+      const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+      if (tenant) {
+        const existingLoyalty = safeParseJSON((tenant as any).loyaltyConfig);
+        const mergedTg = {
+          ...(existingLoyalty.telegramConfig || {}),
+          ...telegramConfig,
+          isActive: true
+        };
+        await db.update(tenants)
+          .set({ loyaltyConfig: { ...existingLoyalty, telegramConfig: mergedTg } } as any)
+          .where(eq(tenants.id, tenantId));
+
+        try {
+          await db.execute(sql`
+            UPDATE public.tenants
+            SET telegram_chat_id = ${String(mergedTg.chatId || '').trim() || null},
+                telegram_bot_token = ${String(mergedTg.botToken || '').trim() || null},
+                telegram_enabled = true
+            WHERE id = ${tenantId}::uuid
+          `);
+        } catch (e) {}
+      }
+    }
+
+    const bizTitle = businessName || telegramConfig?.channelName || 'Tu Consultorio / Negocio';
+    const testMsg = `
+🔔 <b>¡CANAL INTERNO DE COMUNICACIÓN CONECTADO!</b> ✅
+🏢 <b>Consultorio / Negocio:</b> ${bizTitle}
+📲 <b>Canal:</b> ${telegramConfig?.channelName || 'Recepción y Equipo Interno'}
+🤖 <b>Estado:</b> Enlazado en tiempo real con AutoFlow + Recepcionista IA.
+
+<i>A partir de este momento, tu equipo recibirá en este grupo las citas agendadas por voz o web, las grabaciones de llamadas IA, confirmaciones de asistencia y cierres de caja.</i>
+    `;
+
+    const sendRes = await sendTelegramNotification(testMsg, tenantId, 'system');
+
+    if (!sendRes.sent) {
+      return res.status(400).json({
+        success: false,
+        message: `⚠️ No se pudo entregar el mensaje a Telegram (${sendRes.error || 'Verifica que el Chat ID sea correcto y que el Bot sea miembro del grupo'}).`
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `🚀 ¡Mensaje de prueba enviado con éxito al Chat ID ${sendRes.chatIdUsed}! Revisa tu Telegram.`
+    });
+  } catch (error: any) {
+    console.error('Error probando canal de Telegram:', error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+
+// =========================================================================
+// 🎧 SOPORTE Y ACOMPAÑAMIENTO TÉCNICO AUTOFLOW (SOLO AL TELEGRAM CENTRAL DE AUTOFLOW)
+// IMPORTANTE: Nunca envía al Telegram del cliente/consultorio; va exclusivamente
+// al TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID central de AutoFlow (.env).
+// =========================================================================
+export async function requestAutoFlowSupport(req: Request, res: Response) {
+  try {
+    const tenantId = (req.headers['x-tenant-id'] as string) || '';
+    const {
+      businessName,
+      contactName,
+      contactPhone,
+      topic,
+      message,
+      currentSection
+    } = req.body || {};
+
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+    const envChatId = (process.env.TELEGRAM_CHAT_ID || '').trim();
+
+    if (!envToken || !envChatId) {
+      return res.status(500).json({
+        success: false,
+        message: '⚠️ El canal central de soporte de AutoFlow (.env) no está configurado en el servidor.'
+      });
+    }
+
+    let resolvedBizName = String(businessName || '').trim() || 'Negocio / Consultorio';
+    let nicheLabel = '';
+    let diagnosticSummary = '';
+
+    if (tenantId) {
+      try {
+        const [tenantRow] = await db
+          .select({ name: tenants.name, niche: tenants.niche, loyaltyConfig: tenants.loyaltyConfig })
+          .from(tenants)
+          .where(eq(tenants.id, tenantId));
+
+        if (tenantRow) {
+          resolvedBizName = tenantRow.name || resolvedBizName;
+          nicheLabel = tenantRow.niche ? ` (${String(tenantRow.niche).toUpperCase()})` : '';
+          const lConf = safeParseJSON(tenantRow.loyaltyConfig);
+          const hasVapi = Boolean(lConf?.vapiConfig?.isActive && lConf?.vapiConfig?.assistantId);
+          const hasTg = Boolean(lConf?.telegramConfig?.chatId);
+          diagnosticSummary = `Vapi IA: ${hasVapi ? `Activo (${lConf?.vapiConfig?.phoneNumber || 'OK'})` : 'Sin vincular'} | Telegram propio: ${hasTg ? lConf.telegramConfig.chatId : 'Sin configurar'}`;
+        }
+      } catch (dbErr) {}
+    }
+
+    const cleanContact = String(contactName || 'Encargado del Negocio').trim();
+    const cleanPhone = String(contactPhone || 'No indicado').trim();
+    const cleanTopic = String(topic || 'Acompañamiento de Configuración').trim();
+    const cleanMsg = String(message || 'Solicito acompañamiento para parametrizar el portal interno.').trim();
+    const cleanSection = String(currentSection || 'Portal Interno').trim();
+
+    // Mensaje dirigido EXCLUSIVAMENTE a AutoFlow (envToken + envChatId)
+    const autoFlowSupportMsg = `
+🆘 <b>¡NUEVA SOLICITUD DE SOPORTE Y ACOMPAÑAMIENTO!</b> 🎧
+🏢 <b>Negocio:</b> ${resolvedBizName}${nicheLabel}
+🆔 <b>Tenant ID:</b> <code>${tenantId || 'N/A'}</code>
+📍 <b>Sección actual:</b> ${cleanSection}
+🎯 <b>Tema:</b> ${cleanTopic}
+👤 <b>Solicitante:</b> ${cleanContact}
+📞 <b>Teléfono / WhatsApp:</b> ${cleanPhone}
+💬 <b>Detalle:</b> <i>"${cleanMsg}"</i>
+${diagnosticSummary ? `🔎 <b>Estado técnico:</b> ${diagnosticSummary}
+` : ''}⚡ <i>Nota: Este mensaje llegó únicamente a AutoFlow (no al cliente).</i>
+    `.trim();
+
+    const tgResponse = await fetch(`https://api.telegram.org/bot${envToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: envChatId,
+        text: autoFlowSupportMsg,
+        parse_mode: 'HTML'
+      })
+    });
+
+    if (!tgResponse.ok) {
+      const errText = await tgResponse.text();
+      console.error('❌ Error enviando soporte a AutoFlow Telegram:', errText);
+      return res.status(500).json({
+        success: false,
+        message: 'No se pudo contactar al equipo de soporte en este momento. Intenta nuevamente.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: '🎧 ¡Solicitud enviada al equipo de Soporte AutoFlow! En breve nos comunicaremos contigo para acompañarte paso a paso.'
+    });
+  } catch (error: any) {
+    console.error('Error en requestAutoFlowSupport:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 }

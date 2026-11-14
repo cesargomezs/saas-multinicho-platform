@@ -27,8 +27,12 @@ import {
   cancelAppointment,
   confirmAppointment,           // 👈 Confirmar asistencia (Política 6h/3h)
   sendAppointmentReminder,      // 👈 Recordatorio 6h antes
-  configureTenantVapiAssistant, // 👈 Autoconfigurador 1-Clic Vapi.ai (BYOK)
-  handleVapiVoiceWebhook,       // 👈 Webhook Bilingüe (ES/EN) de llamadas IA
+  configureTenantVapiAssistant,     // 👈 Autoconfigurador 1-Clic Vapi.ai (BYOK)
+  handleVapiVoiceWebhook,           // 👈 Webhook Bilingüe (ES/EN) de llamadas IA
+  configureTenantTelegramChannel,   // 👈 Guardar Canal Interno de Telegram en BD por Negocio
+  testTenantTelegramChannel,        // 👈 Enviar mensaje de prueba al Telegram del Consultorio
+  detectTenantTelegramChatId,       // 👈 Autodetectar Chat ID del grupo del Consultorio en 1 clic
+  requestAutoFlowSupport,           // 👈 Soporte técnico y acompañamiento (solo a AutoFlow Telegram)
   getPushCampaigns,             // 👈 Obtener campañas push
   createPushCampaign,           // 👈 Crear campaña push
   saveClientReview              // 👈 Guardar reseña / reacción única por cliente
@@ -147,7 +151,15 @@ async function ensureMultinicheDatabaseReady() {
       console.log('🦷 Negocio demo de Odontología (dental) creado en la BD.');
     }
 
-    console.log('✅ Base de datos sincronizada con los nichos: automotive, spa, barbershop, legal y dental.');
+    // 4. Asegurar columnas parametrizadas de Telegram por negocio en public.tenants
+    await db.execute(sql`
+      ALTER TABLE public.tenants
+        ADD COLUMN IF NOT EXISTS telegram_chat_id VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS telegram_bot_token VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN DEFAULT true;
+    `);
+
+    console.log('✅ Base de datos sincronizada con los nichos (automotive, spa, barbershop, legal, dental) y Canal Interno de Telegram por negocio.');
   } catch (err) {
     console.warn('⚠️ Aviso verificando esquema multi-nicho en BD:', err);
   }
@@ -203,6 +215,14 @@ app.post('/api/appointments/:appointmentId/remind', sendAppointmentReminder);
 // Rutas de Recepción Telefónica IA (Vapi.ai 1-Clic BYOK + Webhook Bilingüe ES/EN)
 app.post('/api/tenants/vapi-setup', configureTenantVapiAssistant);
 app.post('/api/vapi/webhook', handleVapiVoiceWebhook);
+
+// Rutas del Canal Interno de Telegram Parametrizado por Consultorio / Negocio
+app.put('/api/tenants/telegram-config', configureTenantTelegramChannel);
+app.post('/api/tenants/telegram-test', testTenantTelegramChannel);
+app.post('/api/tenants/telegram-detect-chat', detectTenantTelegramChatId);
+
+// Ruta de Soporte y Acompañamiento AutoFlow (solo al Telegram central de AutoFlow, nunca al cliente)
+app.post('/api/support/autoflow', requestAutoFlowSupport);
 
 // Rutas de Campañas Push y Reseñas Únicas por Cliente
 app.get('/api/campaigns', getPushCampaigns);
