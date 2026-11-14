@@ -2,7 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, Modal, ActivityIndicator, Alert } from 'react-native';
 
 // 🔌 Configuración de API
-const API_URL = Platform.OS === 'web' ? 'http://localhost:4000/api' : 'http://192.168.1.XX:4000/api';
+//const API_URL = Platform.OS === 'web' ? 'http://localhost:4000/api' : 'http://192.168.1.XX:4000/api';
+const API_URL = process.env.EXPO_PUBLIC_API_URL;
+
 // NOTA: Para esta prueba asumimos que tenemos el ID del negocio en sesión. 
 // En producción, este ID vendrá del contexto de autenticación (Zustand/Context).
 const MOCK_TENANT_ID = 'TU_TENANT_ID_AQUI'; 
