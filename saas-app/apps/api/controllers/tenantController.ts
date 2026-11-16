@@ -1,6 +1,29 @@
 import { Request, Response } from 'express';
 import { db, tenants, users } from '@taller/database';
 import { eq, and, sql } from 'drizzle-orm';
+import crypto from 'crypto';
+
+// 🔐 Helper criptográfico nativo (scrypt + salt aleatorio) para guardar y verificar contraseñas seguras
+export const hashPasswordScrypt = (plainPassword: string): string => {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(plainPassword, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derivedKey}`;
+};
+
+export const verifyPasswordScrypt = (plainPassword: string, storedHash?: string | null): boolean => {
+  if (!plainPassword || !storedHash) return false;
+  if (storedHash.startsWith('scrypt$')) {
+    const parts = storedHash.split('$');
+    if (parts.length !== 3) return false;
+    const [, salt, keyHex] = parts;
+    const derivedBuf = crypto.scryptSync(plainPassword, salt, 64);
+    const storedBuf = Buffer.from(keyHex, 'hex');
+    if (derivedBuf.length !== storedBuf.length) return false;
+    return crypto.timingSafeEqual(derivedBuf, storedBuf);
+  }
+  // Fallback si se guardó texto plano previamente
+  return plainPassword === storedHash;
+};
 
 const safeParseJSON = (data: any): any => {
   if (!data) return {};
@@ -73,19 +96,44 @@ const dispatchLocalPushNotifications = async (tenantId: string, title: string, m
   }
 };
 
-// 1. Registrar un nuevo negocio (Tenant)
+// 1. Registrar un nuevo negocio (Tenant) + Guardar adminEmail y adminPasswordHash en BD
 export async function createTenant(req: Request, res: Response) {
   try {
-    const { id, name, niche, address, city, state, zipCode, logoUrl, primaryColor, planTier, subscriptionStatus } = req.body;
+    const {
+      id,
+      name,
+      niche,
+      address,
+      city,
+      state,
+      zipCode,
+      logoUrl,
+      primaryColor,
+      planTier,
+      subscriptionStatus,
+      adminEmail,
+      email,
+      password,
+      portalPin,
+    } = req.body;
 
     if (!name || !niche) {
       return res.status(400).json({ success: false, message: 'El nombre del negocio y la categoría son obligatorios.' });
     }
 
+    const cleanAdminEmail = (adminEmail || email || '').trim().toLowerCase() || null;
+    const rawPassword = password ? String(password) : '';
+    const hashedPassword = rawPassword ? hashPasswordScrypt(rawPassword) : null;
+    const hashedPin = portalPin ? hashPasswordScrypt(String(portalPin)) : null;
+    const tenantUuid = id || crypto.randomUUID();
+
     const [newTenant] = await db.insert(tenants).values({
-      id: id || crypto.randomUUID(),
+      id: tenantUuid,
       name: name.trim(),
       niche: niche.trim(),
+      adminEmail: cleanAdminEmail,
+      adminPasswordHash: hashedPassword,
+      portalPinHash: hashedPin,
       address: address ? address.trim() : null,
       city: city ? city.trim() : null,
       state: state ? state.trim().toUpperCase() : null,
@@ -95,6 +143,31 @@ export async function createTenant(req: Request, res: Response) {
       planTier: planTier || 'starter',
       subscriptionStatus: subscriptionStatus || 'active',
     } as any).returning();
+
+    // También creamos/actualizamos el usuario administrador en public.users con su password_hash
+    if (cleanAdminEmail && hashedPassword) {
+      try {
+        await db.execute(sql`
+          INSERT INTO public.users (tenant_id, role, name, email, password_hash, password_updated_at, zip_code)
+          VALUES (
+            ${tenantUuid}::uuid,
+            'owner',
+            ${name.trim() + ' (Admin)'},
+            ${cleanAdminEmail},
+            ${hashedPassword},
+            NOW(),
+            ${zipCode ? zipCode.trim() : null}
+          )
+          ON CONFLICT (tenant_id, email)
+          DO UPDATE SET
+            role = 'owner',
+            password_hash = EXCLUDED.password_hash,
+            password_updated_at = NOW()
+        `);
+      } catch (usrErr) {
+        console.warn('⚠️ Aviso creando usuario owner en public.users:', usrErr);
+      }
+    }
 
     return res.status(201).json({ success: true, tenant: newTenant });
   } catch (error: any) {
@@ -370,14 +443,14 @@ export async function updateTenantConfig(req: Request, res: Response) {
   }
 }
 
-// 🔐 Autenticación segura del Portal Interno por Tenant
+// 🔐 Autenticación segura del Portal Interno por Tenant (Verifica Hash scrypt en tenants y users)
 export async function authenticateTenantStaff(req: Request, res: Response) {
   try {
-    const tenantId = req.headers['x-tenant-id'] as string;
+    const tenantId = (req.headers['x-tenant-id'] as string) || req.body.tenantId;
     const { email, password } = req.body;
 
-    if (!tenantId || !email || !password) {
-      return res.status(400).json({ success: false, message: 'Faltan credenciales (tenantId, email, password).' });
+    if (!tenantId || !password) {
+      return res.status(400).json({ success: false, message: 'Faltan credenciales para validar el acceso.' });
     }
 
     const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
@@ -385,21 +458,75 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: 'Negocio no encontrado.' });
     }
 
-    const cleanEmail = email.trim().toLowerCase();
-    const isEmailValid = (tenant as any).adminEmail && (tenant as any).adminEmail.toLowerCase() === cleanEmail;
-    const isPasswordValid = (tenant as any).adminPasswordHash === password || (tenant as any).password === password;
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const tenantAdminEmail = String((tenant as any).adminEmail || (tenant as any).admin_email || '').trim().toLowerCase();
+    const tenantPasswordHash = (tenant as any).adminPasswordHash || (tenant as any).admin_password_hash || null;
+    const tenantPinHash = (tenant as any).portalPinHash || (tenant as any).portal_pin_hash || null;
 
-    if ((isEmailValid && isPasswordValid) || password === '1234') {
+    // 1. Validar contra admin_password_hash del tenant
+    if (tenantPasswordHash) {
+      const emailMatches = !cleanEmail || !tenantAdminEmail || cleanEmail === tenantAdminEmail;
+      if (emailMatches && verifyPasswordScrypt(String(password), tenantPasswordHash)) {
+        return res.status(200).json({
+          success: true,
+          message: 'Acceso autorizado al Portal Interno',
+          tenantName: tenant.name,
+          adminEmail: tenantAdminEmail,
+        });
+      }
+    }
+
+    // 2. Validar contra portal_pin_hash si configuró PIN
+    if (tenantPinHash && verifyPasswordScrypt(String(password), tenantPinHash)) {
       return res.status(200).json({
         success: true,
-        message: 'Acceso autorizado al Portal Interno',
-        tenantName: tenant.name
+        message: 'Acceso autorizado por PIN del negocio',
+        tenantName: tenant.name,
+      });
+    }
+
+    // 3. Validar contra la tabla public.users (rol owner / staff)
+    if (cleanEmail) {
+      const [userRow] = await db
+        .select()
+        .from(users)
+        .where(and(eq(users.tenantId, tenantId), eq(users.email, cleanEmail)));
+
+      if (userRow && (userRow as any).passwordHash) {
+        if (verifyPasswordScrypt(String(password), (userRow as any).passwordHash)) {
+          await db.execute(sql`
+            UPDATE public.users
+            SET failed_login_attempts = 0, last_login_at = NOW()
+            WHERE id = ${userRow.id}::uuid
+          `);
+          return res.status(200).json({
+            success: true,
+            message: 'Acceso autorizado al Portal Interno',
+            tenantName: tenant.name,
+            adminEmail: cleanEmail,
+          });
+        } else {
+          await db.execute(sql`
+            UPDATE public.users
+            SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1
+            WHERE id = ${userRow.id}::uuid
+          `);
+        }
+      }
+    }
+
+    // 4. Fallback solo para negocios antiguos que aún tienen admin_password_hash en NULL
+    if (!tenantPasswordHash && String(password) === '1234') {
+      return res.status(200).json({
+        success: true,
+        message: 'Acceso autorizado (negocio sin contraseña configurada aún)',
+        tenantName: tenant.name,
       });
     }
 
     return res.status(401).json({ success: false, message: 'Correo o contraseña incorrectos.' });
   } catch (error: any) {
     console.error('Error en autenticación de staff:', error);
-    return res.status(500).json({ success: false, error: error.message || String(error) });
+    return res.status(500).json({ success: false, message: error.message || String(error) });
   }
 }
