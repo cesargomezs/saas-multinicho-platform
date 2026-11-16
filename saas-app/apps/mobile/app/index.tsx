@@ -17,7 +17,7 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 });
 
 // 📱 ESPACIADO SUPERIOR SEGURO PARA CÁMARA / DYNAMIC ISLAND / RELOJ EN iOS Y BARRA DE ESTADO EN ANDROID
-export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 60 : Platform.OS === 'android' ? (StatusBar.currentHeight ? StatusBar.currentHeight + 14 : 42) : 0;
+export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 54 : Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 12 : 0;
 
 interface Business {
   id: string;
@@ -563,7 +563,20 @@ export default function GlobalDirectory() {
 
 const styles = StyleSheet.create({
   appContainer: { flex: 1, backgroundColor: '#05070C' },
-  topNavbar: { height: 70, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 40, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)', backgroundColor: 'rgba(5, 7, 12, 0.94)', zIndex: 100 },
+  
+  
+  topNavbar: {
+    paddingTop: SAFE_TOP_INSET,
+    height: 68 + SAFE_TOP_INSET,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(5, 7, 12, 0.96)',
+    zIndex: 100,
+  },
   partnerButton: { backgroundColor: 'rgba(255, 94, 0, 0.15)', borderWidth: 1, borderColor: '#FF5E00', paddingVertical: 10, paddingHorizontal: 18, borderRadius: 12 },
   partnerButtonText: { color: '#FF5E00', fontWeight: 'bold', fontSize: 14 },
   contentArea: { padding: 20, maxWidth: 1200, alignSelf: 'center', width: '100%', minHeight: Platform.OS === 'web' ? ('100vh' as any) : '100%' },

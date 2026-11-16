@@ -94,7 +94,17 @@ const CountryCodeSelector = ({
 // 🌟 CAPITALIZACIÓN AUTOMÁTICA (Letra Capitalizada en Nombres, Reseñas y Títulos) 🌟
 const toTitleCase = (str: string) => {
   if (!str) return '';
-  return String(str).replace(/(^|\s)\S/g, (match) => match.toUpperCase());
+  return String(str)
+    .toLowerCase()
+    .replace(/(^|\s)\S/g, (match) => match.toUpperCase());
+};
+
+// Oración limpia para descripciones largas (solo primera letra en mayúscula, sin capitalizar cada palabra)
+const toSentenceCase = (str: string) => {
+  if (!str) return '';
+  const clean = String(str).trim();
+  if (!clean) return '';
+  return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
 };
 
 const cleanPhoneDigits = (phoneStr?: string | null): string => {
@@ -408,13 +418,129 @@ function ResponsiveCarousel<T>({
 }
 
 // ==========================================
-// 🎨 COMPONENTE DE DEGRADADO DE LA MITAD PARA ABAJO (WEB + iOS + ANDROID)
+// 🎨 COMPONENTE DE DEGRADADO CONTINUO REAL (WEB + iOS + ANDROID SIN BANDAS NI LÍNEAS)
+// En iOS/Android genera un PNG 1x256 con curva cúbica de 256 niveles reales de canal alfa,
+// eliminando por completo las franjas/escalones ("banding") de los <View> apilados.
 // ==========================================
-const GRADIENT_STEPS = [0.02, 0.05, 0.09, 0.14, 0.20, 0.28, 0.37, 0.47, 0.57, 0.67, 0.76, 0.84, 0.90, 0.95, 0.98];
+const buildSmoothGradientPngDataUri = (rgbStr: string): string => {
+  const parts = rgbStr.split(',').map((s) => Math.max(0, Math.min(255, parseInt(s.trim(), 10) || 0)));
+  const r = parts[0] ?? 5;
+  const g = parts[1] ?? 7;
+  const b = parts[2] ?? 12;
+  const width = 1;
+  const height = 256;
+
+  // 1. Construir scanlines RGBA sin compresión (bloque deflate store)
+  const rawLen = height * (1 + width * 4);
+  const raw = new Uint8Array(rawLen);
+  let p = 0;
+  for (let y = 0; y < height; y++) {
+    raw[p++] = 0; // filtro PNG = 0 (None)
+    const t = y / (height - 1);
+    // Curva ease-in-out suave de 0 a 255 niveles de opacidad
+    const eased = t * t * (3 - 2 * t);
+    const alpha = Math.round(eased * 255);
+    raw[p++] = r;
+    raw[p++] = g;
+    raw[p++] = b;
+    raw[p++] = alpha;
+  }
+
+  // 2. Envolver en stream zlib (sin compresión, BFINAL=1, BTYPE=00)
+  const zlibLen = 2 + 5 + rawLen + 4;
+  const zlib = new Uint8Array(zlibLen);
+  zlib[0] = 0x78;
+  zlib[1] = 0x01;
+  zlib[2] = 0x01;
+  zlib[3] = rawLen & 0xff;
+  zlib[4] = (rawLen >> 8) & 0xff;
+  const nlen = (~rawLen) & 0xffff;
+  zlib[5] = nlen & 0xff;
+  zlib[6] = (nlen >> 8) & 0xff;
+  zlib.set(raw, 7);
+
+  // Adler-32 checksum
+  let s1 = 1;
+  let s2 = 0;
+  for (let i = 0; i < rawLen; i++) {
+    s1 = (s1 + raw[i]) % 65521;
+    s2 = (s2 + s1) % 65521;
+  }
+  const adler = ((s2 << 16) | s1) >>> 0;
+  let zp = 7 + rawLen;
+  zlib[zp++] = (adler >>> 24) & 0xff;
+  zlib[zp++] = (adler >>> 16) & 0xff;
+  zlib[zp++] = (adler >>> 8) & 0xff;
+  zlib[zp++] = adler & 0xff;
+
+  // 3. Tabla CRC32 para chunks PNG
+  const crcTable = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    crcTable[n] = c >>> 0;
+  }
+  const makeChunk = (typeStr: string, dataBytes: Uint8Array) => {
+    const len = dataBytes.length;
+    const out = new Uint8Array(12 + len);
+    out[0] = (len >>> 24) & 0xff;
+    out[1] = (len >>> 16) & 0xff;
+    out[2] = (len >>> 8) & 0xff;
+    out[3] = len & 0xff;
+    for (let i = 0; i < 4; i++) out[4 + i] = typeStr.charCodeAt(i);
+    out.set(dataBytes, 8);
+    let crc = 0xffffffff;
+    for (let i = 4; i < 8 + len; i++) {
+      crc = crcTable[(crc ^ out[i]) & 0xff] ^ (crc >>> 8);
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    out[8 + len] = (crc >>> 24) & 0xff;
+    out[9 + len] = (crc >>> 16) & 0xff;
+    out[10 + len] = (crc >>> 8) & 0xff;
+    out[11 + len] = crc & 0xff;
+    return out;
+  };
+
+  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = new Uint8Array([
+    0, 0, 0, width,
+    0, 0, (height >> 8) & 0xff, height & 0xff,
+    8, // 8-bit depth
+    6, // RGBA color type
+    0, 0, 0
+  ]);
+  const cIHDR = makeChunk('IHDR', ihdr);
+  const cIDAT = makeChunk('IDAT', zlib);
+  const cIEND = makeChunk('IEND', new Uint8Array(0));
+
+  const png = new Uint8Array(sig.length + cIHDR.length + cIDAT.length + cIEND.length);
+  let offset = 0;
+  png.set(sig, offset); offset += sig.length;
+  png.set(cIHDR, offset); offset += cIHDR.length;
+  png.set(cIDAT, offset); offset += cIDAT.length;
+  png.set(cIEND, offset);
+
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let b64 = '';
+  for (let i = 0; i < png.length; i += 3) {
+    const b0 = png[i];
+    const b1 = i + 1 < png.length ? png[i + 1] : 0;
+    const b2 = i + 2 < png.length ? png[i + 2] : 0;
+    b64 += chars[b0 >> 2];
+    b64 += chars[((b0 & 3) << 4) | (b1 >> 4)];
+    b64 += i + 1 < png.length ? chars[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    b64 += i + 2 < png.length ? chars[b2 & 63] : '=';
+  }
+  return `data:image/png;base64,${b64}`;
+};
+
+const GRADIENT_URI_CACHE: Record<string, string> = {};
 
 const BottomHalfGradientOverlay = ({
-  heightPct = '65%',
-  baseColor = '5, 7, 12'
+  heightPct = '52%',
+  baseColor = '14, 18, 24'
 }: {
   heightPct?: string;
   baseColor?: string;
@@ -429,34 +555,30 @@ const BottomHalfGradientOverlay = ({
           right: 0,
           bottom: 0,
           height: heightPct as any,
-          backgroundImage: `linear-gradient(180deg, rgba(${baseColor}, 0) 0%, rgba(${baseColor}, 0.32) 28%, rgba(${baseColor}, 0.74) 64%, rgba(${baseColor}, 0.94) 88%, rgba(${baseColor}, 0.98) 100%)`
+          backgroundImage: `linear-gradient(180deg, rgba(${baseColor}, 0) 0%, rgba(${baseColor}, 0.28) 35%, rgba(${baseColor}, 0.72) 72%, rgba(${baseColor}, 0.96) 100%)`
         } as any}
       />
     );
   }
 
+  if (!GRADIENT_URI_CACHE[baseColor]) {
+    GRADIENT_URI_CACHE[baseColor] = buildSmoothGradientPngDataUri(baseColor);
+  }
+
   return (
-    <View
+    <Image
       pointerEvents="none"
+      source={{ uri: GRADIENT_URI_CACHE[baseColor] }}
       style={{
         position: 'absolute',
         left: 0,
         right: 0,
         bottom: 0,
+        width: '100%',
         height: heightPct as any,
-        flexDirection: 'column'
       }}
-    >
-      {GRADIENT_STEPS.map((op, i) => (
-        <View
-          key={i}
-          style={{
-            flex: 1,
-            backgroundColor: `rgba(${baseColor}, ${op})`
-          }}
-        />
-      ))}
-    </View>
+      resizeMode="stretch"
+    />
   );
 };
 
@@ -912,6 +1034,25 @@ export default function TenantDashboardScreen() {
   const [reportContact, setReportContact] = useState('');
   const [isSendingReport, setIsSendingReport] = useState(false);
   const [reportedKeys, setReportedKeys] = useState<string[]>([]);
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem('autoflow_favorites_v1');
+        return saved ? JSON.parse(saved) : [];
+      } catch (_e) {}
+    }
+    return [];
+  });
+
+  const toggleFavoriteItem = (favId: string) => {
+    setFavoriteIds((prev) => {
+      const next = prev.includes(favId) ? prev.filter((x) => x !== favId) : [...prev, favId];
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try { window.localStorage.setItem('autoflow_favorites_v1', JSON.stringify(next)); } catch (_e) {}
+      }
+      return next;
+    });
+  };
   const [acceptedContentTerms, setAcceptedContentTerms] = useState(false);
   const [reviewRating, setReviewRating] = useState<number>(5);
   const [reviewComment, setReviewComment] = useState<string>('');
@@ -2952,27 +3093,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
              </View>
           )}
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={{ fontSize: isMobile ? 15 : 20, fontWeight: '900', color: tColor.text }} numberOfLines={1} ellipsizeMode="tail">
+            <Text style={{ fontSize: isMobile ? 16 : 20, fontWeight: '900', color: tColor.text }} numberOfLines={1} ellipsizeMode="tail">
               {tenantInfo?.name || 'AutoFlow'}
             </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'nowrap', marginTop: 2 }}>
-              {/* ⭐ Insignia con Promedio, Likes (👍) y Dislikes (👎) siempre visibles */}
-              <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 7, paddingVertical: 1.5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Ionicons name="star" size={10} color="#F59E0B" />
-                <Text style={{ color: '#F59E0B', fontSize: 10.5, fontWeight: '900' }}>{ratingSummary.avg}</Text>
-                <View style={{ width: 1, height: 8, backgroundColor: 'rgba(255,255,255,0.18)' }} />
-                <Feather name="thumbs-up" size={9.5} color="#10B981" />
-                <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>{ratingSummary.likes}</Text>
-                <Feather name="thumbs-down" size={9.5} color="#EF4444" style={{ marginLeft: 2 }} />
-                <Text style={{ color: '#EF4444', fontSize: 10, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
-              </View>
-              {clientDistanceMiles ? (
-                <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 7, paddingVertical: 1.5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                  <Feather name="navigation" size={9.5} color="#60A5FA" />
-                  <Text style={{ color: tColor.text, fontSize: 10, fontWeight: '800' }}>{clientDistanceMiles} mi</Text>
-                </View>
-              ) : null}
-            </View>
           </View>
         </TouchableOpacity>
 
@@ -3195,37 +3318,16 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         {/* ============================================================== */}
         {activeView === 'servicios' ? (
           <View style={{ width: '100%', minWidth: 0 }}>
-            {/* 🌟 BANNER EN VIVO DE CAMPAÑA PUSH ACTIVA (SOLO SE MUESTRA SI ESTÁ ACTIVA) 🌟 */}
-            {pushCampaignsList.filter(c => c.is_active !== false).slice(0, 1).map((activeCamp) => (
-              <View key={`${activeCamp.id}-banner`} style={{ backgroundColor: 'rgba(255, 94, 0, 0.12)', borderWidth: 1, borderColor: brandColor, borderRadius: 16, padding: isMobile ? 16 : 18, marginBottom: 20, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 12 }}>
-                <View style={{ flex: 1, paddingRight: isMobile ? 24 : 0 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
-                    <View style={{ backgroundColor: brandColor, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
-                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>{t.promoBadge}</Text>
-                    </View>
-                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15 }}>{toTitleCase(activeCamp.title)}</Text>
-                  </View>
-                  <Text style={{ color: tColor.muted, fontSize: 13, lineHeight: 18 }}>{toTitleCase(activeCamp.message)}</Text>
-                </View>
-                {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
-                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 11, paddingHorizontal: 16 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
-                  <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>{t.promoClaim}</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-
-            {/* 🖼️ HERO BANNER VERTICAL (1 SOLA IMAGEN, SIN CORAZÓN, SIN PUNTOS ● ○ ○ Y CON LIKES/DISLIKES VISIBLES) 🖼️ */}
+            {/* 🖼️ 1. TARJETA HERO ORDENADA: IMAGEN ARRIBA + TEXTO DEBAJO DE LA IMAGEN (CERO CRUCE EN MÓVIL) 🖼️ */}
             <View
               style={{
                 width: '100%',
-                height: isMobile ? 310 : 360,
-                borderRadius: isMobile ? 24 : 30,
+                borderRadius: isMobile ? 22 : 28,
                 overflow: 'hidden',
                 borderWidth: 1,
                 borderColor: tColor.border,
-                backgroundColor: '#05070C',
-                marginBottom: 18,
-                position: 'relative',
+                backgroundColor: tColor.card,
+                marginBottom: 16,
                 ...Platform.select({
                   web: { boxShadow: theme === 'dark' ? '0 22px 48px -12px rgba(0,0,0,0.7)' : '0 18px 36px -10px rgba(15,23,42,0.18)' } as any,
                   ios: { shadowColor: '#000', shadowOffset: { width: 0, height: 12 }, shadowOpacity: 0.35, shadowRadius: 20 },
@@ -3233,61 +3335,43 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 })
               }}
             >
-              {tenantInfo?.logoUrl ? (
-                <TouchableOpacity
-                  activeOpacity={0.95}
-                  onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
-                  style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
-                >
-                  <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo?.name || 'Portada'} />
-                </TouchableOpacity>
-              ) : (
-                <Image
-                  source={{ uri: bgImage }}
-                  style={[StyleSheet.absoluteFill, { width: '100%', height: '100%' }]}
-                  resizeMode="cover"
-                />
-              )}
+              {/* Bloque Superior: Imagen con degradado suave y solo Categoría (izq) + Guardar Favorito (der) */}
+              <View style={{ width: '100%', height: isMobile ? 210 : 270, position: 'relative', backgroundColor: '#05070C' }}>
+                {tenantInfo?.logoUrl ? (
+                  <TouchableOpacity
+                    activeOpacity={0.95}
+                    onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
+                    style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' }}
+                  >
+                    <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo?.name || 'Portada'} />
+                  </TouchableOpacity>
+                ) : (
+                  <Image
+                    source={{ uri: bgImage }}
+                    style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' }}
+                    resizeMode="cover"
+                  />
+                )}
 
-              {Platform.OS === 'web' ? (
+                <BottomHalfGradientOverlay heightPct="38%" baseColor="18, 22, 28" />
+
+                {/* Fila superior limpia: Solo Categoría a la izquierda y Corazón de Favoritos + Ampliar a la derecha */}
                 <View
-                  pointerEvents="none"
                   style={{
                     position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    height: 90,
-                    backgroundImage: 'linear-gradient(180deg, rgba(5,7,12,0.65) 0%, rgba(5,7,12,0) 100%)'
-                  } as any}
-                />
-              ) : (
-                <View
-                  pointerEvents="none"
-                  style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 65, backgroundColor: 'rgba(5,7,12,0.35)' }}
-                />
-              )}
-
-              <BottomHalfGradientOverlay heightPct="68%" baseColor="5, 7, 12" />
-
-              {/* Barra flotante superior dentro del Hero Banner (Sin botón de corazón) */}
-              <View
-                style={{
-                  position: 'absolute',
-                  top: isMobile ? 14 : 20,
-                  left: isMobile ? 14 : 24,
-                  right: isMobile ? 14 : 24,
-                  flexDirection: 'row',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 8,
-                  zIndex: 10
-                }}
-              >
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', flex: 1 }}>
+                    top: isMobile ? 12 : 18,
+                    left: isMobile ? 12 : 20,
+                    right: isMobile ? 12 : 20,
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 8,
+                    zIndex: 10
+                  }}
+                >
                   <View
                     style={{
-                      backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                      backgroundColor: 'rgba(15, 23, 42, 0.78)',
                       borderWidth: 1,
                       borderColor: 'rgba(255,255,255,0.22)',
                       paddingHorizontal: 12,
@@ -3317,95 +3401,72 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </Text>
                   </View>
 
-                  {clientDistanceMiles ? (
-                    <View
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {/* Único botón Corazón para guardar el negocio en Mis Favoritos */}
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => toggleFavoriteItem(`tenant:${safeTenantId}`)}
                       style={{
-                        backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                        backgroundColor: favoriteIds.includes(`tenant:${safeTenantId}`)
+                          ? 'rgba(239, 68, 68, 0.24)'
+                          : 'rgba(15, 23, 42, 0.78)',
                         borderWidth: 1,
-                        borderColor: 'rgba(96, 165, 250, 0.45)',
-                        paddingHorizontal: 11,
+                        borderColor: favoriteIds.includes(`tenant:${safeTenantId}`)
+                          ? '#EF4444'
+                          : 'rgba(255,255,255,0.22)',
+                        paddingHorizontal: 12,
                         paddingVertical: 6,
                         borderRadius: 20,
                         flexDirection: 'row',
                         alignItems: 'center',
-                        gap: 5,
+                        gap: 6,
                         ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
                       }}
                     >
-                      <Feather name="navigation" size={11} color="#60A5FA" />
+                      <Ionicons
+                        name={favoriteIds.includes(`tenant:${safeTenantId}`) ? 'heart' : 'heart-outline'}
+                        size={15}
+                        color={favoriteIds.includes(`tenant:${safeTenantId}`) ? '#EF4444' : '#FFFFFF'}
+                      />
                       <Text style={{ color: '#FFFFFF', fontSize: 11.5, fontWeight: '800' }}>
-                        {clientDistanceMiles} mi
+                        {favoriteIds.includes(`tenant:${safeTenantId}`)
+                          ? tr('En Favoritos', 'Saved')
+                          : tr('Guardar', 'Save')}
                       </Text>
-                    </View>
-                  ) : null}
+                    </TouchableOpacity>
 
-                  {/* ⭐ Píldora en vivo de Likes (👍) y Dislikes (👎) reflejada en la Portada */}
-                  <View
-                    style={{
-                      backgroundColor: 'rgba(15, 23, 42, 0.78)',
-                      borderWidth: 1,
-                      borderColor: 'rgba(245, 158, 11, 0.45)',
-                      paddingHorizontal: 11,
-                      paddingVertical: 6,
-                      borderRadius: 20,
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: 6,
-                      ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
-                    }}
-                  >
-                    <Ionicons name="star" size={11} color="#F59E0B" />
-                    <Text style={{ color: '#F59E0B', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.avg}</Text>
-                    <View style={{ width: 1, height: 10, backgroundColor: 'rgba(255,255,255,0.2)' }} />
-                    <TouchableOpacity onPress={() => startReactionFlow('like')} style={{ flexDirection: 'row', alignItems: 'center', gap: 3 }}>
-                      <Feather name="thumbs-up" size={11} color="#10B981" />
-                      <Text style={{ color: '#10B981', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.likes}</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => startReactionFlow('dislike')} style={{ flexDirection: 'row', alignItems: 'center', gap: 3, marginLeft: 2 }}>
-                      <Feather name="thumbs-down" size={11} color="#EF4444" />
-                      <Text style={{ color: '#EF4444', fontSize: 11.5, fontWeight: '900' }}>{ratingSummary.dislikes}</Text>
-                    </TouchableOpacity>
+                    {tenantInfo?.logoUrl ? (
+                      <TouchableOpacity
+                        onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 17,
+                          backgroundColor: 'rgba(15, 23, 42, 0.75)',
+                          borderWidth: 1,
+                          borderColor: 'rgba(255,255,255,0.22)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
+                        }}
+                      >
+                        <Feather name="maximize-2" size={14} color="#FFFFFF" />
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
                 </View>
-
-                {tenantInfo?.logoUrl ? (
-                  <TouchableOpacity
-                    onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Portada' })}
-                    style={{
-                      width: 36,
-                      height: 36,
-                      borderRadius: 18,
-                      backgroundColor: 'rgba(15, 23, 42, 0.72)',
-                      borderWidth: 1,
-                      borderColor: 'rgba(255,255,255,0.22)',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      ...(Platform.OS === 'web' ? { backdropFilter: 'blur(12px)' } : {}) as any
-                    }}
-                  >
-                    <Feather name="maximize-2" size={15} color="#FFFFFF" />
-                  </TouchableOpacity>
-                ) : null}
               </View>
 
-              {/* Contenido Inferior sobre el Degradado (Sin los 3 puntos ● ○ ○) */}
-              <View
-                style={{
-                  position: 'absolute',
-                  left: isMobile ? 16 : 28,
-                  right: isMobile ? 16 : 28,
-                  bottom: isMobile ? 18 : 24,
-                  zIndex: 10
-                }}
-              >
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+              {/* Bloque Inferior: TEXTO DEBAJO DE LA IMAGEN (Ordenado, limpio y sin cruzarse en móvil) */}
+              <View style={{ padding: isMobile ? 18 : 26, backgroundColor: tColor.card }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 }}>
                   {tenantInfo?.logoUrl ? (
                     <TouchableOpacity
                       activeOpacity={0.85}
                       onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Logo' })}
                       style={{
-                        width: isMobile ? 48 : 56,
-                        height: isMobile ? 48 : 56,
+                        width: isMobile ? 46 : 54,
+                        height: isMobile ? 46 : 54,
                         borderRadius: 14,
                         overflow: 'hidden',
                         borderWidth: 2,
@@ -3419,8 +3480,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   ) : (
                     <View
                       style={{
-                        width: isMobile ? 48 : 56,
-                        height: isMobile ? 48 : 56,
+                        width: isMobile ? 46 : 54,
+                        height: isMobile ? 46 : 54,
                         borderRadius: 14,
                         backgroundColor: brandColor,
                         alignItems: 'center',
@@ -3439,31 +3500,31 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   <View style={{ flex: 1, minWidth: 0 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Text
-                        style={{ color: '#FFFFFF', fontSize: isMobile ? 18 : 22, fontWeight: '900' }}
+                        style={{ color: tColor.text, fontSize: isMobile ? 18 : 22, fontWeight: '900' }}
                         numberOfLines={1}
                       >
                         {tenantInfo?.name || 'AutoFlow'}
                       </Text>
                       <Ionicons name="checkmark-circle" size={17} color={brandColor} />
                     </View>
-                    <Text style={{ color: '#CBD5E1', fontSize: isMobile ? 12 : 13, fontWeight: '600', marginTop: 1 }} numberOfLines={1}>
+                    <Text style={{ color: tColor.muted, fontSize: isMobile ? 12 : 13, fontWeight: '600', marginTop: 2 }} numberOfLines={1}>
                       {clientDistanceMiles
-                        ? `${t.distancePrefix} ${clientDistanceMiles} ${t.distanceSuffix} ${tenantInfo?.name || 'AutoFlow'}`
+                        ? `📍 ${t.distancePrefix} ${clientDistanceMiles} ${t.distanceSuffix} ${tenantInfo?.name || 'AutoFlow'}`
                         : tr('Agenda Abierta 24/7 en Tiempo Real', '24/7 Real-Time Online Booking')}
                     </Text>
                   </View>
                 </View>
 
-                <Text style={{ fontSize: isMobile ? 26 : 34, fontWeight: '900', color: '#FFFFFF', marginBottom: 4, lineHeight: isMobile ? 31 : 40 }}>
+                <Text style={{ fontSize: isMobile ? 24 : 32, fontWeight: '900', color: tColor.text, marginBottom: 4, lineHeight: isMobile ? 29 : 38 }}>
                   {t.heroTitle1} <Text style={{ color: brandColor }}>{t.heroTitle2}</Text>
                 </Text>
-                <Text style={{ color: '#E2E8F0', fontSize: isMobile ? 12.5 : 14, lineHeight: isMobile ? 18 : 20 }} numberOfLines={2}>
+                <Text style={{ color: tColor.muted, fontSize: isMobile ? 13 : 14, lineHeight: isMobile ? 19 : 21 }}>
                   {t.heroSubtitle}
                 </Text>
               </View>
             </View>
 
-            {/* ⭐ BARRA INTERACTIVA DE CALIFICACIÓN Y REACCIONES RÁPIDAS (100% RESPONSIVE) ⭐ */}
+            {/* ⭐ 2. BARRA INTERACTIVA DE CALIFICACIÓN Y REACCIONES RÁPIDAS (ÚNICO LUGAR DE ESTRELLAS Y LIKES) ⭐ */}
             <TouchableOpacity
               activeOpacity={0.88}
               onPress={() => handleNavigate('expediente')}
@@ -3474,7 +3535,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 paddingHorizontal: isMobile ? 14 : 20,
                 paddingVertical: isMobile ? 12 : 14,
                 borderRadius: 18,
-                marginBottom: isMobile ? 28 : 40,
+                marginBottom: 14,
                 flexDirection: isMobile ? 'column' : 'row',
                 alignItems: isMobile ? 'stretch' : 'center',
                 justifyContent: 'space-between',
@@ -3508,20 +3569,46 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
               </View>
             </TouchableOpacity>
 
+            {/* 🌟 3. BANNER DE CAMPAÑA PUSH ACTIVA (REUBICADO DEBAJO DEL HERO Y COMPACTO PARA NO QUITAR PROTAGONISMO) 🌟 */}
+            {pushCampaignsList.filter(c => c.is_active !== false).slice(0, 1).map((activeCamp) => (
+              <View key={`${activeCamp.id}-banner`} style={{ backgroundColor: 'rgba(255, 94, 0, 0.09)', borderWidth: 1, borderColor: `${brandColor}66`, borderRadius: 16, paddingHorizontal: isMobile ? 14 : 18, paddingVertical: isMobile ? 12 : 13, marginBottom: isMobile ? 24 : 32, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 10, position: 'relative' }}>
+                <View style={{ flex: 1, paddingRight: isMobile ? 24 : 0 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 3, flexWrap: 'wrap' }}>
+                    <View style={{ backgroundColor: brandColor, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                      <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>{t.promoBadge}</Text>
+                    </View>
+                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{toTitleCase(activeCamp.title)}</Text>
+                  </View>
+                  <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 17 }}>{toTitleCase(activeCamp.message)}</Text>
+                </View>
+                {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 9, paddingHorizontal: 15, borderRadius: 10 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
+                  <Text style={[styles.primaryButtonText, { fontSize: 12.5 }]}>{t.promoClaim}</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+
             <View style={[styles.bentoGrid, { gap: isMobile ? 16 : 24 }]}>
               {activeCatalogServices.length > 0 ? activeCatalogServices.map((srv, idx) => (
                 <View key={`${srv.id}-${idx}`} style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden', minWidth: isMobile ? '100%' : 300 }]}>
                   {srv.imageUrl ? (
                     <TouchableOpacity style={{ width: '100%', height: 205, backgroundColor: tColor.input, position: 'relative' }} onPress={() => setExpandedImage({ path: srv.imageUrl!, alt: srv.name })}>
                        <PrivateSupabaseImage path={srv.imageUrl} alt={srv.name} />
-                       <BottomHalfGradientOverlay heightPct="55%" baseColor="5, 7, 12" />
+                       <BottomHalfGradientOverlay heightPct="36%" baseColor="18, 22, 28" />
                     </TouchableOpacity>
                   ) : null}
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => toggleFavoriteItem(`service:${srv.id}`)}
+                    style={{ position: 'absolute', top: 10, right: 44, width: 28, height: 28, borderRadius: 14, backgroundColor: favoriteIds.includes(`service:${srv.id}`) ? 'rgba(239, 68, 68, 0.25)' : 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: favoriteIds.includes(`service:${srv.id}`) ? '#EF4444' : 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', zIndex: 5 }}
+                  >
+                    <Ionicons name={favoriteIds.includes(`service:${srv.id}`) ? 'heart' : 'heart-outline'} size={14} color={favoriteIds.includes(`service:${srv.id}`) ? '#EF4444' : '#FFFFFF'} />
+                  </TouchableOpacity>
                   {renderReportButton({ type: 'service', id: srv.id, title: srv.name, excerpt: String(srv.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                   <View style={{ padding: isMobile ? 20 : 28 }}>
                     <Text style={{ fontSize: isMobile ? 18 : 20, fontWeight: '800', color: tColor.text, marginBottom: 10, paddingRight: 28 }}>{toTitleCase(srv.name)}</Text>
                     {srv.description ? (
-                      <Text style={{ color: tColor.muted, marginBottom: 20, lineHeight: 21, fontSize: 13.5 }}>{toTitleCase(srv.description)}</Text>
+                      <Text style={{ color: tColor.muted, marginBottom: 20, lineHeight: 21, fontSize: 13.5 }}>{toSentenceCase(srv.description)}</Text>
                     ) : (
                       <Text style={{ color: tColor.muted, marginBottom: 20, fontSize: 13.5 }}>⏱️ {srv.durationMinutes || 30} {tr('minutos', 'minutes')}</Text>
                     )}
@@ -3549,7 +3636,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     <View style={{ flex: 1, borderRadius: 20, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, backgroundColor: tColor.card }}>
                       <TouchableOpacity style={{ width: '100%', height: Math.min(340, Math.max(230, Math.round(itemWidth * 0.88))), backgroundColor: tColor.input, position: 'relative' }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
                         <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx + 1}`} />
-                        <BottomHalfGradientOverlay heightPct="50%" baseColor="5, 7, 12" />
+                        <BottomHalfGradientOverlay heightPct="36%" baseColor="18, 22, 28" />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => toggleFavoriteItem(`portfolio:${item.url}`)}
+                        style={{ position: 'absolute', top: 10, right: 44, width: 28, height: 28, borderRadius: 14, backgroundColor: favoriteIds.includes(`portfolio:${item.url}`) ? 'rgba(239, 68, 68, 0.25)' : 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: favoriteIds.includes(`portfolio:${item.url}`) ? '#EF4444' : 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', zIndex: 5 }}
+                      >
+                        <Ionicons name={favoriteIds.includes(`portfolio:${item.url}`) ? 'heart' : 'heart-outline'} size={14} color={favoriteIds.includes(`portfolio:${item.url}`) ? '#EF4444' : '#FFFFFF'} />
                       </TouchableOpacity>
                       {renderReportButton({ type: 'portfolio', id: item.url, title: item.title, excerpt: String(item.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                       <View style={{ padding: 18 }}>

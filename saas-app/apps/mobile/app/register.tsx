@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
@@ -8,8 +8,7 @@ import { createClient } from '@supabase/supabase-js';
 // ==========================================
 // ⚙️ CONFIGURACIÓN DE SUPABASE
 // ==========================================
-// 1. Agrega esta constante arriba en apps/mobile/app/register.tsx:
-const SAFE_TOP_INSET = Platform.OS === 'ios' ? 60 : Platform.OS === 'android' ? 42 : 0;
+export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 58 : Platform.OS === 'android' ? (StatusBar.currentHeight ? StatusBar.currentHeight + 12 : 42) : 0;
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hbofrqdubrtogwbuddsa.supabase.co';
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'tu-anon-key';
 
@@ -68,7 +67,7 @@ const ProIconBox = ({
   </View>
 );
 
-const toTitleCase = (str: string) => str.replace(/\b\w/g, (match) => match.toUpperCase());
+const toTitleCase = (str: string) => (str ? String(str).toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase()) : '');
 
 export default function B2BRegistrationScreen() {
   const router = useRouter();
@@ -79,13 +78,28 @@ export default function B2BRegistrationScreen() {
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Paso 1: Cuenta
+  // Paso 1: Cuenta & Seguridad
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+
+  // Reglas de seguridad en tiempo real para la contraseña del Portal Interno
+  const passwordChecks = {
+    minLength: password.length >= 8,
+    hasUppercase: /[A-Z]/.test(password),
+    hasNumber: /[0-9]/.test(password),
+    hasSpecial: /[^A-Za-z0-9]/.test(password),
+  };
+  const passwordScore = Object.values(passwordChecks).filter(Boolean).length;
+  const isPasswordStrong = passwordChecks.minLength && passwordChecks.hasUppercase && passwordChecks.hasNumber && passwordChecks.hasSpecial;
+  const passwordsMatch = password.length > 0 && password === confirmPassword;
   
   // Paso 2: Ubicación Real
   const [businessName, setBusinessName] = useState('');
   const [category, setCategory] = useState('');
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [dbCategories, setDbCategories] = useState<{ code: string; name: string }[]>([
     { code: 'automotive', name: 'Talleres Mecánicos y Automotriz' },
     { code: 'spa', name: 'Spas y Centros de Belleza' },
@@ -97,18 +111,23 @@ export default function B2BRegistrationScreen() {
   useEffect(() => {
     const loadCategoriesFromDb = async () => {
       try {
-        const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-        const res = await fetch(`${API_URL}/api/categories`);
+        const baseHost =
+          process.env.EXPO_PUBLIC_API_URL ||
+          process.env.NEXT_PUBLIC_API_URL ||
+          (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
+        const res = await fetch(`${baseHost.replace(/\/$/, '')}/api/categories`);
         if (res.ok) {
           const data = await res.json();
           if (data.success && Array.isArray(data.categories) && data.categories.length > 0) {
-            setDbCategories(data.categories);
+            setDbCategories(data.categories.filter((c: any) => c.isActive !== false));
           }
         }
       } catch (e) {}
     };
     loadCategoriesFromDb();
   }, []);
+
+  const selectedCategoryObj = dbCategories.find((c) => c.code === category);
   const [address, setAddress] = useState('');
   const [stateCode, setStateCode] = useState('');
   const [city, setCity] = useState('');
@@ -209,7 +228,18 @@ export default function B2BRegistrationScreen() {
   };
 
   const handleNextStep = () => {
-    if (step === 1 && (!email || !password)) return alert('Por favor completa tus datos de acceso.');
+    if (step === 1) {
+      const cleanEmail = email.trim();
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return alert('Por favor ingresa un correo electrónico comercial válido.');
+      }
+      if (!isPasswordStrong) {
+        return alert('Tu contraseña debe tener al menos 8 caracteres, una letra mayúscula, un número y un carácter especial (ej: @, #, $, !).');
+      }
+      if (!passwordsMatch) {
+        return alert('Las contraseñas no coinciden. Verifica la confirmación.');
+      }
+    }
     if (step === 2 && (!businessName || !category || !address || !city || !zipCode || !stateCode)) return alert('Completa todos los campos de ubicación.');
     setStep(step + 1);
   };
@@ -224,7 +254,17 @@ export default function B2BRegistrationScreen() {
         uploadedLogoUrl = await convertAndUploadLogo(logoFile);
       }
 
-      const newTenantId = crypto.randomUUID();
+      const generateSafeUuid = () => {
+        if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+          return globalThis.crypto.randomUUID();
+        }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+      };
+      const newTenantId = generateSafeUuid();
 
       const tenantPayload = {
         id: newTenantId,
@@ -242,7 +282,7 @@ export default function B2BRegistrationScreen() {
         password
       };
 
-      const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+      const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
       const response = await fetch(`${API_URL}/api/tenants/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -255,7 +295,16 @@ export default function B2BRegistrationScreen() {
         throw new Error(json.message || 'Error al registrar el negocio en el servidor.');
       }
 
-      alert(`¡Negocio registrado con éxito! 🎉\n\nRedirigiendo a tu panel interno...`);
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(
+            `autoflow_admin_creds_${newTenantId}`,
+            JSON.stringify({ email: email.trim().toLowerCase(), password })
+          );
+        } catch (_e) {}
+      }
+
+      alert(`¡Negocio registrado con éxito! 🎉\n\nUsa este correo y contraseña para ingresar a tu Portal Interno.`);
       setIsSubmitting(false);
 
       router.push(`/${newTenantId}` as any);
@@ -271,7 +320,17 @@ export default function B2BRegistrationScreen() {
     <View style={styles.root}>
       <WebStyles />
       
-      <View style={[styles.header, { zIndex: 50 }]}>
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: SAFE_TOP_INSET,
+            height: (isMobile ? 64 : 74) + SAFE_TOP_INSET,
+            paddingHorizontal: isMobile ? 16 : 40,
+            zIndex: 100,
+          },
+        ]}
+      >
         <TouchableOpacity
           activeOpacity={0.7}
           style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }}
@@ -344,18 +403,171 @@ export default function B2BRegistrationScreen() {
             {step === 1 && (
               <View style={styles.formContainer}>
                 <Text style={styles.title}>Crea tu cuenta administradora</Text>
-                <Text style={styles.subtitle}>Con estas credenciales accederás al panel operativo de tu negocio.</Text>
+                <Text style={styles.subtitle}>Con estas credenciales protegerás el acceso al Portal Interno y caja de tu negocio.</Text>
                 
-                <View style={styles.glassCard}>
-                  <View style={{ marginBottom: 24 }}>
+                <View style={[styles.glassCard, isMobile && { padding: 24 }]}>
+                  <View style={{ marginBottom: 22 }}>
                     <Text style={styles.inputLabel}>Correo Electrónico Comercial</Text>
-                    <TextInput style={styles.formInput} placeholder="ejemplo@mitaller.com" placeholderTextColor="#475569" keyboardType="email-address" autoCapitalize="none" value={email} onChangeText={setEmail} />
+                    <TextInput
+                      style={styles.formInput}
+                      placeholder="ejemplo@mitaller.com"
+                      placeholderTextColor="#475569"
+                      keyboardType="email-address"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      value={email}
+                      onChangeText={setEmail}
+                    />
                   </View>
-                  <View style={{ marginBottom: 32 }}>
-                    <Text style={styles.inputLabel}>Contraseña Segura</Text>
-                    <TextInput style={styles.formInput} placeholder="Mínimo 8 caracteres" placeholderTextColor="#475569" secureTextEntry value={password} onChangeText={setPassword} />
+
+                  <View style={{ marginBottom: 14 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <Text style={[styles.inputLabel, { marginBottom: 0 }]}>Contraseña Segura (Portal Interno)</Text>
+                      {password.length > 0 && (
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '800',
+                            color:
+                              passwordScore <= 1
+                                ? '#EF4444'
+                                : passwordScore <= 3
+                                ? '#F59E0B'
+                                : '#10B981',
+                          }}
+                        >
+                          {passwordScore <= 1
+                            ? 'Débil'
+                            : passwordScore === 2
+                            ? 'Regular'
+                            : passwordScore === 3
+                            ? 'Buena'
+                            : 'Muy Segura'}
+                        </Text>
+                      )}
+                    </View>
+
+                    <View style={styles.passwordInputWrapper}>
+                      <TextInput
+                        style={styles.passwordInnerInput}
+                        placeholder="Ej: Taller2026$"
+                        placeholderTextColor="#475569"
+                        secureTextEntry={!showPassword}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        value={password}
+                        onChangeText={setPassword}
+                      />
+                      <TouchableOpacity
+                        onPress={() => setShowPassword(!showPassword)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        style={styles.eyeButton}
+                      >
+                        <Feather name={showPassword ? 'eye-off' : 'eye'} size={18} color="#94A3B8" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Barra visual de fortaleza de contraseña (4 niveles) */}
+                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 10 }}>
+                      {[1, 2, 3, 4].map((lvl) => {
+                        const active = passwordScore >= lvl;
+                        const barColor =
+                          passwordScore <= 1
+                            ? '#EF4444'
+                            : passwordScore <= 3
+                            ? '#F59E0B'
+                            : '#10B981';
+                        return (
+                          <View
+                            key={lvl}
+                            style={{
+                              flex: 1,
+                              height: 4,
+                              borderRadius: 2,
+                              backgroundColor: active ? barColor : 'rgba(255,255,255,0.08)',
+                            }}
+                          />
+                        );
+                      })}
+                    </View>
+
+                    {/* Lista de requisitos en tiempo real */}
+                    <View style={styles.securityChecklistBox}>
+                      {[
+                        { ok: passwordChecks.minLength, label: 'Mínimo 8 caracteres' },
+                        { ok: passwordChecks.hasUppercase, label: 'Al menos 1 letra mayúscula (A-Z)' },
+                        { ok: passwordChecks.hasNumber, label: 'Al menos 1 número (0-9)' },
+                        { ok: passwordChecks.hasSpecial, label: 'Al menos 1 símbolo especial (@, #, $, !, *)' },
+                      ].map((rule, idx) => (
+                        <View key={idx} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Ionicons
+                            name={rule.ok ? 'checkmark-circle' : 'ellipse-outline'}
+                            size={15}
+                            color={rule.ok ? '#10B981' : '#64748B'}
+                          />
+                          <Text style={{ fontSize: 12, color: rule.ok ? '#E2E8F0' : '#94A3B8', fontWeight: rule.ok ? '600' : '400' }}>
+                            {rule.label}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
                   </View>
-                  <TouchableOpacity style={[styles.primaryButton, { backgroundColor: primaryColor, flexDirection: 'row', gap: 8 }]} onPress={handleNextStep}>
+
+                  {/* Confirmar Contraseña */}
+                  <View style={{ marginBottom: 28 }}>
+                    <Text style={styles.inputLabel}>Confirmar Contraseña</Text>
+                    <View
+                      style={[
+                        styles.passwordInputWrapper,
+                        confirmPassword.length > 0 && {
+                          borderColor: passwordsMatch ? '#10B981' : '#EF4444',
+                        },
+                      ]}
+                    >
+                      <TextInput
+                        style={styles.passwordInnerInput}
+                        placeholder="Repite tu contraseña"
+                        placeholderTextColor="#475569"
+                        secureTextEntry={!showConfirmPassword}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        value={confirmPassword}
+                        onChangeText={setConfirmPassword}
+                      />
+                      <TouchableOpacity
+                        onPress={() => setShowConfirmPassword(!showConfirmPassword)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        style={styles.eyeButton}
+                      >
+                        <Feather name={showConfirmPassword ? 'eye-off' : 'eye'} size={18} color="#94A3B8" />
+                      </TouchableOpacity>
+                    </View>
+                    {confirmPassword.length > 0 && (
+                      <Text
+                        style={{
+                          fontSize: 11.5,
+                          marginTop: 6,
+                          fontWeight: '700',
+                          color: passwordsMatch ? '#10B981' : '#EF4444',
+                        }}
+                      >
+                        {passwordsMatch ? '✓ Las contraseñas coinciden' : '✕ Las contraseñas no coinciden'}
+                      </Text>
+                    )}
+                  </View>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.primaryButton,
+                      {
+                        backgroundColor: primaryColor,
+                        flexDirection: 'row',
+                        gap: 8,
+                        opacity: isPasswordStrong && passwordsMatch ? 1 : 0.85,
+                      },
+                    ]}
+                    onPress={handleNextStep}
+                  >
                     <Text style={styles.primaryButtonText}>Continuar</Text>
                     <Feather name="arrow-right" size={16} color="#FFF" />
                   </TouchableOpacity>
@@ -375,7 +587,7 @@ export default function B2BRegistrationScreen() {
                       <TextInput style={styles.formInput} placeholder="Ej: Auto Motors LA" placeholderTextColor="#475569" value={businessName} onChangeText={text => setBusinessName(toTitleCase(text))} />
                     </View>
                     <View style={{ flex: 1.5 }}>
-                      <Text style={styles.inputLabel}>Categoría</Text>
+                      <Text style={styles.inputLabel}>Categoría Autorizada</Text>
                       {Platform.OS === 'web' ? (
                         <select className="web-input-override" value={category} onChange={e => setCategory(e.target.value)}>
                           <option value="" disabled>Elige Nicho Comercial</option>
@@ -386,7 +598,114 @@ export default function B2BRegistrationScreen() {
                           ))}
                         </select>
                       ) : (
-                        <TextInput style={styles.formInput} placeholder="Ej: automotive" placeholderTextColor="#475569" value={category} onChangeText={setCategory} />
+                        <>
+                          <TouchableOpacity
+                            activeOpacity={0.8}
+                            onPress={() => setIsCategoryModalOpen(true)}
+                            style={[
+                              styles.formInput,
+                              {
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                borderColor: category ? primaryColor : 'rgba(255,255,255,0.12)',
+                              },
+                            ]}
+                          >
+                            <Text
+                              numberOfLines={1}
+                              style={{
+                                flex: 1,
+                                fontSize: 15,
+                                fontWeight: category ? '700' : '400',
+                                color: category ? '#FFFFFF' : '#64748B',
+                              }}
+                            >
+                              {selectedCategoryObj ? selectedCategoryObj.name : 'Selecciona una categoría...'}
+                            </Text>
+                            <Feather name="chevron-down" size={18} color="#94A3B8" />
+                          </TouchableOpacity>
+
+                          <Modal
+                            visible={isCategoryModalOpen}
+                            transparent
+                            animationType="fade"
+                            onRequestClose={() => setIsCategoryModalOpen(false)}
+                          >
+                            <TouchableOpacity
+                              activeOpacity={1}
+                              onPress={() => setIsCategoryModalOpen(false)}
+                              style={{
+                                flex: 1,
+                                backgroundColor: 'rgba(0, 0, 0, 0.78)',
+                                justifyContent: 'center',
+                                paddingHorizontal: 20,
+                              }}
+                            >
+                              <View
+                                style={{
+                                  backgroundColor: '#0E1218',
+                                  borderRadius: 22,
+                                  borderWidth: 1,
+                                  borderColor: 'rgba(255,255,255,0.14)',
+                                  padding: 20,
+                                  maxHeight: '70%',
+                                }}
+                              >
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                                  <Text style={{ color: '#FFFFFF', fontSize: 17, fontWeight: '900' }}>
+                                    Categorías Autorizadas
+                                  </Text>
+                                  <TouchableOpacity onPress={() => setIsCategoryModalOpen(false)}>
+                                    <Feather name="x" size={20} color="#94A3B8" />
+                                  </TouchableOpacity>
+                                </View>
+
+                                <ScrollView showsVerticalScrollIndicator={false}>
+                                  {dbCategories.map((cat) => {
+                                    const isSelected = category === cat.code;
+                                    return (
+                                      <TouchableOpacity
+                                        key={cat.code}
+                                        activeOpacity={0.75}
+                                        onPress={() => {
+                                          setCategory(cat.code);
+                                          setIsCategoryModalOpen(false);
+                                        }}
+                                        style={{
+                                          flexDirection: 'row',
+                                          alignItems: 'center',
+                                          justifyContent: 'space-between',
+                                          paddingVertical: 14,
+                                          paddingHorizontal: 14,
+                                          borderRadius: 12,
+                                          marginBottom: 8,
+                                          backgroundColor: isSelected ? `${primaryColor}20` : 'rgba(255,255,255,0.04)',
+                                          borderWidth: 1,
+                                          borderColor: isSelected ? primaryColor : 'rgba(255,255,255,0.06)',
+                                        }}
+                                      >
+                                        <View style={{ flex: 1, paddingRight: 10 }}>
+                                          <Text style={{ color: '#FFFFFF', fontSize: 14.5, fontWeight: '700' }}>
+                                            {cat.name}
+                                          </Text>
+                                          <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
+                                            Código: {cat.code}
+                                          </Text>
+                                        </View>
+                                        <Ionicons
+                                          name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                                          size={20}
+                                          color={isSelected ? primaryColor : '#64748B'}
+                                        />
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </ScrollView>
+                              </View>
+                            </TouchableOpacity>
+                          </Modal>
+                        </>
                       )}
                     </View>
                   </View>
@@ -584,7 +903,18 @@ const styles = StyleSheet.create({
     zIndex: 100,
   },
   root: { flex: 1, backgroundColor: '#05070C' },
-  header: { height: 76, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: Platform.OS === 'web' ? 40 : 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
+  header: {
+    paddingTop: SAFE_TOP_INSET,
+    height: (Platform.OS === 'web' ? 74 : 64) + SAFE_TOP_INSET,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: Platform.OS === 'web' ? 40 : 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: 'rgba(5, 7, 12, 0.96)',
+    zIndex: 100,
+  },
   contentArea: { paddingHorizontal: Platform.OS === 'web' ? 40 : 20, paddingTop: 40, paddingBottom: 80, alignSelf: 'center', width: '100%', alignItems: 'center' },
   
   formContainer: { width: '100%', maxWidth: 600 },
@@ -600,6 +930,38 @@ const styles = StyleSheet.create({
   inputLabel: { fontSize: 12, color: '#94A3B8', fontWeight: 'bold', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 },
   formInput: { backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', color: '#FFFFFF', borderRadius: 12, paddingHorizontal: 16, height: 56, fontSize: 16, ...(Platform.OS === 'web' && { outlineStyle: 'none' } as any) },
   
+  passwordInputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 12,
+    height: 56,
+    paddingLeft: 16,
+    paddingRight: 12,
+  },
+  passwordInnerInput: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 16,
+    height: '100%',
+    ...(Platform.OS === 'web' && { outlineStyle: 'none' } as any),
+  },
+  eyeButton: {
+    padding: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  securityChecklistBox: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    gap: 6,
+  },
   primaryButton: { backgroundColor: '#FF5E00', borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
   primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
   secondaryButton: { backgroundColor: 'rgba(255,255,255,0.02)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },

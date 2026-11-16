@@ -40,6 +40,11 @@ export const tenants = pgTable('tenants', {
   pushLimitWeekly: integer('push_limit_weekly').default(0), 
   pushUsedThisWeek: integer('push_used_this_week').default(0),
 
+  // 🔐 CREDENCIALES Y SEGURIDAD DEL PORTAL INTERNO DEL NEGOCIO
+  adminEmail: varchar('admin_email', { length: 255 }),
+  adminPasswordHash: text('admin_password_hash'),
+  portalPinHash: text('portal_pin_hash'),
+
   // 📲 CANAL INTERNO DE TELEGRAM PARAMETRIZADO POR NEGOCIO / CONSULTORIO
   telegramChatId: varchar('telegram_chat_id', { length: 100 }),
   telegramBotToken: varchar('telegram_bot_token', { length: 255 }),
@@ -97,6 +102,14 @@ export const users = pgTable('users', {
   name: varchar('name', { length: 255 }).notNull(),
   email: varchar('email', { length: 255 }).notNull(), 
   phone: varchar('phone', { length: 50 }), 
+
+  // 🔐 SEGURIDAD Y AUTENTICACIÓN (Hash de contraseña nunca en texto plano, control de intentos y bloqueo)
+  passwordHash: text('password_hash'),
+  passwordUpdatedAt: timestamp('password_updated_at'),
+  failedLoginAttempts: integer('failed_login_attempts').default(0).notNull(),
+  lockedUntil: timestamp('locked_until'),
+  lastLoginAt: timestamp('last_login_at'),
+  mustChangePassword: boolean('must_change_password').default(false).notNull(),
   zipCode: varchar('zip_code', { length: 20 }), 
   age: integer('age'), 
   
