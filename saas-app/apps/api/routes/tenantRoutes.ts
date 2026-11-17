@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getTenantInfo, createTenant, updateTenantConfig, authenticateTenantStaff, loginOwnerAccount } from '../controllers/tenantController';
+import { getTenantInfo, createTenant, updateTenantConfig, authenticateTenantStaff, loginOwnerAccount, searchDirectory } from '../controllers/tenantController';
 
 const router = Router();
 
@@ -8,5 +8,6 @@ router.post('/register', createTenant);
 router.put('/config', updateTenantConfig);
 router.post('/auth-staff', authenticateTenantStaff);
 router.post('/owner-login', loginOwnerAccount);
+router.get('/directory/search', searchDirectory);
 
 export default router;

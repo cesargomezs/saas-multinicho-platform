@@ -188,6 +188,10 @@ export default function B2BRegistrationScreen() {
   ];
 
   // Autocompletado gratuito por ZIP (Zippopotam.us)
+  const [latitude, setLatitude] = useState('');
+  const [longitude, setLongitude] = useState('');
+
+  // Autocompletado gratuito por ZIP (Zippopotam.us) + Latitud y Longitud
   const handleZipLookup = async (text: string) => {
     const cleanZip = text.replace(/\D/g, '');
     setZipCode(cleanZip);
@@ -201,6 +205,8 @@ export default function B2BRegistrationScreen() {
             const place = data.places[0];
             setCity(place['place name']);
             setStateCode(place['state abbreviation']);
+            if (place['latitude']) setLatitude(String(place['latitude']));
+            if (place['longitude']) setLongitude(String(place['longitude']));
           }
         }
       } catch (error) {
@@ -209,6 +215,8 @@ export default function B2BRegistrationScreen() {
     } else if (cleanZip.length < 5) {
       setCity('');
       setStateCode('');
+      setLatitude('');
+      setLongitude('');
     }
   };
 
@@ -339,6 +347,8 @@ export default function B2BRegistrationScreen() {
         city, 
         state: stateCode, 
         zipCode,
+        latitude: latitude ? Number(latitude) : null,
+        longitude: longitude ? Number(longitude) : null,
         logoUrl: uploadedLogoUrl, // ➔ URL completa enviada a la BD
         primaryColor,
         planTier: selectedPlan,

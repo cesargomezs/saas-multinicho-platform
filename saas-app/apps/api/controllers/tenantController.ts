@@ -138,6 +138,8 @@ export async function createTenant(req: Request, res: Response) {
       city: city ? city.trim() : null,
       state: state ? state.trim().toUpperCase() : null,
       zipCode: zipCode ? zipCode.trim() : null,
+      latitude: req.body.latitude ? String(req.body.latitude) : null,
+      longitude: req.body.longitude ? String(req.body.longitude) : null,
       logoUrl: logoUrl || null,
       primaryColor: primaryColor || '#FF5E00',
       planTier: planTier || 'starter',
@@ -597,5 +599,125 @@ export async function loginOwnerAccount(req: Request, res: Response) {
   } catch (error: any) {
     console.error('❌ Error en loginOwnerAccount:', error);
     return res.status(500).json({ success: false, message: error.message || 'Error interno del servidor.' });
+  }
+}
+
+
+// 🔍 Buscador en el Directorio con Haversine (15 millas a la redonda por defecto y soporte de coordenadas lat/lon)
+export async function searchDirectory(req: Request, res: Response) {
+  try {
+    const { locationQuery, radius, niche } = req.query;
+    const cleanQuery = String(locationQuery || '').trim().toLowerCase();
+    const maxRadius = Number(radius) || 15; // 15 millas a la redonda por defecto
+    const targetNiche = String(niche || 'all').trim().toLowerCase();
+
+    // 1. Obtener todos los tenants activos
+    let allTenants = await db.select().from(tenants);
+    allTenants = allTenants.filter((t: any) => {
+      const status = String(t.subscriptionStatus || t.subscription_status || 'active').toLowerCase();
+      const activeFlag = t.isActive !== false && t.is_active !== false;
+      return status === 'active' && activeFlag;
+    });
+
+    if (targetNiche && targetNiche !== 'all') {
+      allTenants = allTenants.filter((t: any) => String(t.niche || '').toLowerCase() === targetNiche);
+    }
+
+    // 2. Si el usuario ingresó un Zip Code (5 dígitos) o Ciudad, obtenemos sus coordenadas desde Zippopotam.us o filtramos
+    let centerLat: number | null = null;
+    let centerLon: number | null = null;
+
+    if (cleanQuery.length === 5 && /^\d{5}$/.test(cleanQuery)) {
+      try {
+        const zipRes = await fetch(`https://api.zippopotam.us/us/${cleanQuery}`);
+        if (zipRes.ok) {
+          const zipData = await zipRes.json();
+          if (zipData && zipData.places && zipData.places.length > 0) {
+            centerLat = Number(zipData.places[0].latitude);
+            centerLon = Number(zipData.places[0].longitude);
+          }
+        }
+      } catch (_e) {}
+    }
+
+    // Fórmula Haversine para calcular distancia exacta en millas entre dos coordenadas (lat1, lon1) y (lat2, lon2)
+    const calculateHaversineMiles = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+      const toRad = (x: number) => (x * Math.PI) / 180;
+      const R = 3958.8; // Radio de la Tierra en millas
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    };
+
+    let matchedTenants = allTenants;
+
+    if (centerLat !== null && centerLon !== null) {
+      // Filtrar estrictamente por el radio (ej. 15 millas) usando Haversine
+      matchedTenants = allTenants.filter((t: any) => {
+        const tLat = Number(t.latitude);
+        const tLon = Number(t.longitude);
+        if (!tLat || !tLon) {
+          // Si el negocio no tiene lat/lon pero coincide el zip code, lo incluimos
+          const zip = String(t.zipCode || t.zip_code || '').trim().toLowerCase();
+          return zip === cleanQuery;
+        }
+        const dist = calculateHaversineMiles(centerLat!, centerLon!, tLat, tLon);
+        return dist <= maxRadius;
+      });
+    } else if (cleanQuery) {
+      // Búsqueda por texto (Ciudad, Estado o Nombre)
+      matchedTenants = allTenants.filter((t: any) => {
+        const zip = String(t.zipCode || t.zip_code || '').trim().toLowerCase();
+        const city = String(t.city || '').trim().toLowerCase();
+        const state = String(t.state || '').trim().toLowerCase();
+        const name = String(t.name || '').trim().toLowerCase();
+        return zip.includes(cleanQuery) || city.includes(cleanQuery) || state.includes(cleanQuery) || name.includes(cleanQuery);
+      });
+    }
+
+    // Mapear resultados con distancia calculada
+    const results = matchedTenants.map((t: any) => {
+      const nicheCode = String(t.niche || 'automotive').toLowerCase();
+      let label = 'Taller Automotriz';
+      if (nicheCode === 'spa') label = 'Spa & Bienestar';
+      else if (nicheCode === 'barbershop') label = 'Barbería Clásica';
+      else if (nicheCode === 'legal') label = 'Firma Legal / Abogados';
+      else if (nicheCode === 'dental') label = 'Clínica Odontológica';
+
+      let distanceStr = '2.4';
+      if (centerLat !== null && centerLon !== null && t.latitude && t.longitude) {
+        const d = calculateHaversineMiles(centerLat, centerLon, Number(t.latitude), Number(t.longitude));
+        distanceStr = d.toFixed(1);
+      }
+
+      return {
+        id: t.id,
+        name: t.name,
+        niche: nicheCode,
+        city: t.city || 'Rancho Cucamonga',
+        state: t.state || 'CA',
+        zipCode: t.zipCode || t.zip_code || '91730',
+        logoUrl: t.logoUrl || t.logo_url,
+        primaryColor: t.primaryColor || t.primary_color || '#FF5E00',
+        distance: distanceStr,
+        label,
+        icon: nicheCode === 'spa' ? 'sparkles' : nicheCode === 'barbershop' ? 'scissors' : nicheCode === 'legal' ? 'shield' : nicheCode === 'dental' ? 'tooth' : 'car',
+        latitude: t.latitude,
+        longitude: t.longitude,
+        loyaltyConfig: t.loyaltyConfig || t.loyalty_config,
+      };
+    });
+
+    // Ordenar por distancia de menor a mayor
+    results.sort((a, b) => Number(a.distance) - Number(b.distance));
+
+    return res.status(200).json({ success: true, data: results });
+  } catch (error: any) {
+    console.error('❌ Error en searchDirectory:', error);
+    return res.status(500).json({ success: false, message: error.message || String(error) });
   }
 }
