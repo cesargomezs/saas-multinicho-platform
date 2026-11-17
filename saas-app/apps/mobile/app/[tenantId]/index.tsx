@@ -664,7 +664,7 @@ const ContentTermsCheck = ({ value, onChange, tColor, brandColor, lang = 'es' }:
 
 export default function TenantDashboardScreen() {
   const router = useRouter();
-  const { tenantId, view: viewParam, reaction: reactionParam } = useLocalSearchParams();
+  const { tenantId, view: viewParam, reaction: reactionParam, role: roleParam, section: sectionParam } = useLocalSearchParams();
   const { width } = useWindowDimensions();
   const isMobile = width <= 850;
 
@@ -915,6 +915,7 @@ export default function TenantDashboardScreen() {
 
   const handleStaffLogout = () => {
     setIsMechanicAuth(false);
+    setPortalAccessRole('staff');
     setMechanicPin('');
     setIsMobileMenuOpen(false);
     setIsSupportModalOpen(false);
@@ -949,7 +950,11 @@ export default function TenantDashboardScreen() {
   }, [isSpa, isBarbershop, isLegal, isDental]);
 
   const [isMechanicAuth, setIsMechanicAuth] = useState(false);
+  const [portalAccessRole, setPortalAccessRole] = useState<'owner' | 'staff'>('staff');
+  const [mechanicEmail, setMechanicEmail] = useState('');
   const [mechanicPin, setMechanicPin] = useState('');
+  const [showMechanicPassword, setShowMechanicPassword] = useState(false);
+  const [isAuthenticatingStaff, setIsAuthenticatingStaff] = useState(false);
   
   const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad' | 'recepcion_ia'>('today');
   const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
@@ -2962,13 +2967,27 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
   const handleNavigate = (view: 'servicios' | 'expediente' | 'mecanico') => { setActiveView(view); setIsMobileMenuOpen(false); if (view !== 'expediente') setPendingReaction(null); };
   const startReactionFlow = (type: 'like' | 'dislike') => { setPendingReaction(type); handleNavigate('expediente'); };
 
-  // Llegada desde el directorio: /{tenantId}?view=expediente&reaction=like|dislike
+  // Llegada desde el directorio o desde "Soy un Negocio" (Owner Portal):
+  // /{tenantId}?view=mecanico&role=owner&section=catalogo
   useEffect(() => {
     const v = Array.isArray(viewParam) ? viewParam[0] : viewParam;
     const r = Array.isArray(reactionParam) ? reactionParam[0] : reactionParam;
+    const rl = Array.isArray(roleParam) ? roleParam[0] : roleParam;
+    const sec = Array.isArray(sectionParam) ? sectionParam[0] : sectionParam;
+
     if (v === 'expediente') setActiveView('expediente');
+    if (v === 'mecanico') {
+      setActiveView('mecanico');
+      if (rl === 'owner') {
+        setIsMechanicAuth(true);
+        setPortalAccessRole('owner');
+      }
+      if (sec) {
+        setAgendaFilter(sec as any);
+      }
+    }
     if (r === 'like' || r === 'dislike') setPendingReaction(r);
-  }, [viewParam, reactionParam]);
+  }, [viewParam, reactionParam, roleParam, sectionParam]);
 
   // 🚩 Reportar contenido: abre el modal / cierra / envía al backend (que avisa por Telegram)
   const openReport = (target: ReportTarget) => {
@@ -3240,17 +3259,23 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textTransform: 'uppercase', marginBottom: 8, letterSpacing: 0.8 }}>
                   {t.navPortalSections}
                 </Text>
-                {[
-                  { key: 'today', label: t.tabOrders, icon: 'check-square' },
-                  { key: 'upcoming', label: t.tabUpcoming, icon: 'calendar' },
-                  { key: 'reports', label: t.tabReports, icon: 'bar-chart-2' },
-                  { key: 'staff', label: `${t.tabStaff} (${staffTerm})`, icon: 'users' },
-                  { key: 'catalogo', label: t.tabCatalog, icon: 'tag' },
-                  { key: 'horarios', label: t.tabHours, icon: 'clock' },
-                  { key: 'portafolio', label: t.tabPortfolio, icon: 'image' },
-                  { key: 'fidelidad', label: t.tabLoyalty, icon: 'gift' },
-                  { key: 'recepcion_ia', label: t.tabAiReception, icon: 'phone-call' },
-                ].map((sec) => {
+                {(portalAccessRole === 'owner'
+                  ? [
+                      { key: 'today', label: t.tabOrders, icon: 'check-square' },
+                      { key: 'upcoming', label: t.tabUpcoming, icon: 'calendar' },
+                      { key: 'reports', label: t.tabReports, icon: 'bar-chart-2' },
+                      { key: 'staff', label: `${t.tabStaff} (${staffTerm})`, icon: 'users' },
+                      { key: 'catalogo', label: t.tabCatalog, icon: 'tag' },
+                      { key: 'horarios', label: t.tabHours, icon: 'clock' },
+                      { key: 'portafolio', label: t.tabPortfolio, icon: 'image' },
+                      { key: 'fidelidad', label: t.tabLoyalty, icon: 'gift' },
+                      { key: 'recepcion_ia', label: t.tabAiReception, icon: 'phone-call' },
+                    ]
+                  : [
+                      { key: 'today', label: t.tabOrders, icon: 'check-square' },
+                      { key: 'upcoming', label: t.tabUpcoming, icon: 'calendar' },
+                    ]
+                ).map((sec) => {
                   const isActiveSec = activeView === 'mecanico' && agendaFilter === sec.key;
                   return (
                     <TouchableOpacity
@@ -4286,19 +4311,95 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         {activeView === 'mecanico' ? (
           <View>
             {!isMechanicAuth ? (
-              <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 500, alignSelf: 'center', width: '100%', alignItems: 'center' }]}>
-                <Text style={{ fontSize: 48, marginBottom: 16 }}>🔒</Text>
-                <Text style={{ fontSize: 26, fontWeight: '900', color: tColor.text, marginBottom: 8 }}>Acceso Operativo</Text>
-                <Text style={{ color: tColor.muted, marginBottom: 32 }}>Personal de {tenantInfo?.name} (PIN: 1234).</Text>
-                <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, marginBottom: 16, width: '100%' }]} placeholder="PIN" placeholderTextColor={tColor.muted} secureTextEntry keyboardType="numeric" value={mechanicPin} onChangeText={setMechanicPin} />
-                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, width: '100%' }]} onPress={() => { if (mechanicPin === '1234') setIsMechanicAuth(true); else alert('PIN Incorrecto'); }}><Text style={styles.primaryButtonText}>Ingresar</Text></TouchableOpacity>
+              <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 460, alignSelf: 'center', width: '100%', alignItems: 'center', padding: isMobile ? 24 : 32 }]}>
+                <View style={{ width: 60, height: 60, borderRadius: 18, backgroundColor: `${brandColor}18`, borderWidth: 1, borderColor: `${brandColor}45`, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }}>
+                  <Feather name="key" size={26} color={brandColor} />
+                </View>
+                <Text style={{ fontSize: 24, fontWeight: '900', color: tColor.text, marginBottom: 6, textAlign: 'center' }}>
+                  {tr(`Acceso Operativo (${staffTerm})`, `Staff Access (${staffTerm})`)}
+                </Text>
+                <Text style={{ color: tColor.muted, marginBottom: 24, textAlign: 'center', fontSize: 13.5, lineHeight: 19 }}>
+                  {tr(
+                    `Ingresa el PIN de ${tenantInfo?.name || 'tu local'} (PIN: 1234) para ver las citas en agenda y cerrar servicios.`,
+                    `Enter the PIN for ${tenantInfo?.name || 'your shop'} (PIN: 1234) to view scheduled appointments and close orders.`
+                  )}
+                </Text>
+                <TextInput
+                  style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, marginBottom: 16, width: '100%' }]}
+                  placeholder="PIN"
+                  placeholderTextColor={tColor.muted}
+                  secureTextEntry
+                  keyboardType="numeric"
+                  value={mechanicPin}
+                  onChangeText={setMechanicPin}
+                />
+                <TouchableOpacity
+                  style={[styles.primaryButton, { backgroundColor: brandColor, width: '100%', marginBottom: 14 }]}
+                  onPress={() => {
+                    if (mechanicPin === '1234') {
+                      setPortalAccessRole('staff');
+                      setAgendaFilter('today');
+                      setIsMechanicAuth(true);
+                      setMechanicPin('');
+                    } else {
+                      alert(t.wrongPin);
+                    }
+                  }}
+                >
+                  <Text style={styles.primaryButtonText}>{tr('Ver Agenda y Cerrar Citas', 'View Schedule & Close Orders')}</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => router.push('/register' as any)}
+                  style={{ paddingVertical: 8, paddingHorizontal: 12 }}
+                >
+                  <Text style={{ color: tColor.muted, fontSize: 12, textAlign: 'center' }}>
+                    {tr('¿Eres el dueño del negocio? ', 'Are you the business owner? ')}
+                    <Text style={{ color: brandColor, fontWeight: '800', textDecorationLine: 'underline' }}>
+                      {tr('Administra todo desde Soy un Negocio →', 'Manage everything in Business Portal →')}
+                    </Text>
+                  </Text>
+                </TouchableOpacity>
               </View>
             ) : (
               <View>
+                {/* Insignia superior indicando si está en Modo Operativo (PIN Staff) o Modo Dueño Administrador */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: portalAccessRole === 'owner' ? 'rgba(16, 185, 129, 0.14)' : 'rgba(59, 130, 246, 0.14)', borderWidth: 1, borderColor: portalAccessRole === 'owner' ? '#10B981' : '#3B82F6', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 }}>
+                    <Feather name={portalAccessRole === 'owner' ? 'shield' : 'user-check'} size={14} color={portalAccessRole === 'owner' ? '#10B981' : '#60A5FA'} />
+                    <Text style={{ color: portalAccessRole === 'owner' ? '#10B981' : '#60A5FA', fontWeight: '900', fontSize: 12 }}>
+                      {portalAccessRole === 'owner'
+                        ? tr('MODO DUEÑO / ADMINISTRADOR (9 Módulos Activos)', 'OWNER / ADMIN MODE (All 9 Modules)')
+                        : tr(`MODO OPERATIVO ${staffTerm.toUpperCase()} (Agenda y Cierre POS)`, `STAFF MODE (${staffTerm} — Schedule & POS)`)}
+                    </Text>
+                  </View>
+
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {portalAccessRole === 'owner' ? (
+                      <TouchableOpacity
+                        onPress={() => router.push('/register' as any)}
+                        style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 10, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                      >
+                        <Feather name="grid" size={13} color={brandColor} />
+                        <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 12 }}>
+                          {tr('Mis Negocios', 'My Businesses')}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                    <TouchableOpacity
+                      onPress={handleStaffLogout}
+                      style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 10, backgroundColor: 'rgba(239, 68, 68, 0.14)', borderWidth: 1, borderColor: '#EF4444', flexDirection: 'row', alignItems: 'center', gap: 6 }}
+                    >
+                      <Feather name="log-out" size={13} color="#EF4444" />
+                      <Text style={{ color: '#EF4444', fontWeight: '800', fontSize: 12 }}>{t.navLogout}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
                 {(() => {
-                  const portalMenuItems = [
-                    { key: 'today', label: 'Órdenes', icon: 'check-square' },
-                    { key: 'upcoming', label: 'Próximos', icon: 'calendar' },
+                  const allPortalMenuItems = [
+                    { key: 'today', label: 'Órdenes de Hoy', icon: 'check-square' },
+                    { key: 'upcoming', label: 'Próximos Turnos', icon: 'calendar' },
                     { key: 'reports', label: 'Reportes', icon: 'bar-chart-2' },
                     { key: 'staff', label: 'Personal', icon: 'users' },
                     { key: 'catalogo', label: 'Catálogo', icon: 'tag' },
@@ -4307,6 +4408,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     { key: 'fidelidad', label: 'Fidelidad', icon: 'gift' },
                     { key: 'recepcion_ia', label: 'Recepción IA', icon: 'phone-call' },
                   ] as const;
+
+                  const portalMenuItems = portalAccessRole === 'owner'
+                    ? allPortalMenuItems
+                    : allPortalMenuItems.filter((item) => item.key === 'today' || item.key === 'upcoming');
 
                   const hasOverflow = portalTabsContentW > portalTabsViewW + 6;
                   const canScrollLeft = hasOverflow && portalTabsScrollX > 8;

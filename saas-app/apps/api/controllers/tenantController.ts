@@ -530,3 +530,62 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
     return res.status(500).json({ success: false, message: error.message || String(error) });
   }
 }
+
+// 🔑 Login Global de Dueño/Administrador en "Soy un Negocio" (Devuelve todos los negocios creados con ese correo y valida su contraseña)
+export async function loginOwnerAccount(req: Request, res: Response) {
+  try {
+    const { email, password } = req.body;
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const rawPassword = String(password || '');
+
+    if (!cleanEmail || !rawPassword) {
+      return res.status(400).json({ success: false, message: 'Por favor ingresa tu correo y contraseña.' });
+    }
+
+    // Buscar todos los negocios registrados con ese admin_email (o en public.users con rol owner)
+    const allTenants = await db.select().from(tenants);
+    const matchedTenants = allTenants.filter(
+      (t: any) => String(t.adminEmail || t.admin_email || '').trim().toLowerCase() === cleanEmail
+    );
+
+    if (matchedTenants.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No encontramos negocios registrados con este correo electrónico.',
+      });
+    }
+
+    // Verificar que la contraseña coincida con al menos uno de sus negocios (o usuario owner)
+    const validTenants = matchedTenants.filter((t: any) => {
+      const hash = t.adminPasswordHash || t.admin_password_hash || t.password;
+      if (!hash) return false;
+      return verifyPasswordScrypt(rawPassword, hash);
+    });
+
+    if (validTenants.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Contraseña incorrecta para esta cuenta administradora.',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      adminEmail: cleanEmail,
+      tenants: validTenants.map((t: any) => ({
+        id: t.id,
+        name: t.name,
+        niche: t.niche,
+        city: t.city,
+        state: t.state,
+        zipCode: t.zipCode,
+        logoUrl: t.logoUrl,
+        primaryColor: t.primaryColor || '#FF5E00',
+        planTier: t.planTier || 'starter',
+      })),
+    });
+  } catch (error: any) {
+    console.error('❌ Error en loginOwnerAccount:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Error interno del servidor.' });
+  }
+}
