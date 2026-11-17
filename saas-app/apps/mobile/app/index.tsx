@@ -1,14 +1,14 @@
-'use client';
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator } from 'react-native';
-import { useRouter } from 'expo-router';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Platform, useWindowDimensions, TextInput, ActivityIndicator, Image, StatusBar } from 'react-native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
 
 // ==========================================
-// ⚙️ CONFIGURACIÓN DE SUPABASE
+// ⚙️ CONFIGURACIÓN DE SUPABASE & API MULTIPLATAFORMA
 // ==========================================
-export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 58 : Platform.OS === 'android' ? (StatusBar.currentHeight ? StatusBar.currentHeight + 12 : 42) : 0;
+const BASE_HOST = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
+const API_URL = `${BASE_HOST.replace(/\/$/, '')}/api`;
 const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://hbofrqdubrtogwbuddsa.supabase.co';
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'tu-anon-key';
 
@@ -16,34 +16,35 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false },
 });
 
-// ==========================================
-// 🧩 ESTILOS WEB DINÁMICOS
-// ==========================================
-const WebStyles = () => {
-  if (Platform.OS !== 'web') return null;
-  return (
-    <style dangerouslySetInnerHTML={{__html: `
-      body { background-color: #05070C; color: #FFFFFF; margin: 0; }
-      * { font-family: 'Inter', system-ui, sans-serif; box-sizing: border-box; }
-      .web-input-override { height: 56px !important; background-color: rgba(0, 0, 0, 0.4) !important; border: 1px solid rgba(255,255,255,0.08) !important; color: #FFFFFF !important; border-radius: 12px !important; padding: 0 16px !important; font-size: 15px !important; outline: none !important; width: 100% !important; color-scheme: dark !important; transition: border-color 0.2s ease; }
-      .web-input-override:focus { border-color: #FF5E00 !important; }
-      .web-input-override option { background-color: #12161C !important; color: #FFFFFF !important; }
-      .pricing-card { transition: all 0.3s ease; cursor: pointer; }
-      .pricing-card:hover { transform: translateY(-8px); border-color: rgba(255, 94, 0, 0.5) !important; box-shadow: 0 15px 35px -10px rgba(255, 94, 0, 0.2); }
-      .pricing-card.selected { border-color: #FF5E00 !important; background-color: rgba(255, 94, 0, 0.05) !important; box-shadow: 0 0 0 2px #FF5E00 !important; }
-      .color-swatch { transition: transform 0.2s ease; cursor: pointer; }
-      .color-swatch:hover { transform: scale(1.1); }
-    `}} />
-  );
-};
+// 📱 ESPACIADO SUPERIOR SEGURO PARA CÁMARA / DYNAMIC ISLAND / RELOJ EN iOS Y BARRA DE ESTADO EN ANDROID
+export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 54 : Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 12 : 0;
 
+interface Business {
+  id: string;
+  name: string;
+  niche: string;
+  city: string;
+  zipCode: string;
+  logoUrl: string | null;
+  primaryColor: string | null;
+  distance: string | null;
+  label: string;
+  icon: string;
+  latitude?: string;
+  longitude?: string;
+  loyaltyConfig?: any;
+  loyalty_config?: any;
+}
 
+// ==========================================
+// 🎨 COMPONENTE UI/UX: CONTENEDOR DE ÍCONO VECTORIAL GLASSMORPHISM
+// ==========================================
 const ProIconBox = ({ 
   family = 'Feather', 
   name, 
   color = '#FF5E00', 
-  size = 20, 
-  boxSize = 44 
+  size = 24, 
+  boxSize = 54 
 }: { 
   family?: 'Feather' | 'Ionicons' | 'MCI', 
   name: string, 
@@ -67,1192 +68,503 @@ const ProIconBox = ({
   </View>
 );
 
-const toTitleCase = (str: string) => (str ? String(str).toLowerCase().replace(/(^|\s)\S/g, (m) => m.toUpperCase()) : '');
+const getNicheIconProps = (niche?: string, primaryColor?: string | null) => {
+  const n = (niche || '').toLowerCase();
+  if (n === 'spa') return { family: 'Ionicons' as const, name: 'sparkles-outline', color: primaryColor || '#10B981' };
+  if (n === 'barbershop') return { family: 'Feather' as const, name: 'scissors', color: primaryColor || '#FF5E00' };
+  if (n === 'legal') return { family: 'Feather' as const, name: 'shield', color: primaryColor || '#3B82F6' };
+  if (n === 'dental') return { family: 'MCI' as const, name: 'tooth-outline', color: primaryColor || '#06B6D4' };
+  return { family: 'Ionicons' as const, name: 'car-sport-outline', color: primaryColor || '#FF5E00' };
+};
 
-const PORTAL_INTERNAL_MODULES = [
-  { key: 'today', label: 'Órdenes de Hoy', desc: 'Control de citas del día y cierre en caja POS', icon: 'check-square', color: '#10B981' },
-  { key: 'upcoming', label: 'Próximos Turnos', desc: 'Agenda futura en tiempo real y recordatorios 6h', icon: 'calendar', color: '#3B82F6' },
-  { key: 'reports', label: 'Reportes y Caja', desc: 'Facturación, analítica de tráfico anual y exportación PDF/CSV', icon: 'bar-chart-2', color: '#F59E0B' },
-  { key: 'staff', label: 'Personal / Staff', desc: 'Gestión de barberos, mecánicos o especialistas', icon: 'users', color: '#8B5CF6' },
-  { key: 'catalogo', label: 'Catálogo y Precios', desc: 'Servicios activos, fotos, tarifas y tiempos de atención', icon: 'tag', color: '#EC4899' },
-  { key: 'horarios', label: 'Horarios de Atención', desc: 'Apertura, cierre y días laborales configurables', icon: 'clock', color: '#06B6D4' },
-  { key: 'portafolio', label: 'Portafolio Visual', desc: 'Galería de trabajos realizados y casos de éxito', icon: 'image', color: '#14B8A6' },
-  { key: 'fidelidad', label: 'Fidelidad y Promos', desc: 'Plan VIP por visitas, referidos y campañas Push', icon: 'gift', color: '#FF5E00' },
-  { key: 'recepcion_ia', label: 'Recepción IA & Telegram', desc: 'Asistente telefónico 24/7 (Vapi) y alertas a tu grupo', icon: 'phone-call', color: '#0EA5E9' },
-] as const;
+// ==========================================
+// 🔒 COMPONENTE LOCAL PARA LOGOS PRIVADOS DEL DIRECTORIO
+// ==========================================
+const DirectoryLogo = ({ logoUrl, niche, primaryColor }: { logoUrl: string | null, icon?: string, niche?: string, primaryColor?: string | null }) => {
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
-export default function B2BRegistrationScreen() {
+  useEffect(() => {
+    const getLogo = async () => {
+      if (!logoUrl) return;
+      let cleanPath = logoUrl;
+      if (cleanPath.includes('/public/autoflow/')) {
+        cleanPath = cleanPath.split('/public/autoflow/')[1];
+      } else if (cleanPath.includes('/sign/autoflow/')) {
+        cleanPath = cleanPath.split('/sign/autoflow/')[1];
+      }
+      cleanPath = cleanPath.split('?')[0];
+
+      const { data } = await supabase.storage.from('autoflow').createSignedUrl(cleanPath, 3600);
+      if (data?.signedUrl) {
+        setResolvedUrl(data.signedUrl);
+      }
+    };
+    getLogo();
+  }, [logoUrl]);
+
+  if (!resolvedUrl) {
+    const iconProps = getNicheIconProps(niche, primaryColor);
+    return <ProIconBox family={iconProps.family} name={iconProps.name} color={iconProps.color} size={26} boxSize={56} />;
+  }
+
+  if (Platform.OS === 'web') {
+    return (
+      <img 
+        src={resolvedUrl} 
+        alt="Logo del negocio" 
+        style={{ width: '56px', height: '56px', borderRadius: '14px', objectFit: 'cover', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: '#000' }} 
+      />
+    );
+  }
+
+  return <Image source={{ uri: resolvedUrl }} style={{ width: 56, height: 56, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', backgroundColor: '#000' }} resizeMode="cover" />;
+};
+
+export default function GlobalDirectory() {
   const router = useRouter();
   const { width } = useWindowDimensions();
   const isMobile = width <= 850;
 
-  const [isStarted, setIsStarted] = useState(false);
-  const [partnerMode, setPartnerMode] = useState<'overview' | 'login' | 'register'>('overview');
-  const [step, setStep] = useState(1);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Estados para "Ya tengo mi Negocio" (Login de Dueño/Administrador y listado de sus negocios creados)
-  const [ownerLoginEmail, setOwnerLoginEmail] = useState('');
-  const [ownerLoginPassword, setOwnerLoginPassword] = useState('');
-  const [showOwnerLoginPassword, setShowOwnerLoginPassword] = useState(false);
-  const [isLoggingInOwner, setIsLoggingInOwner] = useState(false);
-  const [myOwnedTenants, setMyOwnedTenants] = useState<any[]>([]);
-
-  // Paso 1: Cuenta & Seguridad
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-
-  // Reglas de seguridad en tiempo real para la contraseña del Portal Interno
-  const passwordChecks = {
-    minLength: password.length >= 8,
-    hasUppercase: /[A-Z]/.test(password),
-    hasNumber: /[0-9]/.test(password),
-    hasSpecial: /[^A-Za-z0-9]/.test(password),
-  };
-  const passwordScore = Object.values(passwordChecks).filter(Boolean).length;
-  const isPasswordStrong = passwordChecks.minLength && passwordChecks.hasUppercase && passwordChecks.hasNumber && passwordChecks.hasSpecial;
-  const passwordsMatch = password.length > 0 && password === confirmPassword;
+  const [locationQuery, setLocationQuery] = useState('');
+  const [selectedRadius, setSelectedRadius] = useState('30');
+  const params = useLocalSearchParams();
+  const [activeCategory, setActiveCategory] = useState<string | null>((params.category as string) || null);
+  const [nameQuery, setNameQuery] = useState('');
   
-  // Paso 2: Ubicación Real
-  const [businessName, setBusinessName] = useState('');
-  const [category, setCategory] = useState('');
-  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
-  const [dbCategories, setDbCategories] = useState<{ code: string; name: string }[]>([
-    { code: 'automotive', name: 'Talleres Mecánicos y Automotriz' },
-    { code: 'spa', name: 'Spas y Centros de Belleza' },
-    { code: 'barbershop', name: 'Barberías y Salones Masculinos' },
-    { code: 'legal', name: 'Abogados y Firmas Legales' },
-    { code: 'dental', name: 'Odontología y Clínicas Dentales' },
-  ]);
+  const [globalResults, setGlobalResults] = useState<Business[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
 
-  useEffect(() => {
-    const loadCategoriesFromDb = async () => {
-      try {
-        const baseHost =
-          process.env.EXPO_PUBLIC_API_URL ||
-          process.env.NEXT_PUBLIC_API_URL ||
-          (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
-        const res = await fetch(`${baseHost.replace(/\/$/, '')}/api/categories`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && Array.isArray(data.categories) && data.categories.length > 0) {
-            setDbCategories(data.categories.filter((c: any) => c.isActive !== false));
+  // 🔄 Hidrata cada negocio con su loyaltyConfig (reviews, likes, dislikes) desde /api/tenants/info
+  const enrichBusinessesWithReviews = useCallback(async (businesses: Business[]): Promise<Business[]> => {
+    return Promise.all(
+      businesses.map(async (biz) => {
+        try {
+          const resInfo = await fetch(`${API_URL}/tenants/info?t=${Date.now()}`, {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-tenant-id': String(biz.id),
+            },
+          });
+          if (resInfo.ok) {
+            const infoJson = await resInfo.json();
+            const remoteLoyalty = infoJson?.tenant?.loyaltyConfig || infoJson?.tenant?.loyalty_config;
+            if (remoteLoyalty) {
+              return {
+                ...biz,
+                loyaltyConfig: typeof remoteLoyalty === 'string' ? JSON.parse(remoteLoyalty) : remoteLoyalty,
+                logoUrl: infoJson?.tenant?.logoUrl || biz.logoUrl,
+                primaryColor: infoJson?.tenant?.primaryColor || biz.primaryColor,
+              };
+            }
           }
-        }
-      } catch (e) {}
-    };
-    loadCategoriesFromDb();
+        } catch (_e) {}
+        return biz;
+      })
+    );
   }, []);
 
-  const selectedCategoryObj = dbCategories.find((c) => c.code === category);
-  const [address, setAddress] = useState('');
-  const [stateCode, setStateCode] = useState('');
-  const [city, setCity] = useState('');
-  const [zipCode, setZipCode] = useState('');
-
-  // Paso 3: Marca Blanca
-  const [logoFile, setLogoFile] = useState<File | null>(null);
-  const [logoPreview, setLogoPreview] = useState<string | null>(null);
-  const [primaryColor, setPrimaryColor] = useState('#FF5E00');
-
-  const colorPalette = [
-    { name: 'Naranja Pro', value: '#FF5E00' },
-    { name: 'Azul Eléctrico', value: '#2563EB' },
-    { name: 'Verde Esmeralda', value: '#10B981' },
-    { name: 'Púrpura Royal', value: '#7C3AED' },
-    { name: 'Rojo Racing', value: '#DC2626' }
-  ];
-
-  // Paso 4: Selección de Plan
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
-
-  const plans = [
-    { id: 'starter', name: 'Starter', price: '$29', desc: 'Ideal para independientes.', features: ['Catálogo Básico (10 ítems)', 'Agenda en tiempo real', 'Aparece en el Directorio Local'] },
-    { id: 'pro', name: 'Profesional', price: '$79', desc: 'Para negocios en crecimiento.', features: ['Catálogo Ilimitado', 'Reportes Financieros', 'Marca Blanca Avanzada', 'Insignia Verificada'], recommended: true },
-    { id: 'elite', name: 'Élite', price: '$149', desc: 'Para talleres de alto volumen.', features: ['Todo lo de Pro', 'Múltiples sucursales', 'API Privada', 'Soporte 24/7 Dedicado'] },
-  ];
-
-  // Autocompletado gratuito por ZIP (Zippopotam.us)
-  const handleZipLookup = async (text: string) => {
-    const cleanZip = text.replace(/\D/g, '');
-    setZipCode(cleanZip);
-
-    if (cleanZip.length === 5) {
-      try {
-        const res = await fetch(`https://api.zippopotam.us/us/${cleanZip}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.places && data.places.length > 0) {
-            const place = data.places[0];
-            setCity(place['place name']);
-            setStateCode(place['state abbreviation']);
-          }
-        }
-      } catch (error) {
-        console.log("Error al autocompletar ZIP", error);
-      }
-    } else if (cleanZip.length < 5) {
-      setCity('');
-      setStateCode('');
-    }
-  };
-
-  // 🌟 CONVERSIÓN A WEBP Y OBTENCIÓN DE URL PÚBLICA COMPLETA DE SUPABASE 🌟
-  const convertAndUploadLogo = async (file: File): Promise<string | null> => {
-    return new Promise((resolve) => {
-      const reader = new FileReader(); 
-      reader.readAsDataURL(file);
-      reader.onload = (event) => {
-        const img = new window.Image(); 
-        img.src = event.target?.result as string;
-        img.onload = async () => {
-          const canvas = document.createElement('canvas'); 
-          let width = img.width; 
-          let height = img.height;
-          
-          if (width > 500) { height = Math.round((height *= 500 / width)); width = 500; }
-          canvas.width = width; canvas.height = height; 
-          const ctx = canvas.getContext('2d'); 
-          ctx?.drawImage(img, 0, 0, width, height);
-
-          canvas.toBlob(async (blob) => {
-            if (!blob) return resolve(null);
-            const webpFile = new File([blob], `logo-${Date.now()}.webp`, { type: 'image/webp' });
-            
-            const filePath = `logos/logo-${Date.now()}.webp`;
-            const { error } = await supabase.storage.from('autoflow').upload(filePath, webpFile, { upsert: true, contentType: 'image/webp' });
-
-            if (error) {
-              console.error("Error subiendo logo a Supabase:", error);
-              return resolve(null);
-            }
-
-            // Obtenemos la URL pública completa para guardarla en la BD
-            const { data } = supabase.storage.from('autoflow').getPublicUrl(filePath);
-            resolve(data.publicUrl);
-          }, 'image/webp', 0.85);
-        };
-      };
-    });
-  };
-
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setLogoFile(file);
-      setLogoPreview(URL.createObjectURL(file));
-    }
-  };
-
-  const handleNextStep = () => {
-    if (step === 1) {
-      const cleanEmail = email.trim();
-      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-        return alert('Por favor ingresa un correo electrónico comercial válido.');
-      }
-      if (!isPasswordStrong) {
-        return alert('Tu contraseña debe tener al menos 8 caracteres, una letra mayúscula, un número y un carácter especial (ej: @, #, $, !).');
-      }
-      if (!passwordsMatch) {
-        return alert('Las contraseñas no coinciden. Verifica la confirmación.');
-      }
-    }
-    if (step === 2 && (!businessName || !category || !address || !city || !zipCode || !stateCode)) return alert('Completa todos los campos de ubicación.');
-    setStep(step + 1);
-  };
-
-  const handleOwnerLogin = async () => {
-    const cleanEmail = ownerLoginEmail.trim().toLowerCase();
-    if (!cleanEmail || !ownerLoginPassword) {
-      return alert('Por favor ingresa el correo administrador y la contraseña que creaste al registrar tu negocio.');
-    }
-    setIsLoggingInOwner(true);
+  const fetchDirectory = useCallback(async (searchNiche = 'all') => {
+    setIsSearching(true);
     try {
-      const API_URL =
-        process.env.EXPO_PUBLIC_API_URL ||
-        process.env.NEXT_PUBLIC_API_URL ||
-        (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
-
-      const res = await fetch(`${API_URL.replace(/\/$/, '')}/api/tenants/owner-login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail, password: ownerLoginPassword }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success && Array.isArray(data.tenants)) {
-        setMyOwnedTenants(data.tenants);
-      } else {
-        alert(data.message || 'No encontramos negocios con esas credenciales.');
-      }
-    } catch (e: any) {
-      alert('Error de conexión con el servidor al consultar tus negocios.');
-    } finally {
-      setIsLoggingInOwner(false);
-    }
-  };
-
-  const handleFinalCheckoutAndStore = async () => {
-    if (!selectedPlan) return alert('Por favor selecciona un plan para continuar.');
-    setIsSubmitting(true);
-
-    try {
-      let uploadedLogoUrl = null;
-      if (logoFile) {
-        uploadedLogoUrl = await convertAndUploadLogo(logoFile);
-      }
-
-      const generateSafeUuid = () => {
-        if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
-          return globalThis.crypto.randomUUID();
-        }
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-          const r = (Math.random() * 16) | 0;
-          const v = c === 'x' ? r : (r & 0x3) | 0x8;
-          return v.toString(16);
-        });
-      };
-      const newTenantId = generateSafeUuid();
-
-      const tenantPayload = {
-        id: newTenantId,
-        name: businessName,
-        niche: category,
-        address, 
-        city, 
-        state: stateCode, 
-        zipCode,
-        logoUrl: uploadedLogoUrl, // ➔ URL completa enviada a la BD
-        primaryColor,
-        planTier: selectedPlan,
-        subscriptionStatus: 'active',
-        adminEmail: email,
-        password
-      };
-
-      const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
-      const response = await fetch(`${API_URL}/api/tenants/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(tenantPayload)
+      const searchParams = new URLSearchParams({
+        locationQuery: locationQuery.trim(),
+        radius: selectedRadius,
+        niche: searchNiche,
       });
 
+      const response = await fetch(`${API_URL}/directory/search?${searchParams.toString()}`);
       const json = await response.json();
 
-      if (!response.ok || !json.success) {
-        throw new Error(json.message || 'Error al registrar el negocio en el servidor.');
+      if (json.success && Array.isArray(json.data)) {
+        setGlobalResults(json.data);
+        const enriched = await enrichBusinessesWithReviews(json.data);
+        setGlobalResults(enriched);
       }
-
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        try {
-          window.localStorage.setItem(
-            `autoflow_admin_creds_${newTenantId}`,
-            JSON.stringify({ email: email.trim().toLowerCase(), password })
-          );
-        } catch (_e) {}
-      }
-
-      alert(`¡Negocio registrado con éxito! 🎉\n\nUsa este correo y contraseña para ingresar a tu Portal Interno.`);
-      setIsSubmitting(false);
-
-      router.push(`/${newTenantId}?view=mecanico&role=owner&section=catalogo` as any);
-
-    } catch (err: any) {
-      console.error("Error en el registro:", err);
-      alert(`Ocurrió un error: ${err.message || 'Error de red'}`);
-      setIsSubmitting(false);
+    } catch (error) {
+      console.error('Error de red:', error);
+    } finally {
+      setIsSearching(false);
     }
+  }, [locationQuery, selectedRadius, enrichBusinessesWithReviews]);
+
+  useEffect(() => {
+    fetchDirectory();
+  }, [fetchDirectory]);
+
+  useEffect(() => {
+    if (params.category) {
+      setActiveCategory(String(params.category));
+      fetchDirectory();
+    } else {
+      setActiveCategory(null);
+    }
+  }, [params.category, fetchDirectory]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const onFocus = () => { fetchDirectory(); };
+      window.addEventListener('focus', onFocus);
+      return () => window.removeEventListener('focus', onFocus);
+    }
+  }, [fetchDirectory]);
+
+  const handleSearch = () => {
+    setActiveCategory(null);
+    setNameQuery('');
+    fetchDirectory();
   };
 
+  const categoryCounts = useMemo(() => {
+    return {
+      automotive: globalResults.filter(b => b.niche === 'automotive').length,
+      spa: globalResults.filter(b => b.niche === 'spa').length,
+      barbershop: globalResults.filter(b => b.niche === 'barbershop').length,
+      legal: globalResults.filter(b => b.niche === 'legal').length,
+      dental: globalResults.filter(b => b.niche === 'dental').length,
+    };
+  }, [globalResults]);
+
+  const specificResults = useMemo(() => {
+    if (!activeCategory) return [];
+    let results = globalResults.filter(biz => biz.niche === activeCategory);
+    if (nameQuery) {
+      results = results.filter(biz => biz.name.toLowerCase().includes(nameQuery.toLowerCase()));
+    }
+    return results;
+  }, [activeCategory, globalResults, nameQuery]);
+
+  if (!activeCategory) {
+    return (
+      <View style={styles.appContainer}>
+        {/* HEADER B2C CON SAFE AREA PARA RELOJ / CÁMARA EN iOS Y ANDROID */}
+        <View
+          style={[
+            styles.topNavbar,
+            {
+              paddingTop: SAFE_TOP_INSET,
+              height: (isMobile ? 64 : 70) + SAFE_TOP_INSET,
+              paddingHorizontal: isMobile ? 16 : 40,
+            },
+          ]}
+        >
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ backgroundColor: '#FF5E00', width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' }}>
+              <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>A</Text>
+            </View>
+            <Text style={{ fontSize: 20, fontWeight: '900', color: '#FFF' }}>AutoFlow</Text>
+          </View>
+
+          <TouchableOpacity 
+            style={[styles.partnerButton, { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: isMobile ? 8 : 10, paddingHorizontal: isMobile ? 14 : 18 }]} 
+            onPress={() => router.push('/register' as any)}
+          >
+            <Feather name="briefcase" size={14} color="#FF5E00" />
+            <Text style={[styles.partnerButtonText, isMobile && { fontSize: 13 }]}>Soy un Negocio</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={[
+            styles.contentArea,
+            { paddingHorizontal: isMobile ? 16 : 40, paddingTop: isMobile ? 20 : 36, paddingBottom: 48 },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={[styles.header, { marginBottom: isMobile ? 28 : 40 }]}>
+            <Text style={[styles.title, isMobile && { fontSize: 30, lineHeight: 36, marginBottom: 10 }]}>
+              Encuentra <Text style={styles.accent}>Servicios</Text> Cerca de Ti
+            </Text>
+            <Text style={[styles.subtitle, isMobile && { fontSize: 15, lineHeight: 22, marginBottom: 24 }]}>
+              Directorio inteligente. Explora negocios verificados en tu área.
+            </Text>
+            
+            <View style={[styles.searchConsole, isMobile && { padding: 20, borderRadius: 20 }]}>
+              <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14 }}>
+                <View style={{ flex: isMobile ? undefined : 2 }}>
+                  <Text style={styles.inputLabel}>Tu Ubicación (Zip / Ciudad)</Text>
+                  <TextInput 
+                    style={styles.searchInput}
+                    placeholder="Ej: 91730 o Los Angeles"
+                    placeholderTextColor="#94A3B8"
+                    value={locationQuery}
+                    onChangeText={setLocationQuery}
+                  />
+                </View>
+                
+                <View style={{ flex: isMobile ? undefined : 1.5 }}>
+                  <Text style={styles.inputLabel}>Radio de Búsqueda</Text>
+                  {Platform.OS === 'web' ? (
+                    <select style={styles.webSelect as any} value={selectedRadius} onChange={(e) => setSelectedRadius(e.target.value)}>
+                      <option value="10">10 millas</option>
+                      <option value="20">20 millas</option>
+                      <option value="30">30 millas</option>
+                      <option value="50">50 millas</option>
+                    </select>
+                  ) : (
+                    <TextInput style={styles.searchInput} value={`${selectedRadius} Millas`} editable={false} />
+                  )}
+                </View>
+
+                <View style={{ justifyContent: 'flex-end' }}>
+                  <TouchableOpacity style={[styles.primaryButton, { flexDirection: 'row', gap: 8, width: isMobile ? '100%' : undefined }]} onPress={handleSearch} disabled={isSearching}>
+                    {isSearching ? <ActivityIndicator color="#FFF" /> : (
+                      <>
+                        <Feather name="search" size={18} color="#FFF" />
+                        <Text style={styles.primaryButtonText}>Buscar</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <Text style={{ color: '#FFF', fontSize: isMobile ? 18 : 20, fontWeight: 'bold', marginBottom: 18 }}>Categorías Disponibles</Text>
+          <View style={[styles.bentoGrid, isMobile && { gap: 16 }]}>
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%', padding: 22 }]} activeOpacity={0.7} onPress={() => setActiveCategory('automotive')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="Ionicons" name="car-sport-outline" color="#FF5E00" size={28} boxSize={54} />
+                <View style={styles.countBadge}><Text style={styles.countText}>{categoryCounts.automotive} Cerca</Text></View>
+              </View>
+              <Text style={[styles.cardTitle, isMobile && { fontSize: 20 }]}>Talleres & Auto</Text>
+              <Text style={styles.cardSubtitle}>Mecánica, llantas y mantenimiento.</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={styles.footerLink}>Ver {categoryCounts.automotive} negocios</Text>
+                  <Feather name="arrow-right" size={16} color="#FF5E00" />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%', padding: 22 }]} activeOpacity={0.7} onPress={() => setActiveCategory('spa')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="Ionicons" name="sparkles-outline" color="#10B981" size={26} boxSize={54} />
+                <View style={[styles.countBadge, { borderColor: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}><Text style={[styles.countText, { color: '#10B981' }]}>{categoryCounts.spa} Cerca</Text></View>
+              </View>
+              <Text style={[styles.cardTitle, isMobile && { fontSize: 20 }]}>Spas & Bienestar</Text>
+              <Text style={styles.cardSubtitle}>Masajes, faciales y relajación.</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.footerLink, { color: '#10B981' }]}>Ver {categoryCounts.spa} negocios</Text>
+                  <Feather name="arrow-right" size={16} color="#10B981" />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%', padding: 22 }]} activeOpacity={0.7} onPress={() => setActiveCategory('barbershop')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="Feather" name="scissors" color="#FF5E00" size={26} boxSize={54} />
+                <View style={styles.countBadge}><Text style={styles.countText}>{categoryCounts.barbershop} Cerca</Text></View>
+              </View>
+              <Text style={[styles.cardTitle, isMobile && { fontSize: 20 }]}>Barberías</Text>
+              <Text style={styles.cardSubtitle}>Cortes clásicos, barba y estilo.</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={styles.footerLink}>Ver {categoryCounts.barbershop} negocios</Text>
+                  <Feather name="arrow-right" size={16} color="#FF5E00" />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%', padding: 22 }]} activeOpacity={0.7} onPress={() => setActiveCategory('legal')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="Feather" name="shield" color="#3B82F6" size={26} boxSize={54} />
+                <View style={[styles.countBadge, { borderColor: '#3B82F6', backgroundColor: 'rgba(59, 130, 246, 0.15)' }]}><Text style={[styles.countText, { color: '#3B82F6' }]}>{categoryCounts.legal} Cerca</Text></View>
+              </View>
+              <Text style={[styles.cardTitle, isMobile && { fontSize: 20 }]}>Abogados & Firmas</Text>
+              <Text style={styles.cardSubtitle}>Asesoría legal, inmigración, familia y contratos (Presencial / Teléfono).</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.footerLink, { color: '#3B82F6' }]}>Ver {categoryCounts.legal} bufetes</Text>
+                  <Feather name="arrow-right" size={16} color="#3B82F6" />
+                </View>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={[styles.glassCard, isMobile && { minWidth: '100%', padding: 22 }]} activeOpacity={0.7} onPress={() => setActiveCategory('dental')}>
+              <View style={styles.cardHeader}>
+                <ProIconBox family="MCI" name="tooth-outline" color="#06B6D4" size={28} boxSize={54} />
+                <View style={[styles.countBadge, { borderColor: '#06B6D4', backgroundColor: 'rgba(6, 182, 212, 0.15)' }]}><Text style={[styles.countText, { color: '#06B6D4' }]}>{categoryCounts.dental} Cerca</Text></View>
+              </View>
+              <Text style={[styles.cardTitle, isMobile && { fontSize: 20 }]}>Odontología & Clínicas</Text>
+              <Text style={styles.cardSubtitle}>Limpieza dental, ortodoncia, implantes y urgencias odontológicas.</Text>
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.footerLink, { color: '#06B6D4' }]}>Ver {categoryCounts.dental} clínicas</Text>
+                  <Feather name="arrow-right" size={16} color="#06B6D4" />
+                </View>
+              </View>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  const categoryName = activeCategory === 'spa' ? 'Spas & Centros de Bienestar' : activeCategory === 'automotive' ? 'Talleres Automotrices' : activeCategory === 'legal' ? 'Abogados & Firmas Legales' : activeCategory === 'dental' ? 'Centros Odontológicos & Clínicas' : 'Barberías';
+  const activeHeaderIcon = getNicheIconProps(activeCategory);
+
   return (
-    <View style={styles.root}>
-      <WebStyles />
-      
+    <View style={styles.appContainer}>
+      {/* BARRA SUPERIOR EN VISTA DE CATEGORÍA CON SAFE AREA PARA RELOJ / CÁMARA EN iOS Y ANDROID */}
       <View
         style={[
-          styles.header,
+          styles.topNavbar,
           {
             paddingTop: SAFE_TOP_INSET,
-            height: (isMobile ? 64 : 74) + SAFE_TOP_INSET,
+            height: (isMobile ? 62 : 70) + SAFE_TOP_INSET,
             paddingHorizontal: isMobile ? 16 : 40,
-            zIndex: 100,
           },
         ]}
       >
         <TouchableOpacity
-          activeOpacity={0.7}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }}
-          onPress={() => {
-            if (router.canGoBack()) router.back();
-            else router.replace('/');
-          }}
+          style={[styles.backButton, { marginBottom: 0, flexDirection: 'row', alignItems: 'center', gap: 8 }]}
+          onPress={() => { setActiveCategory(null); setNameQuery(''); }}
         >
-          <View style={{ backgroundColor: primaryColor, width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>A</Text>
+          <Feather name="arrow-left" size={16} color="#FFFFFF" />
+          <Text style={[styles.backButtonText, { color: '#FFFFFF' }]}>Volver a Categorías</Text>
+        </TouchableOpacity>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={{ backgroundColor: '#FF5E00', width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
+            <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 15 }}>A</Text>
           </View>
-          <Text style={{ fontSize: 20, fontWeight: '900', color: '#FFF', letterSpacing: -0.5 }}>AutoFlow <Text style={{ color: '#94A3B8', fontWeight: 'normal', fontSize: 16 }}>/ Partners</Text></Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity
-          activeOpacity={0.7}
-          hitSlop={{ top: 12, bottom: 12, left: 16, right: 16 }}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' }}
-          onPress={() => {
-            if (router.canGoBack()) {
-              router.back();
-            } else {
-              router.replace('/');
-            }
-          }}
-        >
-          <Feather name="x" size={16} color="#E2E8F0" />
-          <Text style={{ color: '#E2E8F0', fontWeight: 'bold', fontSize: 14 }}>Cancelar</Text>
-        </TouchableOpacity>
+          {!isMobile ? <Text style={{ fontSize: 17, fontWeight: '900', color: '#FFF' }}>AutoFlow</Text> : null}
+        </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.contentArea} showsVerticalScrollIndicator={false}>
-        {!isStarted ? (
-          <View style={{ width: '100%', maxWidth: 960, alignSelf: 'center', alignItems: 'center', paddingTop: isMobile ? 16 : 36, paddingBottom: 60 }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, borderWidth: 1, borderColor: `${primaryColor}50`, backgroundColor: `${primaryColor}15`, paddingVertical: 8, paddingHorizontal: 18, borderRadius: 20, marginBottom: 18 }}>
-              <Feather name="briefcase" size={14} color={primaryColor} />
-              <Text style={{ color: primaryColor, fontWeight: 'bold', fontSize: 13 }}>Portal Exclusivo para Dueños y Negocios</Text>
+      <ScrollView
+        contentContainerStyle={[
+          styles.contentArea,
+          { paddingHorizontal: isMobile ? 16 : 40, paddingTop: isMobile ? 20 : 32, paddingBottom: 48 },
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={[styles.header, { marginBottom: isMobile ? 24 : 32, paddingTop: 0 }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 12 }}>
+            <ProIconBox family={activeHeaderIcon.family} name={activeHeaderIcon.name} color={activeHeaderIcon.color} size={26} boxSize={52} />
+            <Text style={[styles.title, { marginBottom: 0, flex: 1, fontSize: isMobile ? 24 : 38 }]}>{categoryName}</Text>
+          </View>
+          <Text style={[styles.subtitle, isMobile && { fontSize: 14.5, lineHeight: 21, marginBottom: 20 }]}>
+            Encontramos {specificResults.length} opciones a menos de {selectedRadius} millas de tu búsqueda.
+          </Text>
+          
+          <View style={[styles.searchConsole, isMobile && { padding: 18, borderRadius: 18 }]}>
+            <Text style={styles.inputLabel}>¿Buscas un negocio en específico?</Text>
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <TextInput 
+                style={[styles.searchInput, { flex: 1 }]} 
+                placeholder="Buscar por nombre de negocio..." 
+                placeholderTextColor="#94A3B8"
+                value={nameQuery} 
+                onChangeText={setNameQuery}
+              />
             </View>
-            
-            <Text style={{ fontSize: isMobile ? 30 : 46, fontWeight: '900', color: '#FFF', textAlign: 'center', marginBottom: 14, lineHeight: isMobile ? 37 : 54, letterSpacing: -1 }}>
-              Centro de Control y Portal Interno <Text style={{ color: primaryColor }}>AutoFlow</Text>
-            </Text>
-            
-            <Text style={{ fontSize: isMobile ? 15 : 17, color: '#94A3B8', textAlign: 'center', maxWidth: 680, lineHeight: 25, marginBottom: 28 }}>
-              Ingresa a los negocios que ya creaste para administrar todas las opciones de tu Portal Interno, o registra una nueva sucursal. En la vista pública del negocio, tus barberos o mecánicos entran con su PIN rápido (1234) solo para ver la agenda y cerrar citas.
-            </Text>
+          </View>
+        </View>
 
-            {/* Botones de Acción Principal: Entrar a Mis Negocios Creados vs Crear Nuevo Negocio */}
-            <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14, width: '100%', maxWidth: 680, marginBottom: 32 }}>
-              <TouchableOpacity
-                style={[
-                  styles.primaryButton,
-                  {
-                    flex: 1,
-                    backgroundColor: partnerMode === 'login' ? primaryColor : 'rgba(255, 94, 0, 0.16)',
-                    borderWidth: 1.5,
-                    borderColor: primaryColor,
-                    paddingVertical: 16,
-                    paddingHorizontal: 20,
-                    flexDirection: 'row',
-                    gap: 10,
-                  },
-                ]}
-                onPress={() => setPartnerMode(partnerMode === 'login' ? 'overview' : 'login')}
+        <View style={[styles.bentoGrid, isMobile && { gap: 16 }]}>
+          {specificResults.length > 0 ? specificResults.map(biz => {
+            const rawLoyalty = biz.loyaltyConfig || biz.loyalty_config || {};
+            let loyalty: any = {};
+            try {
+              loyalty = typeof rawLoyalty === 'string' ? JSON.parse(rawLoyalty || '{}') : rawLoyalty;
+            } catch (_e) {
+              loyalty = {};
+            }
+            const reviews = Array.isArray(loyalty?.reviews) ? loyalty.reviews : [];
+            const avg = reviews.length > 0
+              ? (reviews.reduce((acc: number, r: any) => acc + Number(r.rating || 5), 0) / reviews.length).toFixed(1)
+              : '5.0';
+            const dist = biz.distance !== undefined && biz.distance !== null
+              ? Number(biz.distance).toFixed(1)
+              : '2.4';
+
+            return (
+              <TouchableOpacity 
+                key={biz.id} 
+                style={[styles.glassCard, { minWidth: isMobile ? '100%' : '48%', padding: isMobile ? 22 : 28, position: 'relative' }]} 
+                activeOpacity={0.75}
+                onPress={() => router.push(`/${biz.id}` as any)}
               >
-                <Feather name="key" size={18} color={partnerMode === 'login' ? '#FFFFFF' : primaryColor} />
-                <Text style={[styles.primaryButtonText, { fontSize: 15.5, color: partnerMode === 'login' ? '#FFFFFF' : primaryColor }]}>
-                  Entrar a Mis Negocios Creados
-                </Text>
-              </TouchableOpacity>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
+                  <DirectoryLogo logoUrl={biz.logoUrl} icon={biz.icon} niche={biz.niche} primaryColor={biz.primaryColor} />
 
-              <TouchableOpacity
-                style={[
-                  styles.primaryButton,
-                  {
-                    flex: 1,
-                    backgroundColor: primaryColor,
-                    paddingVertical: 16,
-                    paddingHorizontal: 20,
-                    flexDirection: 'row',
-                    gap: 10,
-                  },
-                ]}
-                onPress={() => setIsStarted(true)}
-              >
-                <Feather name="plus-circle" size={18} color="#FFF" />
-                <Text style={[styles.primaryButtonText, { fontSize: 15.5 }]}>Registrar Nuevo Negocio</Text>
-              </TouchableOpacity>
-            </View>
+                  <View style={{ alignItems: 'flex-end', gap: 6, flexShrink: 1 }}>
+                    <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                      <Ionicons name="star" size={13} color="#F59E0B" />
+                      <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 13 }}>{avg}</Text>
+                    </View>
 
-            {/* 🔐 PANEL DE ACCESO A MIS NEGOCIOS CREADOS + LISTADO DE NEGOCIOS Y ATAJOS AL PORTAL INTERNO */}
-            {partnerMode === 'login' ? (
-              <View style={[styles.glassCard, { width: '100%', maxWidth: 760, padding: isMobile ? 22 : 32, marginBottom: 36, borderColor: primaryColor }]}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <ProIconBox family="Feather" name="shield" color={primaryColor} size={20} boxSize={42} />
-                    <View>
-                      <Text style={{ color: '#FFFFFF', fontSize: isMobile ? 18 : 21, fontWeight: '900' }}>
-                        Mis Negocios Creados (Acceso Dueño)
-                      </Text>
-                      <Text style={{ color: '#94A3B8', fontSize: 12.5 }}>
-                        Ingresa con el correo y contraseña segura que registraste en el Paso 1
-                      </Text>
+                    <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 16, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                      <Feather name="navigation" size={11} color="#60A5FA" />
+                      <Text style={{ color: '#E2E8F0', fontSize: 11.5, fontWeight: '700' }}>A {dist} millas</Text>
                     </View>
                   </View>
-                  {myOwnedTenants.length > 0 ? (
-                    <TouchableOpacity
-                      onPress={() => {
-                        setMyOwnedTenants([]);
-                        setOwnerLoginPassword('');
-                      }}
-                      style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, backgroundColor: 'rgba(239,68,68,0.15)', borderWidth: 1, borderColor: '#EF4444' }}
-                    >
-                      <Text style={{ color: '#EF4444', fontSize: 12, fontWeight: '800' }}>Cambiar Cuenta</Text>
-                    </TouchableOpacity>
-                  ) : null}
                 </View>
 
-                {myOwnedTenants.length === 0 ? (
-                  <View>
-                    <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14, marginBottom: 18 }}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.inputLabel}>Correo Administrador</Text>
-                        <TextInput
-                          style={styles.formInput}
-                          placeholder="ejemplo@mitaller.com"
-                          placeholderTextColor="#475569"
-                          keyboardType="email-address"
-                          autoCapitalize="none"
-                          autoCorrect={false}
-                          value={ownerLoginEmail}
-                          onChangeText={setOwnerLoginEmail}
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.inputLabel}>Contraseña Segura</Text>
-                        <View style={styles.passwordInputWrapper}>
-                          <TextInput
-                            style={styles.passwordInnerInput}
-                            placeholder="Tu contraseña segura"
-                            placeholderTextColor="#475569"
-                            secureTextEntry={!showOwnerLoginPassword}
-                            autoCapitalize="none"
-                            autoCorrect={false}
-                            value={ownerLoginPassword}
-                            onChangeText={setOwnerLoginPassword}
-                          />
-                          <TouchableOpacity onPress={() => setShowOwnerLoginPassword(!showOwnerLoginPassword)} style={styles.eyeButton}>
-                            <Feather name={showOwnerLoginPassword ? 'eye-off' : 'eye'} size={18} color="#94A3B8" />
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    </View>
-
-                    <TouchableOpacity
-                      style={[styles.primaryButton, { backgroundColor: primaryColor, flexDirection: 'row', gap: 8 }]}
-                      onPress={handleOwnerLogin}
-                      disabled={isLoggingInOwner}
-                    >
-                      {isLoggingInOwner ? (
-                        <ActivityIndicator color="#FFFFFF" />
-                      ) : (
-                        <>
-                          <Feather name="log-in" size={17} color="#FFFFFF" />
-                          <Text style={styles.primaryButtonText}>Cargar Mis Negocios y Opciones del Portal</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <View style={{ gap: 18 }}>
-                    <Text style={{ color: '#10B981', fontWeight: '800', fontSize: 13.5 }}>
-                      ✓ Encontramos {myOwnedTenants.length} negocio(s) asociado(s) a {ownerLoginEmail}. Toca cualquier módulo del Portal Interno para administrarlo directamente:
+                <Text style={[styles.cardTitle, isMobile && { fontSize: 21 }]}>{biz.name}</Text>
+                <Text style={styles.cardSubtitle}>{biz.label} • {biz.city}, {biz.zipCode}</Text>
+                
+                <View style={[styles.cardFooter, { justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }]}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981' }} />
+                    <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '700' }}>
+                      Turnos disponibles hoy
                     </Text>
-
-                    {myOwnedTenants.map((tItem) => {
-                      const tColorBrand = tItem.primaryColor || primaryColor;
-                      return (
-                        <View
-                          key={tItem.id}
-                          style={{
-                            backgroundColor: 'rgba(0,0,0,0.45)',
-                            borderRadius: 18,
-                            borderWidth: 1,
-                            borderColor: tColorBrand,
-                            padding: isMobile ? 16 : 22,
-                          }}
-                        >
-                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 14, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)' }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                              <View style={{ width: 42, height: 42, borderRadius: 12, backgroundColor: tColorBrand, alignItems: 'center', justifyContent: 'center' }}>
-                                <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 18 }}>
-                                  {String(tItem.name || 'A').charAt(0).toUpperCase()}
-                                </Text>
-                              </View>
-                              <View>
-                                <Text style={{ color: '#FFFFFF', fontSize: 18, fontWeight: '900' }}>{tItem.name}</Text>
-                                <Text style={{ color: '#94A3B8', fontSize: 12 }}>
-                                  {tItem.niche?.toUpperCase()} • {tItem.city || 'Local'}, {tItem.state || ''} {tItem.zipCode || ''} • Plan {String(tItem.planTier || 'starter').toUpperCase()}
-                                </Text>
-                              </View>
-                            </View>
-
-                            <TouchableOpacity
-                              onPress={() => router.push(`/${tItem.id}?view=mecanico&role=owner&section=today` as any)}
-                              style={{ backgroundColor: tColorBrand, paddingVertical: 9, paddingHorizontal: 14, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 6 }}
-                            >
-                              <Feather name="external-link" size={14} color="#FFFFFF" />
-                              <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 12.5 }}>Abrir Portal Completo</Text>
-                            </TouchableOpacity>
-                          </View>
-
-                          <Text style={{ color: '#CBD5E1', fontSize: 11.5, fontWeight: '800', textTransform: 'uppercase', marginBottom: 10, letterSpacing: 0.5 }}>
-                            Ir directo a una sección del Portal Interno de {tItem.name}:
-                          </Text>
-
-                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                            {PORTAL_INTERNAL_MODULES.map((mod) => (
-                              <TouchableOpacity
-                                key={mod.key}
-                                onPress={() => router.push(`/${tItem.id}?view=mecanico&role=owner&section=${mod.key}` as any)}
-                                style={{
-                                  flexDirection: 'row',
-                                  alignItems: 'center',
-                                  gap: 7,
-                                  paddingVertical: 9,
-                                  paddingHorizontal: 12,
-                                  borderRadius: 10,
-                                  backgroundColor: 'rgba(255,255,255,0.05)',
-                                  borderWidth: 1,
-                                  borderColor: 'rgba(255,255,255,0.12)',
-                                }}
-                              >
-                                <Feather name={mod.icon as any} size={14} color={mod.color} />
-                                <Text style={{ color: '#FFFFFF', fontSize: 12.5, fontWeight: '700' }}>{mod.label}</Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        </View>
-                      );
-                    })}
                   </View>
-                )}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={[styles.footerLink, biz.primaryColor && { color: biz.primaryColor }]}>
+                      Ver Catálogo y Agendar
+                    </Text>
+                    <Feather name="arrow-right" size={16} color={biz.primaryColor || '#FF5E00'} />
+                  </View>
+                </View>
+              </TouchableOpacity>
+            );
+          }) : (
+            <View style={[styles.glassCard, { width: '100%', alignItems: 'center', padding: 40 }]}>
+              <View style={{ marginBottom: 16 }}>
+                <ProIconBox family="Feather" name="compass" color="#94A3B8" size={32} boxSize={64} />
               </View>
-            ) : null}
-
-            {/* 📋 VISTA PREVIA / EJEMPLO ORDENADO DE LAS 9 OPCIONES DEL PORTAL INTERNO */}
-            <View style={{ width: '100%', marginTop: 8 }}>
-              <View style={{ alignItems: 'center', marginBottom: 20 }}>
-                <Text style={{ color: primaryColor, fontSize: 12, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
-                  ¿Qué incluye tu cuenta en Soy un Negocio?
-                </Text>
-                <Text style={{ color: '#FFFFFF', fontSize: isMobile ? 22 : 28, fontWeight: '900', textAlign: 'center' }}>
-                  Las 9 Opciones de tu Portal Interno
-                </Text>
-                <Text style={{ color: '#94A3B8', fontSize: 13.5, textAlign: 'center', maxWidth: 620, marginTop: 4 }}>
-                  Como dueño administras estos 9 módulos desde aquí. En cambio, dentro del negocio tus barberos o mecánicos usan su PIN (1234) únicamente para ver su agenda y cerrar citas.
-                </Text>
-              </View>
-
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 14, width: '100%', justifyContent: 'center' }}>
-                {PORTAL_INTERNAL_MODULES.map((mod) => (
-                  <TouchableOpacity
-                    key={mod.key}
-                    activeOpacity={0.85}
-                    onPress={() => setPartnerMode('login')}
-                    style={{
-                      width: isMobile ? '100%' : '31.5%',
-                      minWidth: isMobile ? '100%' : 250,
-                      backgroundColor: 'rgba(18, 22, 28, 0.78)',
-                      borderWidth: 1,
-                      borderColor: 'rgba(255,255,255,0.08)',
-                      borderRadius: 18,
-                      padding: 18,
-                      flexDirection: 'row',
-                      alignItems: 'flex-start',
-                      gap: 12,
-                    }}
-                  >
-                    <ProIconBox family="Feather" name={mod.icon} color={mod.color} size={18} boxSize={40} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ color: '#FFFFFF', fontSize: 15, fontWeight: '800', marginBottom: 4 }}>
-                        {mod.label}
-                      </Text>
-                      <Text style={{ color: '#94A3B8', fontSize: 12.5, lineHeight: 18 }}>
-                        {mod.desc}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </View>
+              <Text style={{ color: '#FFF', fontSize: 19, fontWeight: 'bold', marginBottom: 8, textAlign: 'center' }}>No encontramos coincidencias</Text>
+              <Text style={{ color: '#94A3B8', textAlign: 'center' }}>Intenta buscar con otro nombre o ubicación.</Text>
             </View>
-          </View>
-        ) : (
-          <View style={{ width: '100%', alignItems: 'center' }}>
-            <View style={{ maxWidth: 800, width: '100%', alignSelf: 'center', marginBottom: 40 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}>
-                <Text style={[styles.stepText, step >= 1 && styles.stepTextActive]}>1. Cuenta</Text>
-                <Text style={[styles.stepText, step >= 2 && styles.stepTextActive]}>2. Ubicación</Text>
-                <Text style={[styles.stepText, step >= 3 && styles.stepTextActive]}>3. Marca</Text>
-                <Text style={[styles.stepText, step >= 4 && styles.stepTextActive]}>4. Plan</Text>
-              </View>
-              <View style={styles.progressBarBg}>
-                <View style={[styles.progressBarFill, { backgroundColor: primaryColor, width: step === 1 ? '25%' : step === 2 ? '50%' : step === 3 ? '75%' : '100%' }]} />
-              </View>
-            </View>
-
-            {step === 1 && (
-              <View style={styles.formContainer}>
-                <Text style={styles.title}>Crea tu cuenta administradora</Text>
-                <Text style={styles.subtitle}>Con estas credenciales protegerás el acceso al Portal Interno y caja de tu negocio.</Text>
-                
-                <View style={[styles.glassCard, isMobile && { padding: 24 }]}>
-                  <View style={{ marginBottom: 22 }}>
-                    <Text style={styles.inputLabel}>Correo Electrónico Comercial</Text>
-                    <TextInput
-                      style={styles.formInput}
-                      placeholder="ejemplo@mitaller.com"
-                      placeholderTextColor="#475569"
-                      keyboardType="email-address"
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      value={email}
-                      onChangeText={setEmail}
-                    />
-                  </View>
-
-                  <View style={{ marginBottom: 14 }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                      <Text style={[styles.inputLabel, { marginBottom: 0 }]}>Contraseña Segura (Portal Interno)</Text>
-                      {password.length > 0 && (
-                        <Text
-                          style={{
-                            fontSize: 11,
-                            fontWeight: '800',
-                            color:
-                              passwordScore <= 1
-                                ? '#EF4444'
-                                : passwordScore <= 3
-                                ? '#F59E0B'
-                                : '#10B981',
-                          }}
-                        >
-                          {passwordScore <= 1
-                            ? 'Débil'
-                            : passwordScore === 2
-                            ? 'Regular'
-                            : passwordScore === 3
-                            ? 'Buena'
-                            : 'Muy Segura'}
-                        </Text>
-                      )}
-                    </View>
-
-                    <View style={styles.passwordInputWrapper}>
-                      <TextInput
-                        style={styles.passwordInnerInput}
-                        placeholder="Ej: Taller2026$"
-                        placeholderTextColor="#475569"
-                        secureTextEntry={!showPassword}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        value={password}
-                        onChangeText={setPassword}
-                      />
-                      <TouchableOpacity
-                        onPress={() => setShowPassword(!showPassword)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        style={styles.eyeButton}
-                      >
-                        <Feather name={showPassword ? 'eye-off' : 'eye'} size={18} color="#94A3B8" />
-                      </TouchableOpacity>
-                    </View>
-
-                    {/* Barra visual de fortaleza de contraseña (4 niveles) */}
-                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 10 }}>
-                      {[1, 2, 3, 4].map((lvl) => {
-                        const active = passwordScore >= lvl;
-                        const barColor =
-                          passwordScore <= 1
-                            ? '#EF4444'
-                            : passwordScore <= 3
-                            ? '#F59E0B'
-                            : '#10B981';
-                        return (
-                          <View
-                            key={lvl}
-                            style={{
-                              flex: 1,
-                              height: 4,
-                              borderRadius: 2,
-                              backgroundColor: active ? barColor : 'rgba(255,255,255,0.08)',
-                            }}
-                          />
-                        );
-                      })}
-                    </View>
-
-                    {/* Lista de requisitos en tiempo real */}
-                    <View style={styles.securityChecklistBox}>
-                      {[
-                        { ok: passwordChecks.minLength, label: 'Mínimo 8 caracteres' },
-                        { ok: passwordChecks.hasUppercase, label: 'Al menos 1 letra mayúscula (A-Z)' },
-                        { ok: passwordChecks.hasNumber, label: 'Al menos 1 número (0-9)' },
-                        { ok: passwordChecks.hasSpecial, label: 'Al menos 1 símbolo especial (@, #, $, !, *)' },
-                      ].map((rule, idx) => (
-                        <View key={idx} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                          <Ionicons
-                            name={rule.ok ? 'checkmark-circle' : 'ellipse-outline'}
-                            size={15}
-                            color={rule.ok ? '#10B981' : '#64748B'}
-                          />
-                          <Text style={{ fontSize: 12, color: rule.ok ? '#E2E8F0' : '#94A3B8', fontWeight: rule.ok ? '600' : '400' }}>
-                            {rule.label}
-                          </Text>
-                        </View>
-                      ))}
-                    </View>
-                  </View>
-
-                  {/* Confirmar Contraseña */}
-                  <View style={{ marginBottom: 28 }}>
-                    <Text style={styles.inputLabel}>Confirmar Contraseña</Text>
-                    <View
-                      style={[
-                        styles.passwordInputWrapper,
-                        confirmPassword.length > 0 && {
-                          borderColor: passwordsMatch ? '#10B981' : '#EF4444',
-                        },
-                      ]}
-                    >
-                      <TextInput
-                        style={styles.passwordInnerInput}
-                        placeholder="Repite tu contraseña"
-                        placeholderTextColor="#475569"
-                        secureTextEntry={!showConfirmPassword}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        value={confirmPassword}
-                        onChangeText={setConfirmPassword}
-                      />
-                      <TouchableOpacity
-                        onPress={() => setShowConfirmPassword(!showConfirmPassword)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        style={styles.eyeButton}
-                      >
-                        <Feather name={showConfirmPassword ? 'eye-off' : 'eye'} size={18} color="#94A3B8" />
-                      </TouchableOpacity>
-                    </View>
-                    {confirmPassword.length > 0 && (
-                      <Text
-                        style={{
-                          fontSize: 11.5,
-                          marginTop: 6,
-                          fontWeight: '700',
-                          color: passwordsMatch ? '#10B981' : '#EF4444',
-                        }}
-                      >
-                        {passwordsMatch ? '✓ Las contraseñas coinciden' : '✕ Las contraseñas no coinciden'}
-                      </Text>
-                    )}
-                  </View>
-
-                  <TouchableOpacity
-                    style={[
-                      styles.primaryButton,
-                      {
-                        backgroundColor: primaryColor,
-                        flexDirection: 'row',
-                        gap: 8,
-                        opacity: isPasswordStrong && passwordsMatch ? 1 : 0.85,
-                      },
-                    ]}
-                    onPress={handleNextStep}
-                  >
-                    <Text style={styles.primaryButtonText}>Continuar</Text>
-                    <Feather name="arrow-right" size={16} color="#FFF" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-
-            {step === 2 && (
-              <View style={styles.formContainer}>
-                <Text style={styles.title}>Identidad y Ubicación Real</Text>
-                <Text style={styles.subtitle}>Escribe tu Zip Code y autocompletaremos la ciudad y estado para evitar errores.</Text>
-                
-                <View style={styles.glassCard}>
-                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 24 }}>
-                    <View style={{ flex: 2 }}>
-                      <Text style={styles.inputLabel}>Nombre Público del Negocio</Text>
-                      <TextInput style={styles.formInput} placeholder="Ej: Auto Motors LA" placeholderTextColor="#475569" value={businessName} onChangeText={text => setBusinessName(toTitleCase(text))} />
-                    </View>
-                    <View style={{ flex: 1.5 }}>
-                      <Text style={styles.inputLabel}>Categoría Autorizada</Text>
-                      {Platform.OS === 'web' ? (
-                        <select className="web-input-override" value={category} onChange={e => setCategory(e.target.value)}>
-                          <option value="" disabled>Elige Nicho Comercial</option>
-                          {dbCategories.map((cat) => (
-                            <option key={cat.code} value={cat.code}>
-                              {cat.name}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <>
-                          <TouchableOpacity
-                            activeOpacity={0.8}
-                            onPress={() => setIsCategoryModalOpen(true)}
-                            style={[
-                              styles.formInput,
-                              {
-                                flexDirection: 'row',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                borderColor: category ? primaryColor : 'rgba(255,255,255,0.12)',
-                              },
-                            ]}
-                          >
-                            <Text
-                              numberOfLines={1}
-                              style={{
-                                flex: 1,
-                                fontSize: 15,
-                                fontWeight: category ? '700' : '400',
-                                color: category ? '#FFFFFF' : '#64748B',
-                              }}
-                            >
-                              {selectedCategoryObj ? selectedCategoryObj.name : 'Selecciona una categoría...'}
-                            </Text>
-                            <Feather name="chevron-down" size={18} color="#94A3B8" />
-                          </TouchableOpacity>
-
-                          <Modal
-                            visible={isCategoryModalOpen}
-                            transparent
-                            animationType="fade"
-                            onRequestClose={() => setIsCategoryModalOpen(false)}
-                          >
-                            <TouchableOpacity
-                              activeOpacity={1}
-                              onPress={() => setIsCategoryModalOpen(false)}
-                              style={{
-                                flex: 1,
-                                backgroundColor: 'rgba(0, 0, 0, 0.78)',
-                                justifyContent: 'center',
-                                paddingHorizontal: 20,
-                              }}
-                            >
-                              <View
-                                style={{
-                                  backgroundColor: '#0E1218',
-                                  borderRadius: 22,
-                                  borderWidth: 1,
-                                  borderColor: 'rgba(255,255,255,0.14)',
-                                  padding: 20,
-                                  maxHeight: '70%',
-                                }}
-                              >
-                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                                  <Text style={{ color: '#FFFFFF', fontSize: 17, fontWeight: '900' }}>
-                                    Categorías Autorizadas
-                                  </Text>
-                                  <TouchableOpacity onPress={() => setIsCategoryModalOpen(false)}>
-                                    <Feather name="x" size={20} color="#94A3B8" />
-                                  </TouchableOpacity>
-                                </View>
-
-                                <ScrollView showsVerticalScrollIndicator={false}>
-                                  {dbCategories.map((cat) => {
-                                    const isSelected = category === cat.code;
-                                    return (
-                                      <TouchableOpacity
-                                        key={cat.code}
-                                        activeOpacity={0.75}
-                                        onPress={() => {
-                                          setCategory(cat.code);
-                                          setIsCategoryModalOpen(false);
-                                        }}
-                                        style={{
-                                          flexDirection: 'row',
-                                          alignItems: 'center',
-                                          justifyContent: 'space-between',
-                                          paddingVertical: 14,
-                                          paddingHorizontal: 14,
-                                          borderRadius: 12,
-                                          marginBottom: 8,
-                                          backgroundColor: isSelected ? `${primaryColor}20` : 'rgba(255,255,255,0.04)',
-                                          borderWidth: 1,
-                                          borderColor: isSelected ? primaryColor : 'rgba(255,255,255,0.06)',
-                                        }}
-                                      >
-                                        <View style={{ flex: 1, paddingRight: 10 }}>
-                                          <Text style={{ color: '#FFFFFF', fontSize: 14.5, fontWeight: '700' }}>
-                                            {cat.name}
-                                          </Text>
-                                          <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
-                                            Código: {cat.code}
-                                          </Text>
-                                        </View>
-                                        <Ionicons
-                                          name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
-                                          size={20}
-                                          color={isSelected ? primaryColor : '#64748B'}
-                                        />
-                                      </TouchableOpacity>
-                                    );
-                                  })}
-                                </ScrollView>
-                              </View>
-                            </TouchableOpacity>
-                          </Modal>
-                        </>
-                      )}
-                    </View>
-                  </View>
-
-                  <View style={{ marginBottom: 24 }}>
-                    <Text style={styles.inputLabel}>Dirección Física Exacta</Text>
-                    <TextInput style={styles.formInput} placeholder="Ej: 1234 Main St, Suite 200" placeholderTextColor="#475569" value={address} onChangeText={text => setAddress(toTitleCase(text))} />
-                  </View>
-
-                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 32 }}>
-                    <View style={{ flex: 1.2 }}>
-                      <Text style={[styles.inputLabel, { color: primaryColor }]}>1. Ingresa el Zip Code</Text>
-                      <TextInput style={[styles.formInput, { borderColor: primaryColor, fontWeight: 'bold', fontSize: 18, textAlign: 'center' }]} placeholder="Ej: 91730" placeholderTextColor="#475569" keyboardType="numeric" value={zipCode} onChangeText={handleZipLookup} maxLength={5} />
-                    </View>
-                    <View style={{ flex: 1.2 }}>
-                      <Text style={styles.inputLabel}>Ciudad (Auto)</Text>
-                      <TextInput style={[styles.formInput, { backgroundColor: 'rgba(0,0,0,0.2)', color: '#94A3B8' }]} placeholder="Autocompletada" placeholderTextColor="#475569" value={city} editable={false} />
-                    </View>
-                    <View style={{ flex: 0.8 }}>
-                      <Text style={styles.inputLabel}>Estado</Text>
-                      <TextInput style={[styles.formInput, { backgroundColor: 'rgba(0,0,0,0.2)', color: '#94A3B8', textAlign: 'center' }]} placeholder="CA" placeholderTextColor="#475569" value={stateCode} editable={false} />
-                    </View>
-                  </View>
-
-                  <View style={{ flexDirection: 'row', gap: 16 }}>
-                    <TouchableOpacity style={[styles.secondaryButton, { flex: 1, flexDirection: 'row', gap: 8 }]} onPress={() => setStep(1)}>
-                      <Feather name="arrow-left" size={16} color="#E2E8F0" />
-                      <Text style={styles.secondaryButtonText}>Atrás</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={[styles.primaryButton, { flex: 2, backgroundColor: primaryColor, flexDirection: 'row', gap: 8 }]} onPress={handleNextStep}>
-                      <Text style={styles.primaryButtonText}>Siguiente Paso</Text>
-                      <Feather name="arrow-right" size={16} color="#FFF" />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            )}
-
-            {step === 3 && (
-              <View style={styles.formContainer}>
-                <Text style={styles.title}>Personaliza tu Portal</Text>
-                <Text style={styles.subtitle}>Sube tu logotipo y elige tu color corporativo (Marca Blanca).</Text>
-                
-                <View style={styles.glassCard}>
-                  <View style={{ marginBottom: 28 }}>
-                    <Text style={styles.inputLabel}>Logotipo del Negocio</Text>
-                    {Platform.OS === 'web' && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 20 }}>
-                        {logoPreview ? (
-                          <Image source={{ uri: logoPreview }} style={{ width: 64, height: 64, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' }} />
-                        ) : (
-                          <View style={{ width: 64, height: 64, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.05)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderStyle: 'dashed', borderColor: 'rgba(255,255,255,0.2)' }}>
-                            <Feather name="image" size={24} color="#64748B" />
-                          </View>
-                        )}
-                        <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', backgroundColor: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', padding: '12px 20px', borderRadius: '12px', fontWeight: 'bold', fontSize: '14px', color: '#FFF' }}>
-                          <Feather name="upload" size={15} color="#FFF" />
-                          Seleccionar Archivo...
-                          <input type="file" accept="image/*" style={{ display: 'none' }} onChange={handleImageSelect} />
-                        </label>
-                      </View>
-                    )}
-                  </View>
-                  
-                  <View style={{ marginBottom: 32 }}>
-                    <Text style={styles.inputLabel}>Elige tu Color Corporativo</Text>
-                    <View style={{ flexDirection: 'row', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
-                      {colorPalette.map((color, idx) => (
-                        <TouchableOpacity 
-                          key={idx}
-                          //@ts-ignore
-                          className="color-swatch"
-                          style={{ 
-                            alignItems: 'center', gap: 8, padding: 8, borderRadius: 12,
-                            backgroundColor: primaryColor === color.value ? 'rgba(255,255,255,0.05)' : 'transparent',
-                            borderWidth: 1, borderColor: primaryColor === color.value ? color.value : 'transparent'
-                          }}
-                          onPress={() => setPrimaryColor(color.value)}
-                        >
-                          <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: color.value, borderWidth: 2, borderColor: primaryColor === color.value ? '#FFF' : 'transparent' }} />
-                          <Text style={{ fontSize: 11, color: primaryColor === color.value ? '#FFF' : '#94A3B8', fontWeight: 'bold' }}>{color.name}</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                    
-                    <View style={{ marginTop: 28, padding: 20, backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', alignItems: 'center' }}>
-                      <Text style={{ fontSize: 13, color: '#94A3B8', marginBottom: 12 }}>Vista previa de tus botones:</Text>
-                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: primaryColor, width: '100%' }]} disabled>
-                        <Text style={styles.primaryButtonText}>Agendar en {businessName || 'Mi Negocio'}</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-
-                  <View style={{ flexDirection: 'row', gap: 16 }}>
-                    <TouchableOpacity style={[styles.secondaryButton, { flex: 1, flexDirection: 'row', gap: 8 }]} onPress={() => setStep(2)}>
-                      <Feather name="arrow-left" size={16} color="#E2E8F0" />
-                      <Text style={styles.secondaryButtonText}>Atrás</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={[styles.primaryButton, { flex: 2, backgroundColor: primaryColor, flexDirection: 'row', gap: 8 }]} onPress={handleNextStep}>
-                      <Text style={styles.primaryButtonText}>Ver Planes</Text>
-                      <Feather name="arrow-right" size={16} color="#FFF" />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-            )}
-
-            {step === 4 && (
-              <View style={{ width: '100%', alignItems: 'center' }}>
-                <Text style={[styles.title, { textAlign: 'center' }]}>Desbloquea tu Potencial</Text>
-                <Text style={[styles.subtitle, { textAlign: 'center', marginBottom: 40 }]}>Selecciona el plan que mejor se adapte a tu volumen operativo mensual.</Text>
-                
-                <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 24, width: '100%', justifyContent: 'center' }}>
-                  {plans.map((plan, idx) => (
-                    <TouchableOpacity 
-                      key={idx}
-                      //@ts-ignore
-                      className={`pricing-card ${selectedPlan === plan.id ? 'selected' : ''}`}
-                      style={[
-                        styles.glassCard, 
-                        { flex: 1, maxWidth: isMobile ? '100%' : 350, padding: 32, position: 'relative' },
-                        selectedPlan === plan.id && { borderColor: primaryColor, backgroundColor: `${primaryColor}10` }
-                      ]}
-                      onPress={() => setSelectedPlan(plan.id)}
-                      activeOpacity={0.8}
-                    >
-                      {plan.recommended && (
-                        <View style={{ position: 'absolute', top: -12, alignSelf: 'center', backgroundColor: primaryColor, paddingVertical: 4, paddingHorizontal: 12, borderRadius: 12 }}>
-                          <Text style={{ color: '#FFF', fontSize: 11, fontWeight: '900', letterSpacing: 1, textTransform: 'uppercase' }}>Recomendado</Text>
-                        </View>
-                      )}
-                      
-                      <Text style={{ fontSize: 24, fontWeight: '800', color: '#FFF', marginBottom: 8 }}>{plan.name}</Text>
-                      <Text style={{ color: '#94A3B8', fontSize: 14, marginBottom: 24, minHeight: 40 }}>{plan.desc}</Text>
-                      
-                      <View style={{ flexDirection: 'row', alignItems: 'baseline', marginBottom: 32, borderBottomWidth: 1, borderColor: 'rgba(255,255,255,0.08)', paddingBottom: 24 }}>
-                        <Text style={{ fontSize: 48, fontWeight: '900', color: selectedPlan === plan.id ? primaryColor : '#FFF' }}>{plan.price}</Text>
-                        <Text style={{ color: '#94A3B8', fontSize: 16, fontWeight: 'bold' }}>/mes</Text>
-                      </View>
-
-                      <View style={{ gap: 16 }}>
-                        {plan.features.map((feat, fidx) => (
-                          <View key={fidx} style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                            <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.2)', borderRadius: 10, width: 20, height: 20, alignItems: 'center', justifyContent: 'center' }}>
-                              <Text style={{ color: '#10B981', fontSize: 12, fontWeight: 'bold' }}>✓</Text>
-                            </View>
-                            <Text style={{ color: '#E2E8F0', fontSize: 14 }}>{feat}</Text>
-                          </View>
-                        ))}
-                      </View>
-                      
-                      <View style={{ marginTop: 40 }}>
-                        <View style={[styles.secondaryButton, selectedPlan === plan.id && { backgroundColor: primaryColor, borderColor: primaryColor }]}>
-                          <Text style={[styles.secondaryButtonText, selectedPlan === plan.id && { color: '#FFF' }]}>
-                            {selectedPlan === plan.id ? 'Plan Seleccionado' : 'Elegir Plan'}
-                          </Text>
-                        </View>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginTop: 48, width: '100%', maxWidth: 600 }}>
-                  <TouchableOpacity style={[styles.secondaryButton, { flex: 1, paddingVertical: 18, flexDirection: 'row', gap: 8 }]} onPress={() => setStep(3)}>
-                    <Feather name="arrow-left" size={16} color="#E2E8F0" />
-                    <Text style={styles.secondaryButtonText}>Revisar Marca</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[styles.primaryButton, { flex: 2, paddingVertical: 18, backgroundColor: primaryColor, flexDirection: 'row', gap: 10 }]} onPress={handleFinalCheckoutAndStore} disabled={!selectedPlan || isSubmitting}>
-                    <Feather name="check-circle" size={18} color="#FFF" />
-                    <Text style={[styles.primaryButtonText, { fontSize: 16 }]}>{isSubmitting ? 'Registrando Negocio...' : 'Completar Registro y Guardar'}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-
-          </View>
-        )}
-
+          )}
+        </View>
       </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  topNavbar: {
-    paddingTop: SAFE_TOP_INSET,
-    height: (Platform.OS === 'web' ? 70 : 64) + SAFE_TOP_INSET,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: Platform.OS === 'web' ? 40 : 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(5, 7, 12, 0.94)',
-    zIndex: 100,
-  },
-  root: { flex: 1, backgroundColor: '#05070C' },
-  header: {
-    paddingTop: SAFE_TOP_INSET,
-    height: (Platform.OS === 'web' ? 74 : 64) + SAFE_TOP_INSET,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: Platform.OS === 'web' ? 40 : 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(5, 7, 12, 0.96)',
-    zIndex: 100,
-  },
-  contentArea: { paddingHorizontal: Platform.OS === 'web' ? 40 : 20, paddingTop: 40, paddingBottom: 80, alignSelf: 'center', width: '100%', alignItems: 'center' },
-  
-  formContainer: { width: '100%', maxWidth: 600 },
-  title: { fontSize: Platform.OS === 'web' ? 40 : 32, fontWeight: '900', color: '#FFFFFF', letterSpacing: -1, marginBottom: 12 },
-  subtitle: { color: '#94A3B8', fontSize: 16, lineHeight: 24, marginBottom: 40 },
-  
-  progressBarBg: { height: 6, backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 3, width: '100%', overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 3 },
-  stepText: { color: '#475569', fontSize: 13, fontWeight: 'bold' },
-  stepTextActive: { color: '#FF5E00' },
-
-  glassCard: { backgroundColor: 'rgba(18, 22, 28, 0.65)', borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 24, padding: 40, ...(Platform.OS === 'web' && { backdropFilter: 'blur(30px)' } as any) },
-  inputLabel: { fontSize: 12, color: '#94A3B8', fontWeight: 'bold', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 },
-  formInput: { backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', color: '#FFFFFF', borderRadius: 12, paddingHorizontal: 16, height: 56, fontSize: 16, ...(Platform.OS === 'web' && { outlineStyle: 'none' } as any) },
-  
-  passwordInputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 12,
-    height: 56,
-    paddingLeft: 16,
-    paddingRight: 12,
-  },
-  passwordInnerInput: {
-    flex: 1,
-    color: '#FFFFFF',
-    fontSize: 16,
-    height: '100%',
-    ...(Platform.OS === 'web' && { outlineStyle: 'none' } as any),
-  },
-  eyeButton: {
-    padding: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  securityChecklistBox: {
-    marginTop: 12,
-    padding: 12,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
-    gap: 6,
-  },
-  primaryButton: { backgroundColor: '#FF5E00', borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
-  primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 15 },
-  secondaryButton: { backgroundColor: 'rgba(255,255,255,0.02)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)', borderRadius: 12, alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
-  secondaryButtonText: { color: '#E2E8F0', fontWeight: '800', fontSize: 15 }
-  
+  appContainer: { flex: 1, backgroundColor: '#05070C' },
+  topNavbar: { height: 70, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 40, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.08)', backgroundColor: 'rgba(5, 7, 12, 0.94)', zIndex: 100 },
+  partnerButton: { backgroundColor: 'rgba(255, 94, 0, 0.15)', borderWidth: 1, borderColor: '#FF5E00', paddingVertical: 10, paddingHorizontal: 18, borderRadius: 12 },
+  partnerButtonText: { color: '#FF5E00', fontWeight: 'bold', fontSize: 14 },
+  contentArea: { padding: 20, maxWidth: 1200, alignSelf: 'center', width: '100%', minHeight: Platform.OS === 'web' ? ('100vh' as any) : '100%' },
+  header: { paddingTop: Platform.OS === 'web' ? 12 : 0, marginBottom: 36 },
+  title: { fontSize: Platform.OS === 'web' ? 44 : 32, fontWeight: '900', color: '#FFFFFF', letterSpacing: -0.8, marginBottom: 12 },
+  accent: { color: '#FF5E00' },
+  subtitle: { color: '#94A3B8', fontSize: 16.5, maxWidth: 700, lineHeight: 25, marginBottom: 28 },
+  searchConsole: { backgroundColor: 'rgba(18, 22, 28, 0.85)', borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 24, padding: 28 },
+  inputLabel: { fontSize: 12, color: '#94A3B8', fontWeight: 'bold', marginBottom: 8, textTransform: 'uppercase' },
+  searchInput: { backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', color: '#FFFFFF', borderRadius: 12, paddingHorizontal: 16, height: 52, fontSize: 15.5 },
+  webSelect: { backgroundColor: 'rgba(0, 0, 0, 0.4)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', color: '#FFFFFF', borderRadius: 12, paddingHorizontal: 16, height: 52, fontSize: 15.5, width: '100%' },
+  primaryButton: { backgroundColor: '#FF5E00', borderRadius: 12, alignItems: 'center', justifyContent: 'center', height: 52, paddingHorizontal: 28 },
+  primaryButtonText: { color: '#FFFFFF', fontWeight: '800', fontSize: 15.5 },
+  backButton: { alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 14, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 11, borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)' },
+  backButtonText: { color: '#A1A1AA', fontWeight: 'bold', fontSize: 13.5 },
+  bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 20, width: '100%' },
+  glassCard: { backgroundColor: 'rgba(18, 22, 28, 0.65)', borderWidth: 1, borderColor: 'rgba(255, 255, 255, 0.08)', borderRadius: 22, padding: 26, flex: 1, minWidth: 280 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18 },
+  cardIcon: { fontSize: 48 },
+  countBadge: { backgroundColor: 'rgba(255, 94, 0, 0.15)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: '#FF5E00' },
+  countText: { color: '#FF5E00', fontSize: 12.5, fontWeight: '900' },
+  distanceBadge: { backgroundColor: 'rgba(255,255,255,0.05)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' },
+  distanceText: { color: '#FFF', fontSize: 12, fontWeight: 'bold' },
+  cardTitle: { fontSize: 22, fontWeight: '900', color: '#FFFFFF', marginBottom: 6 },
+  cardSubtitle: { fontSize: 14.5, color: '#94A3B8', marginBottom: 0 },
+  cardFooter: { marginTop: 20, flexDirection: 'row', justifyContent: 'flex-end', borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.08)', paddingTop: 16 },
+  footerLink: { color: '#FF5E00', fontWeight: '800', fontSize: 14.5 }
 });

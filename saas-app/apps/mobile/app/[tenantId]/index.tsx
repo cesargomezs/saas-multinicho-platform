@@ -4316,37 +4316,59 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   <Feather name="key" size={26} color={brandColor} />
                 </View>
                 <Text style={{ fontSize: 24, fontWeight: '900', color: tColor.text, marginBottom: 6, textAlign: 'center' }}>
-                  {tr(`Acceso Operativo (${staffTerm})`, `Staff Access (${staffTerm})`)}
+                  {tr(`Acceso Empleados (${staffTerm})`, `Employee Access (${staffTerm})`)}
                 </Text>
                 <Text style={{ color: tColor.muted, marginBottom: 24, textAlign: 'center', fontSize: 13.5, lineHeight: 19 }}>
                   {tr(
-                    `Ingresa el PIN de ${tenantInfo?.name || 'tu local'} (PIN: 1234) para ver las citas en agenda y cerrar servicios.`,
-                    `Enter the PIN for ${tenantInfo?.name || 'your shop'} (PIN: 1234) to view scheduled appointments and close orders.`
+                    `Ingresa el código de acceso de empleados de ${tenantInfo?.name || 'este negocio'} para ver las citas en agenda y cerrar servicios.`,
+                    `Enter the employee access code for ${tenantInfo?.name || 'this business'} to view scheduled appointments and close orders.`
                   )}
                 </Text>
                 <TextInput
                   style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, marginBottom: 16, width: '100%' }]}
-                  placeholder="PIN"
+                  placeholder="••••"
                   placeholderTextColor={tColor.muted}
                   secureTextEntry
                   keyboardType="numeric"
+                  maxLength={6}
                   value={mechanicPin}
-                  onChangeText={setMechanicPin}
+                  onChangeText={(txt) => setMechanicPin(txt.replace(/\D/g, ''))}
                 />
                 <TouchableOpacity
                   style={[styles.primaryButton, { backgroundColor: brandColor, width: '100%', marginBottom: 14 }]}
-                  onPress={() => {
-                    if (mechanicPin === '1234') {
-                      setPortalAccessRole('staff');
-                      setAgendaFilter('today');
-                      setIsMechanicAuth(true);
-                      setMechanicPin('');
-                    } else {
-                      alert(t.wrongPin);
+                  disabled={isAuthenticatingStaff}
+                  onPress={async () => {
+                    const cleanPin = mechanicPin.trim();
+                    if (!cleanPin) {
+                      return alert(tr('Ingresa el código de acceso de empleado.', 'Enter the employee access code.'));
+                    }
+                    setIsAuthenticatingStaff(true);
+                    try {
+                      const res = await apiFetch('/api/tenants/auth-staff', {
+                        method: 'POST',
+                        body: JSON.stringify({ password: cleanPin }),
+                      });
+                      const json = await res.json();
+                      if (res.ok && json.success) {
+                        setPortalAccessRole('staff');
+                        setAgendaFilter('today');
+                        setIsMechanicAuth(true);
+                        setMechanicPin('');
+                      } else {
+                        alert(json.message || t.wrongPin);
+                      }
+                    } catch (_e) {
+                      alert(tr('Error de conexión al validar el código.', 'Connection error validating access code.'));
+                    } finally {
+                      setIsAuthenticatingStaff(false);
                     }
                   }}
                 >
-                  <Text style={styles.primaryButtonText}>{tr('Ver Agenda y Cerrar Citas', 'View Schedule & Close Orders')}</Text>
+                  <Text style={styles.primaryButtonText}>
+                    {isAuthenticatingStaff
+                      ? tr('Verificando código...', 'Verifying code...')
+                      : tr('Ver Agenda y Cerrar Citas', 'View Schedule & Close Orders')}
+                  </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity

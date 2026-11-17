@@ -124,7 +124,7 @@ export async function createTenant(req: Request, res: Response) {
     const cleanAdminEmail = (adminEmail || email || '').trim().toLowerCase() || null;
     const rawPassword = password ? String(password) : '';
     const hashedPassword = rawPassword ? hashPasswordScrypt(rawPassword) : null;
-    const hashedPin = portalPin ? hashPasswordScrypt(String(portalPin)) : null;
+    const hashedPin = portalPin && String(portalPin).trim() ? hashPasswordScrypt(String(portalPin).trim()) : null;
     const tenantUuid = id || crypto.randomUUID();
 
     const [newTenant] = await db.insert(tenants).values({
@@ -476,13 +476,23 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
       }
     }
 
-    // 2. Validar contra portal_pin_hash si configuró PIN
-    if (tenantPinHash && verifyPasswordScrypt(String(password), tenantPinHash)) {
-      return res.status(200).json({
-        success: true,
-        message: 'Acceso autorizado por PIN del negocio',
-        tenantName: tenant.name,
-      });
+    // 2. Validar contra portal_pin_hash (Código de Acceso para Empleados configurado al crear el negocio)
+    if (tenantPinHash) {
+      if (verifyPasswordScrypt(String(password).trim(), tenantPinHash)) {
+        return res.status(200).json({
+          success: true,
+          role: 'staff',
+          message: 'Acceso autorizado para personal operativo',
+          tenantName: tenant.name,
+        });
+      }
+      // Si el negocio ya tiene su propio PIN configurado y no se envió email, no permitir '1234' por defecto
+      if (!cleanEmail) {
+        return res.status(401).json({
+          success: false,
+          message: 'Código de acceso de empleado incorrecto.',
+        });
+      }
     }
 
     // 3. Validar contra la tabla public.users (rol owner / staff)
@@ -515,8 +525,8 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
       }
     }
 
-    // 4. Fallback solo para negocios antiguos que aún tienen admin_password_hash en NULL
-    if (!tenantPasswordHash && String(password) === '1234') {
+    // 4. Fallback solo para negocios antiguos que aún tienen portal_pin_hash y admin_password_hash en NULL
+    if (!tenantPinHash && !tenantPasswordHash && String(password).trim() === '1234') {
       return res.status(200).json({
         success: true,
         message: 'Acceso autorizado (negocio sin contraseña configurada aún)',
