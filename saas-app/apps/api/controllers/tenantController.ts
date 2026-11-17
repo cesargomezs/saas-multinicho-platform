@@ -127,6 +127,24 @@ export async function createTenant(req: Request, res: Response) {
     const hashedPin = portalPin && String(portalPin).trim() ? hashPasswordScrypt(String(portalPin).trim()) : null;
     const tenantUuid = id || crypto.randomUUID();
 
+    // Si el frontend no mandó lat/lon pero hay un zipCode, calculamos las coordenadas en el BACKEND automáticamente
+    let finalLat = req.body.latitude ? String(req.body.latitude) : null;
+    let finalLon = req.body.longitude ? String(req.body.longitude) : null;
+    const cleanZip = zipCode ? String(zipCode).trim() : '';
+
+    if ((!finalLat || !finalLon) && cleanZip.length === 5) {
+      try {
+        const zipRes = await fetch(`https://api.zippopotam.us/us/${cleanZip}`);
+        if (zipRes.ok) {
+          const zipData = await zipRes.json();
+          if (zipData && zipData.places && zipData.places.length > 0) {
+            finalLat = String(zipData.places[0].latitude);
+            finalLon = String(zipData.places[0].longitude);
+          }
+        }
+      } catch (_e) {}
+    }
+
     const [newTenant] = await db.insert(tenants).values({
       id: tenantUuid,
       name: name.trim(),
@@ -137,9 +155,9 @@ export async function createTenant(req: Request, res: Response) {
       address: address ? address.trim() : null,
       city: city ? city.trim() : null,
       state: state ? state.trim().toUpperCase() : null,
-      zipCode: zipCode ? zipCode.trim() : null,
-      latitude: req.body.latitude ? String(req.body.latitude) : null,
-      longitude: req.body.longitude ? String(req.body.longitude) : null,
+      zipCode: cleanZip || null,
+      latitude: finalLat,
+      longitude: finalLon,
       logoUrl: logoUrl || null,
       primaryColor: primaryColor || '#FF5E00',
       planTier: planTier || 'starter',
