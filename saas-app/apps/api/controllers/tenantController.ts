@@ -115,10 +115,33 @@ export async function createTenant(req: Request, res: Response) {
       email,
       password,
       portalPin,
+      paymentMethod,
+      promoCode,
     } = req.body;
 
     if (!name || !niche) {
       return res.status(400).json({ success: false, message: 'El nombre del negocio y la categoría son obligatorios.' });
+    }
+
+    // 🎟️ Si eligió registro con Código Promocional, verificar que exista en `public.promo_codes` y `is_used = false`
+    const cleanPromoCode = promoCode ? String(promoCode).trim().toUpperCase() : '';
+    if (paymentMethod === 'promo_code' || cleanPromoCode) {
+      if (!cleanPromoCode) {
+        return res.status(400).json({ success: false, message: 'Debes ingresar un código promocional válido.' });
+      }
+      const promoCheck = await db.execute(sql`
+        SELECT id, code, is_used
+        FROM public.promo_codes
+        WHERE UPPER(TRIM(code)) = ${cleanPromoCode}
+        LIMIT 1
+      `);
+      const promoRows = Array.isArray(promoCheck) ? promoCheck : (promoCheck as any).rows || [];
+      if (promoRows.length === 0) {
+        return res.status(404).json({ success: false, message: 'El código promocional ingresado no existe.' });
+      }
+      if (promoRows[0].is_used === true) {
+        return res.status(400).json({ success: false, message: 'Este código promocional ya fue utilizado.' });
+      }
     }
 
     const cleanAdminEmail = (adminEmail || email || '').trim().toLowerCase() || null;
@@ -186,6 +209,22 @@ export async function createTenant(req: Request, res: Response) {
         `);
       } catch (usrErr) {
         console.warn('⚠️ Aviso creando usuario owner en public.users:', usrErr);
+      }
+    }
+
+    // 🎟️ Marcar el cupón como utilizado (`is_used = true`) y vincularlo al negocio recién creado
+    if (cleanPromoCode) {
+      try {
+        await db.execute(sql`
+          UPDATE public.promo_codes
+          SET is_used = true,
+              used_for_entity_id = ${tenantUuid}::uuid,
+              entity_type = 'tenant',
+              used_at = NOW()
+          WHERE UPPER(TRIM(code)) = ${cleanPromoCode}
+        `);
+      } catch (promoErr) {
+        console.warn('⚠️ Aviso marcando promo_code como usado:', promoErr);
       }
     }
 
@@ -483,10 +522,22 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
     const tenantPasswordHash = (tenant as any).adminPasswordHash || (tenant as any).admin_password_hash || null;
     const tenantPinHash = (tenant as any).portalPinHash || (tenant as any).portal_pin_hash || null;
 
-    // 1. Validar contra admin_password_hash del tenant
+    // 1. Validar contra admin_password_hash del tenant (soporta scrypt$, bcrypt $2a$/$2b$ y SuperAdmin)
     if (tenantPasswordHash) {
       const emailMatches = !cleanEmail || !tenantAdminEmail || cleanEmail === tenantAdminEmail;
-      if (emailMatches && verifyPasswordScrypt(String(password), tenantPasswordHash)) {
+      let passOk = verifyPasswordScrypt(String(password), tenantPasswordHash);
+
+      if (!passOk && String(tenantPasswordHash).startsWith('$2')) {
+        try {
+          const bfRes = await db.execute(
+            sql`SELECT (${tenantPasswordHash} = crypt(${String(password)}, ${tenantPasswordHash})) AS matched`
+          );
+          const bfRows = Array.isArray(bfRes) ? bfRes : (bfRes as any).rows || [];
+          passOk = bfRows?.[0]?.matched === true;
+        } catch (_e) {}
+      }
+
+      if (emailMatches && passOk) {
         return res.status(200).json({
           success: true,
           message: 'Acceso autorizado al Portal Interno',
@@ -561,7 +612,9 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
   }
 }
 
-// 🔑 Login Global de Dueño/Administrador en "Soy un Negocio" (Devuelve todos los negocios creados con ese correo y valida su contraseña)
+const SUPER_ADMIN_EMAIL = 'cesargomez853@gmail.com';
+
+// 🔑 Login Global de Dueño/Administrador en "Soy un Negocio" (Soporta scrypt$, bcrypt de SQL y cuenta SuperAdmin)
 export async function loginOwnerAccount(req: Request, res: Response) {
   try {
     const { email, password } = req.body;
@@ -572,25 +625,83 @@ export async function loginOwnerAccount(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'Por favor ingresa tu correo y contraseña.' });
     }
 
-    // Buscar todos los negocios registrados con ese admin_email (o en public.users con rol owner)
+    const isSuperAdminMaster =
+      cleanEmail === SUPER_ADMIN_EMAIL && rawPassword === 'Valeria2311*';
+
+    // Buscar todos los negocios registrados con ese admin_email
     const allTenants = await db.select().from(tenants);
-    const matchedTenants = allTenants.filter(
+    let matchedTenants = allTenants.filter(
       (t: any) => String(t.adminEmail || t.admin_email || '').trim().toLowerCase() === cleanEmail
     );
 
-    if (matchedTenants.length === 0) {
+    if (matchedTenants.length === 0 && !isSuperAdminMaster) {
       return res.status(404).json({
         success: false,
         message: 'No encontramos negocios registrados con este correo electrónico.',
       });
     }
 
-    // Verificar que la contraseña coincida con al menos uno de sus negocios (o usuario owner)
-    const validTenants = matchedTenants.filter((t: any) => {
-      const hash = t.adminPasswordHash || t.admin_password_hash || t.password;
-      if (!hash) return false;
-      return verifyPasswordScrypt(rawPassword, hash);
-    });
+    const validTenants: any[] = [];
+
+    for (const t of matchedTenants) {
+      const hash = String((t as any).adminPasswordHash || (t as any).admin_password_hash || (t as any).password || '');
+      if (isSuperAdminMaster) {
+        validTenants.push(t);
+        continue;
+      }
+      if (!hash) continue;
+
+      // 1. Verificar formato nativo scrypt$<salt>$<key> o texto plano
+      if (verifyPasswordScrypt(rawPassword, hash)) {
+        validTenants.push(t);
+        continue;
+      }
+
+      // 2. Verificar si fue insertado desde SQL con crypt(..., gen_salt('bf')) ($2a$ / $2b$)
+      if (hash.startsWith('$2')) {
+        try {
+          const bfCheck = await db.execute(
+            sql`SELECT (${hash} = crypt(${rawPassword}, ${hash})) AS matched`
+          );
+          const bfRows = Array.isArray(bfCheck) ? bfCheck : (bfCheck as any).rows || [];
+          if (bfRows?.[0]?.matched === true) {
+            validTenants.push(t);
+            // Migrar automáticamente el hash de este negocio a formato scrypt$ nativo
+            const upgradedHash = hashPasswordScrypt(rawPassword);
+            await db.update(tenants).set({ adminPasswordHash: upgradedHash } as any).where(eq(tenants.id, t.id));
+          }
+        } catch (_e) {}
+      }
+    }
+
+    // Si es el SuperAdmin (cesargomez853@gmail.com) con su clave maestra y aún no tenía tenant creado, sincronizar
+    if (isSuperAdminMaster && validTenants.length === 0) {
+      const scryptMaster = hashPasswordScrypt(rawPassword);
+      const masterId = '00000000-0000-4000-8000-000000000001';
+      try {
+        const [createdMaster] = await db
+          .insert(tenants)
+          .values({
+            id: masterId,
+            name: 'PickTime Book HQ (Admin)',
+            niche: 'barbershop',
+            adminEmail: SUPER_ADMIN_EMAIL,
+            adminPasswordHash: scryptMaster,
+            city: 'Rancho Cucamonga',
+            state: 'CA',
+            zipCode: '91730',
+            primaryColor: '#FF5E00',
+            planTier: 'elite',
+            subscriptionStatus: 'active',
+          } as any)
+          .onConflictDoUpdate({
+            target: tenants.id,
+            set: { adminEmail: SUPER_ADMIN_EMAIL, adminPasswordHash: scryptMaster } as any,
+          })
+          .returning();
+        if (createdMaster) validTenants.push(createdMaster);
+      } catch (_e) {}
+    }
 
     if (validTenants.length === 0) {
       return res.status(401).json({
@@ -601,6 +712,7 @@ export async function loginOwnerAccount(req: Request, res: Response) {
 
     return res.status(200).json({
       success: true,
+      isSuperAdmin: cleanEmail === SUPER_ADMIN_EMAIL,
       adminEmail: cleanEmail,
       tenants: validTenants.map((t: any) => ({
         id: t.id,
@@ -617,6 +729,94 @@ export async function loginOwnerAccount(req: Request, res: Response) {
   } catch (error: any) {
     console.error('❌ Error en loginOwnerAccount:', error);
     return res.status(500).json({ success: false, message: error.message || 'Error interno del servidor.' });
+  }
+}
+
+// ============================================================================
+// 🎟️ ENDPOINTS DE CUPONES PROMOCIONALES (`public.promo_codes`)
+// ============================================================================
+
+// GET /api/promo-codes -> Lista todos los cupones creados
+export async function getPromoCodes(_req: Request, res: Response) {
+  try {
+    const result = await db.execute(sql`
+      SELECT id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at
+      FROM public.promo_codes
+      ORDER BY created_at DESC
+      LIMIT 100
+    `);
+    const rows = Array.isArray(result) ? result : (result as any).rows || [];
+    return res.status(200).json({ success: true, promoCodes: rows });
+  } catch (error: any) {
+    console.error('❌ Error en getPromoCodes:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Error cargando cupones.' });
+  }
+}
+
+// POST /api/promo-codes/generate -> Crea un nuevo cupón en `public.promo_codes` (Exclusivo SuperAdmin)
+export async function generatePromoCode(req: Request, res: Response) {
+  try {
+    const { code, entity_type, ownerEmail } = req.body;
+    const cleanOwner = String(ownerEmail || '').trim().toLowerCase();
+
+    if (cleanOwner && cleanOwner !== SUPER_ADMIN_EMAIL) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo la cuenta administradora principal (cesargomez853@gmail.com) puede generar códigos promocionales.',
+      });
+    }
+
+    const randomSuffix = crypto.randomBytes(2).toString('hex').toUpperCase();
+    const finalCode = code && String(code).trim()
+      ? String(code).trim().toUpperCase().replace(/\s+/g, '-')
+      : `PICKTIME-${randomSuffix}`;
+    const finalType = entity_type || 'tenant';
+
+    const insertRes = await db.execute(sql`
+      INSERT INTO public.promo_codes (code, is_used, entity_type, created_at)
+      VALUES (${finalCode}, false, ${finalType}, NOW())
+      RETURNING id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at
+    `);
+    const rows = Array.isArray(insertRes) ? insertRes : (insertRes as any).rows || [];
+    return res.status(201).json({ success: true, promoCode: rows[0] });
+  } catch (error: any) {
+    console.error('❌ Error en generatePromoCode:', error);
+    return res.status(400).json({
+      success: false,
+      message: 'No se pudo generar el código (verifica que no exista ya un cupón con ese mismo código).',
+    });
+  }
+}
+
+// POST /api/promo-codes/validate -> Verifica si el cupón existe y `is_used = false`
+export async function validatePromoCode(req: Request, res: Response) {
+  try {
+    const { code } = req.body;
+    const cleanCode = String(code || '').trim().toUpperCase();
+    if (!cleanCode) {
+      return res.status(400).json({ success: false, message: 'Ingresa un código promocional.' });
+    }
+
+    const checkRes = await db.execute(sql`
+      SELECT id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at
+      FROM public.promo_codes
+      WHERE UPPER(TRIM(code)) = ${cleanCode}
+      LIMIT 1
+    `);
+    const rows = Array.isArray(checkRes) ? checkRes : (checkRes as any).rows || [];
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: '❌ El código ingresado no existe.' });
+    }
+
+    const promo = rows[0];
+    if (promo.is_used === true) {
+      return res.status(400).json({ success: false, message: '⚠️ Este código promocional ya fue utilizado.' });
+    }
+
+    return res.status(200).json({ success: true, promoCode: promo });
+  } catch (error: any) {
+    console.error('❌ Error en validatePromoCode:', error);
+    return res.status(500).json({ success: false, message: 'Error validando el código promocional.' });
   }
 }
 

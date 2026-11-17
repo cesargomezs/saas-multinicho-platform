@@ -1,37 +1,48 @@
 {
   "expo": {
-    "name": "mobile",
+    "name": "PickTime Book",
     "slug": "mobile",
     "version": "1.0.0",
+    "backgroundColor": "#000000",
+    "splash": {
+      "image": "./assets/images/logopick-time.jpg",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/logopick-time.jpg",
     "scheme": "mobile",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "splash": {
+        "image": "./assets/images/logopick-time.jpg",
+        "resizeMode": "contain",
+        "backgroundColor": "#000000"
+      },
+      "bundleIdentifier": "com.cesargomez853.mobile"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "backgroundColor": "#000000",
+        "foregroundImage": "./assets/images/logopick-time.jpg"
       },
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "bundler": "metro",
       "output": "server",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/pick_time_book.ico"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
+          "image": "./assets/images/logopick-time.jpg",
+          "imageWidth": 280,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff"
+          "backgroundColor": "#000000"
         }
       ]
     ],

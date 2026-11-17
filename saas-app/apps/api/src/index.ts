@@ -40,6 +40,7 @@ import {
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
 import router from '../routes/reportsRoute';
+import { generatePromoCode, getPromoCodes, validatePromoCode } from '../controllers/tenantController';
 
 // =========================================================================
 // 🗄️ AUTO-MIGRACIÓN Y SEMILLA EN BD PARA NUEVOS NICHOS (LEGAL & DENTAL)
@@ -203,6 +204,11 @@ app.use('/api/directory', directoryRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/work-orders', workOrderRoutes);
 app.use('/api/appointments', appointmentRoutes);
+
+// Rutas de Cupones Promocionales (public.promo_codes)
+app.get('/api/promo-codes', getPromoCodes);
+app.post('/api/promo-codes/generate', generatePromoCode);
+app.post('/api/promo-codes/validate', validatePromoCode);
 
 // Rutas directas para Expediente, Cierre de Orden, Cancelación y Confirmación 6h/3h
 app.get('/api/clients/vehicle/:plate', getVehicleByPlate);

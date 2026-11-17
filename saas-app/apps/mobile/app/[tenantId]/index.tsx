@@ -1040,10 +1040,14 @@ export default function TenantDashboardScreen() {
   const [isSendingReport, setIsSendingReport] = useState(false);
   const [reportedKeys, setReportedKeys] = useState<string[]>([]);
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
+    const gFavs = (globalThis as any).__autoflowFavorites;
+    if (Array.isArray(gFavs)) return gFavs;
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
       try {
         const saved = window.localStorage.getItem('autoflow_favorites_v1');
-        return saved ? JSON.parse(saved) : [];
+        const parsed = saved ? JSON.parse(saved) : [];
+        (globalThis as any).__autoflowFavorites = parsed;
+        return parsed;
       } catch (_e) {}
     }
     return [];
@@ -1052,6 +1056,7 @@ export default function TenantDashboardScreen() {
   const toggleFavoriteItem = (favId: string) => {
     setFavoriteIds((prev) => {
       const next = prev.includes(favId) ? prev.filter((x) => x !== favId) : [...prev, favId];
+      (globalThis as any).__autoflowFavorites = next;
       if (Platform.OS === 'web' && typeof window !== 'undefined') {
         try { window.localStorage.setItem('autoflow_favorites_v1', JSON.stringify(next)); } catch (_e) {}
       }
@@ -1076,6 +1081,7 @@ export default function TenantDashboardScreen() {
   const [referredByCountryCode, setReferredByCountryCode] = useState('+1');
   const [appointmentDate, setAppointmentDate] = useState('');
   const [appointmentTime, setAppointmentTime] = useState('');
+  const [timePeriodTab, setTimePeriodTab] = useState<'morning' | 'afternoon'>('morning');
   const [searchPlate, setSearchPlate] = useState('');
   const [carBrand, setCarBrand] = useState('');
   const [carModel, setCarModel] = useState('');
@@ -1086,6 +1092,10 @@ export default function TenantDashboardScreen() {
   const [referredByPhone, setReferredByPhone] = useState('');
   const [bookingClientCoupons, setBookingClientCoupons] = useState<number>(0);
   const [isExistingClient, setIsExistingClient] = useState(false);
+  const [showBookingQuickLookup, setShowBookingQuickLookup] = useState(false);
+  const [bookingLookupQuery, setBookingLookupQuery] = useState('');
+  const [isSearchingBookingClient, setIsSearchingBookingClient] = useState(false);
+  const [bookingMatchedVisits, setBookingMatchedVisits] = useState<number>(0);
   // Campos especializados para Abogados (legal) y Centros Odontológicos (dental)
   const [appointmentModality, setAppointmentModality] = useState<'in_person' | 'phone_call' | 'video_call'>('in_person');
   const [caseOrTreatmentArea, setCaseOrTreatmentArea] = useState<string>('');
@@ -1567,15 +1577,22 @@ export default function TenantDashboardScreen() {
              try { parsedPortfolio = JSON.parse(parsedPortfolio); } catch (e) {}
           }
 
+          // Combinar siempre con defaultHoursConfig para que {} nunca deje al negocio sin horarios
+          const mergedHours = {
+            ...defaultHoursConfig,
+            ...(parsedHours && typeof parsedHours === 'object' ? parsedHours : {}),
+          };
+
           const updatedTenant = {
             ...dataInfo.tenant,
             loyaltyConfig: parsedLoyalty,
-            business_hours: parsedHours,
+            business_hours: mergedHours,
+            businessHours: mergedHours,
             portfolio: parsedPortfolio
           };
 
           setTenantInfo(updatedTenant);
-          if (parsedHours) setLocalHours(parsedHours);
+          setLocalHours(mergedHours);
           if (parsedPortfolio) setLocalPortfolio(parsedPortfolio);
           if (parsedLoyalty) {
             setLocalLoyalty(parsedLoyalty);
@@ -1617,12 +1634,14 @@ export default function TenantDashboardScreen() {
       const resStaff = await apiFetch('/api/staff');
       if (resStaff.ok) { 
         const data = await resStaff.json(); 
-        if (data.success) {
+        if (data.success && Array.isArray(data.staff) && data.staff.length > 0) {
           const mappedStaff = data.staff.map((s: any) => ({ ...s, isActive: s.isActive ?? true }));
           setStaffList(mappedStaff);
-        } 
+        } else {
+          setStaffList([{ id: 'stf-1', name: 'Especialista Principal', role: 'Titular / General', isActive: true }]);
+        }
       } else {
-        setStaffList([{ id: 'stf-1', name: 'Admin Principal', role: 'Gerente / General', isActive: true }]);
+        setStaffList([{ id: 'stf-1', name: 'Especialista Principal', role: 'Titular / General', isActive: true }]);
       }
     } catch (err) { 
       setStaffList([{ id: 'stf-1', name: 'Personal (Demo)', role: 'General', isActive: true }]);
@@ -1804,13 +1823,58 @@ export default function TenantDashboardScreen() {
     });
   };
 
-  const uploadImageToSupabase = async (file: File, folderName: string) => {
+  const uploadImageToSupabase = async (fileOrUri: any, folderName: string) => {
     try {
       const fileName = `${folderName}-${Date.now()}.webp`; 
       const filePath = `${folderName}/${fileName}`;
-      const { error } = await supabase.storage.from('autoflow').upload(filePath, file, { upsert: true, contentType: 'image/webp' });
+      let uploadBody: any = fileOrUri;
+
+      // Soporte nativo iOS / Android cuando se selecciona imagen desde galería (URI local)
+      if (typeof fileOrUri === 'string' || (fileOrUri && typeof fileOrUri === 'object' && fileOrUri.uri)) {
+        const uriStr = typeof fileOrUri === 'string' ? fileOrUri : fileOrUri.uri;
+        const resp = await fetch(uriStr);
+        uploadBody = await resp.blob();
+      }
+
+      const { error } = await supabase.storage.from('autoflow').upload(filePath, uploadBody, { upsert: true, contentType: 'image/webp' });
       return error ? null : filePath; 
     } catch (err) { return null; }
+  };
+
+  // 📱 Selector universal de imágenes para iOS / Android (Antes, Después, Portafolio y Catálogo)
+  const handleNativeImagePick = async (target: 'old' | 'new' | 'portfolio' | 'catalog') => {
+    try {
+      const ImagePicker = await import('expo-image-picker');
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        alert('Se requiere permiso para acceder a tus fotos.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'] as any,
+        allowsEditing: true,
+        quality: 0.82,
+      });
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const uri = asset.uri;
+        if (target === 'old') {
+          setOldPartImage({ uri } as any);
+          setOldPartPreview(uri);
+        } else if (target === 'new') {
+          setNewPartImage({ uri } as any);
+          setNewPartPreview(uri);
+        } else if (target === 'portfolio') {
+          setPortfolioFormFile({ uri } as any);
+          setPortfolioFormPreview(uri);
+        } else if (target === 'catalog') {
+          setCatalogFormFile({ uri } as any);
+          setCatalogFormPreview(uri);
+        }
+      }
+    } catch (_err) {
+      alert('No se pudo abrir la galería de fotos en este dispositivo.');
+    }
   };
 
   const handleSaveHours = async () => {
@@ -1819,8 +1883,12 @@ export default function TenantDashboardScreen() {
       const res = await apiFetch('/api/tenants/config', { 
         method: 'PUT', body: JSON.stringify({ business_hours: localHours }) 
       });
-      if (res.ok) alert('✅ Horarios actualizados correctamente.');
-      else alert('Error guardando los horarios.');
+      if (res.ok) {
+        setTenantInfo(prev => prev ? { ...prev, business_hours: localHours, businessHours: localHours } : prev);
+        alert('✅ Horarios actualizados correctamente.');
+      } else {
+        alert('Error guardando los horarios.');
+      }
     } catch (e) { alert('Error de red.'); }
     finally { setIsSubmittingConfig(false); }
   };
@@ -2044,6 +2112,37 @@ export default function TenantDashboardScreen() {
     return explicitlyFreeStaff;
   };
 
+  // 🗓️ Al abrir el modal de reserva, asegurar servicio seleccionado y preseleccionar el primer día abierto según los Horarios del Portal Interno
+  useEffect(() => {
+    if (!isBookingModalOpen) return;
+    if (!selectedServiceType && servicesList.length > 0) {
+      const firstActive = servicesList.find(s => s.isActive !== false) || servicesList[0];
+      if (firstActive) setSelectedServiceType(firstActive.id);
+    }
+    if (!appointmentDate) {
+      const currentHours: any = {
+        ...defaultHoursConfig,
+        ...(tenantInfo?.business_hours || tenantInfo?.businessHours || {}),
+        ...(localHours || {}),
+      };
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const base = new Date();
+      for (let i = 0; i < 14; i++) {
+        const candidate = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+        const dayKey = dayNames[candidate.getDay()];
+        const conf = currentHours[dayKey];
+        if (!conf || conf.isOpen !== false) {
+          const yyyy = candidate.getFullYear();
+          const mm = String(candidate.getMonth() + 1).padStart(2, '0');
+          const dd = String(candidate.getDate()).padStart(2, '0');
+          setAppointmentDate(`${yyyy}-${mm}-${dd}`);
+          break;
+        }
+      }
+    }
+  }, [isBookingModalOpen, selectedServiceType, servicesList, tenantInfo, localHours]);
+
+  // 🕒 MOTOR DE TURNOS: Toma estrictamente los horarios habilitados por el dueño en el Portal Interno
   useEffect(() => {
     if (!appointmentDate || !selectedServiceType) {
       setAvailableTimes([]);
@@ -2056,87 +2155,99 @@ export default function TenantDashboardScreen() {
 
     const dayAppointments = getMergedUniqueAppointments(todayOrders, upcomingOrders).filter(app => {
       if (!app.appointmentDate) return false;
-      return app.appointmentDate.startsWith(appointmentDate);
+      const appDateStr = app.metadata?.localDate || String(app.appointmentDate).split('T')[0];
+      return appDateStr === appointmentDate;
     });
 
     const [year, month, day] = appointmentDate.split('-').map(Number);
+    if (!year || !month || !day) {
+      setAvailableTimes([]);
+      return;
+    }
     const dateObj = new Date(year, month - 1, day);
     const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
     const selectedDayName = dayNames[dateObj.getDay()];
 
-    let openHour = 8;
-    let closeHour = 18;
-    let isOpen = true;
+    // Combinar horarios guardados por el dueño en el Portal Interno
+    const currentHours: any = {
+      ...defaultHoursConfig,
+      ...(tenantInfo?.business_hours || tenantInfo?.businessHours || {}),
+      ...(localHours || {}),
+    };
 
-    const currentHours = tenantInfo?.business_hours || tenantInfo?.businessHours || localHours;
-
-    if (currentHours && currentHours[selectedDayName]) {
-      const dayConfig = currentHours[selectedDayName];
-      isOpen = dayConfig.isOpen !== false; 
-      if (!isOpen) {
-        setAvailableTimes([]);
-        setAppointmentTime('');
-        return;
-      }
-      if (dayConfig.open) openHour = parseInt(dayConfig.open.split(':')[0], 10);
-      if (dayConfig.close) closeHour = parseInt(dayConfig.close.split(':')[0], 10);
-    } else if (currentHours && Object.keys(currentHours).length > 0) {
-      isOpen = false;
+    const dayConfig = currentHours[selectedDayName];
+    if (!dayConfig || dayConfig.isOpen === false) {
+      // El dueño marcó este día como CERRADO en el Portal Interno
       setAvailableTimes([]);
       setAppointmentTime('');
       return;
     }
 
+    const openHour = dayConfig.open ? parseInt(String(dayConfig.open).split(':')[0], 10) : 8;
+    const openMin = dayConfig.open ? parseInt(String(dayConfig.open).split(':')[1] || '0', 10) : 0;
+    const closeHour = dayConfig.close ? parseInt(String(dayConfig.close).split(':')[0], 10) : 18;
+    const closeMin = dayConfig.close ? parseInt(String(dayConfig.close).split(':')[1] || '0', 10) : 0;
+
+    const startTotalMinutes = openHour * 60 + openMin;
+    const endTotalMinutes = closeHour * 60 + closeMin;
+
     const slots: string[] = [];
     const now = new Date();
-    // ⏳ REGLA DE NEGOCIO: Mínimo 3 horas de anticipación para agendar un servicio y proteger la agenda del negocio
-    const minBookingTime = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const isToday = appointmentDate === todayStr;
 
-    for (let h = openHour; h < closeHour; h++) {
-      for (let m = 0; m < 60; m += 30) {
-        const timeString = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
-        const slotStart = parseAppointmentWallClock(appointmentDate, timeString);
-        const slotEnd = new Date(slotStart.getTime() + durationMin * 60000);
+    for (let mins = startTotalMinutes; mins + durationMin <= endTotalMinutes; mins += 30) {
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      const timeString = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      const slotStart = parseAppointmentWallClock(appointmentDate, timeString);
+      const slotEnd = new Date(slotStart.getTime() + durationMin * 60000);
 
-        if (slotStart < minBookingTime) continue;
+      // Si es hoy, ocultar únicamente horas que ya pasaron
+      if (isToday && slotStart.getTime() < now.getTime() - 15 * 60 * 1000) {
+        continue;
+      }
 
-        if (selectedBookingStaff) {
-          // 1. El cliente eligió un estilista específico: solo revisamos si ESE estilista está ocupado
-          const isThisStaffBusy = dayAppointments.some(app => {
-            const appStaff = app.staffId || app.metadata?.assignedStaffId;
-            if (appStaff !== selectedBookingStaff) return false;
-            const appStart = parseAppointmentWallClock(app);
-            const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
-            const appEnd = new Date(appStart.getTime() + appDuration * 60000);
-            return slotStart < appEnd && slotEnd > appStart;
-          });
+      if (selectedBookingStaff) {
+        const isThisStaffBusy = dayAppointments.some(app => {
+          const appStaff = app.staffId || app.metadata?.assignedStaffId;
+          if (appStaff !== selectedBookingStaff) return false;
+          const appStart = parseAppointmentWallClock(app);
+          const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
+          const appEnd = new Date(appStart.getTime() + appDuration * 60000);
+          return slotStart < appEnd && slotEnd > appStart;
+        });
 
-          if (!isThisStaffBusy) {
-            slots.push(timeString);
-          }
-        } else if (activeMembers.length > 0) {
-          // 2. Eligió "Cualquiera disponible": si tienes 3 estilistas, permite hasta 3 citas en paralelo
-          const freeMembers = getFreeStaffForSlot(appointmentDate, timeString, selectedServiceType);
-          if (freeMembers.length > 0) {
-            slots.push(timeString);
-          }
-        } else {
-          // 3. Fallback si aún no ha registrado estilistas (1 cita por turno)
-          const isOverlap = dayAppointments.some(app => {
-            const appStart = parseAppointmentWallClock(app);
-            const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
-            const appEnd = new Date(appStart.getTime() + appDuration * 60000);
-            return slotStart < appEnd && slotEnd > appStart;
-          });
-          if (!isOverlap) {
-            slots.push(timeString);
-          }
+        if (!isThisStaffBusy) {
+          slots.push(timeString);
+        }
+      } else if (activeMembers.length > 0) {
+        const freeMembers = getFreeStaffForSlot(appointmentDate, timeString, selectedServiceType);
+        if (freeMembers.length > 0) {
+          slots.push(timeString);
+        }
+      } else {
+        const isOverlap = dayAppointments.some(app => {
+          const appStart = parseAppointmentWallClock(app);
+          const appDuration = app.service?.durationMinutes || app.metadata?.durationMinutes || 30;
+          const appEnd = new Date(appStart.getTime() + appDuration * 60000);
+          return slotStart < appEnd && slotEnd > appStart;
+        });
+        if (!isOverlap) {
+          slots.push(timeString);
         }
       }
     }
     
     setAvailableTimes(slots);
-    if (appointmentTime && !slots.includes(appointmentTime)) setAppointmentTime('');
+    if (slots.length > 0) {
+      const nextTime = (!appointmentTime || !slots.includes(appointmentTime)) ? slots[0] : appointmentTime;
+      setAppointmentTime(nextTime);
+      const hourNum = parseInt(String(nextTime).split(':')[0], 10);
+      setTimePeriodTab(hourNum < 12 ? 'morning' : 'afternoon');
+    } else {
+      setAppointmentTime('');
+    }
   }, [appointmentDate, selectedServiceType, selectedBookingStaff, todayOrders, upcomingOrders, servicesList, localHours, tenantInfo, staffList]);
 
   const pendingReferralsByPhone = useMemo(() => {
@@ -2179,7 +2290,11 @@ export default function TenantDashboardScreen() {
             const livePending = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
             setBookingClientCoupons(Math.max(0, dbCoupons + livePending));
 
-            const hasHistory = (data.serviceHistory && data.serviceHistory.length > 0) || Number(data.client.loyaltyVisits || 0) > 0;
+            const visitsCount = Number(data.client.loyaltyVisits ?? (Array.isArray(data.serviceHistory) ? data.serviceHistory.length : 0));
+            setBookingMatchedVisits(visitsCount);
+            const hasHistory = (data.serviceHistory && data.serviceHistory.length > 0) || visitsCount > 0;
+            if (!clientName.trim() && data.client.name) setClientName(toTitleCase(data.client.name));
+            if (!clientEmail.trim() && data.client.email) setClientEmail(data.client.email);
             setIsExistingClient(hasHistory);
             if (hasHistory) setReferredByPhone('');
           } else {
@@ -2258,7 +2373,7 @@ export default function TenantDashboardScreen() {
     setRewardApplied(false);
     setApplyReferralDiscount(false);
     setActiveReferredBy(null);
-    setAssignedMechanicId(safeOrder.staffId || safeOrder.metadata?.assignedStaffId || ''); 
+    setAssignedMechanicId(safeOrder.staffId || safeOrder.metadata?.assignedStaffId || (activeStaffList[0]?.id || '')); 
     
     if (tenantInfo?.loyaltyConfig?.isActive && safeOrder.clientEmail) {
       setIsCheckingLoyalty(true);
@@ -2804,9 +2919,12 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     if (!pendingReaction || !clientExpedienteData?.client || !currentExpedienteClientKey) return;
     const reaction = pendingReaction;
     setPendingReaction(null);
-    const hasVisits = Array.isArray(clientExpedienteData.serviceHistory) && clientExpedienteData.serviceHistory.length > 0;
+    const hasVisits =
+      (Array.isArray(clientExpedienteData.serviceHistory) && clientExpedienteData.serviceHistory.length > 0) ||
+      Number(clientExpedienteData.client?.loyaltyVisits || 0) > 0 ||
+      Boolean(clientExpedienteData.client?.id);
     if (!hasVisits) {
-      alert('Para calificar necesitas al menos un servicio completado. ¡Te esperamos pronto!');
+      alert('Para calificar necesitas estar registrado en el negocio. ¡Te esperamos pronto!');
       return;
     }
     (async () => {
@@ -2857,6 +2975,61 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       setCarMileage(clientExpedienteData.vehicle.currentMileage || '');
     }
     setIsPlateSearched(true); setIsBookingModalOpen(true);
+  };
+
+  // ⚡ Búsqueda rápida "¡Ya estoy registrado!" directo dentro del modal de Nueva Reserva
+  const handleQuickLookupInBooking = async () => {
+    const rawQ = bookingLookupQuery.trim();
+    if (!rawQ) {
+      alert('Ingresa tu número de teléfono, correo o placa para autocompletar tus datos.');
+      return;
+    }
+    setIsSearchingBookingClient(true);
+    try {
+      const cleanQ = rawQ.includes('@') ? rawQ.toLowerCase() : (cleanPhoneDigits(rawQ) || rawQ.toUpperCase());
+      const res = await apiFetch(`/api/clients/history/${cleanQ}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.client) {
+          setClientName(toTitleCase(data.client.name || ''));
+          setClientEmail(data.client.email || '');
+          const rawPhone = String(data.client.phone || '');
+          const matchedCode = COUNTRY_CODES.find(c => rawPhone.startsWith(c.code));
+          if (matchedCode) setBookingCountryCode(matchedCode.code);
+          setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+
+          let meta = data.client.metadata;
+          if (typeof meta === 'string') {
+            try { meta = JSON.parse(meta); } catch (_e) { meta = {}; }
+          }
+          const dbEarned = Number(meta?.earnedReferralDiscounts || 0);
+          const cPhoneClean = cleanPhoneDigits(data.client.phone);
+          const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+          const totalEarned = Math.max(0, dbEarned + liveEarned);
+
+          const visitsCount = Number(data.client.loyaltyVisits ?? (Array.isArray(data.serviceHistory) ? data.serviceHistory.length : 0));
+          setBookingMatchedVisits(visitsCount);
+          setBookingClientCoupons(totalEarned);
+          setIsExistingClient(true);
+          setReferredByPhone('');
+          setShowBookingQuickLookup(false);
+
+          if (data.vehicle) {
+            setSearchPlate(data.vehicle.plate || '');
+            setCarBrand(toTitleCase(data.vehicle.brand || ''));
+            setCarModel(toTitleCase(data.vehicle.model || ''));
+            setCarYear(data.vehicle.year || '');
+            setCarMileage(data.vehicle.currentMileage || '');
+          }
+          return;
+        }
+      }
+      alert('No encontramos un registro previo con ese dato. Puedes llenar tus datos abajo para registrarte en esta reserva.');
+    } catch (_e) {
+      alert('Error al buscar tus datos.');
+    } finally {
+      setIsSearchingBookingClient(false);
+    }
   };
 
   const handleBookService = async () => {
@@ -3622,13 +3795,6 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                        <BottomHalfGradientOverlay heightPct="36%" baseColor="18, 22, 28" />
                     </TouchableOpacity>
                   ) : null}
-                  <TouchableOpacity
-                    activeOpacity={0.85}
-                    onPress={() => toggleFavoriteItem(`service:${srv.id}`)}
-                    style={{ position: 'absolute', top: 10, right: 44, width: 28, height: 28, borderRadius: 14, backgroundColor: favoriteIds.includes(`service:${srv.id}`) ? 'rgba(239, 68, 68, 0.25)' : 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: favoriteIds.includes(`service:${srv.id}`) ? '#EF4444' : 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', zIndex: 5 }}
-                  >
-                    <Ionicons name={favoriteIds.includes(`service:${srv.id}`) ? 'heart' : 'heart-outline'} size={14} color={favoriteIds.includes(`service:${srv.id}`) ? '#EF4444' : '#FFFFFF'} />
-                  </TouchableOpacity>
                   {renderReportButton({ type: 'service', id: srv.id, title: srv.name, excerpt: String(srv.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                   <View style={{ padding: isMobile ? 20 : 28 }}>
                     <Text style={{ fontSize: isMobile ? 18 : 20, fontWeight: '800', color: tColor.text, marginBottom: 10, paddingRight: 28 }}>{toTitleCase(srv.name)}</Text>
@@ -3662,13 +3828,6 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       <TouchableOpacity style={{ width: '100%', height: Math.min(340, Math.max(230, Math.round(itemWidth * 0.88))), backgroundColor: tColor.input, position: 'relative' }} onPress={() => setExpandedImage({ path: item.url, alt: item.title })}>
                         <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx + 1}`} />
                         <BottomHalfGradientOverlay heightPct="36%" baseColor="18, 22, 28" />
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => toggleFavoriteItem(`portfolio:${item.url}`)}
-                        style={{ position: 'absolute', top: 10, right: 44, width: 28, height: 28, borderRadius: 14, backgroundColor: favoriteIds.includes(`portfolio:${item.url}`) ? 'rgba(239, 68, 68, 0.25)' : 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: favoriteIds.includes(`portfolio:${item.url}`) ? '#EF4444' : 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center', zIndex: 5 }}
-                      >
-                        <Ionicons name={favoriteIds.includes(`portfolio:${item.url}`) ? 'heart' : 'heart-outline'} size={14} color={favoriteIds.includes(`portfolio:${item.url}`) ? '#EF4444' : '#FFFFFF'} />
                       </TouchableOpacity>
                       {renderReportButton({ type: 'portfolio', id: item.url, title: item.title, excerpt: String(item.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                       <View style={{ padding: 18 }}>
@@ -3907,7 +4066,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
               <View style={{ maxWidth: 800, alignSelf: 'center', width: '100%', paddingTop: 8, paddingBottom: 60, gap: 16 }}>
                 
                 {/* 🌟 TARJETA ÚNICA DE OPINIÓN POR USUARIO (CON LETRA CAPITALIZADA AUTOMÁTICA) 🌟 */}
-                {clientExpedienteData.serviceHistory && clientExpedienteData.serviceHistory.length > 0 ? (() => {
+                {clientExpedienteData.client ? (() => {
                   const isLiked = currentClientExistingReview && (currentClientExistingReview.reaction === 'like' || (!currentClientExistingReview.reaction && Number(currentClientExistingReview.rating) >= 4));
                   const isDisliked = currentClientExistingReview && (currentClientExistingReview.reaction === 'dislike' || (!currentClientExistingReview.reaction && Number(currentClientExistingReview.rating) <= 2));
 
@@ -4282,7 +4441,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </View>
                         ) : null}
                         
-                        {(Platform.OS === 'web' && (wo.oldPartImageUrl || wo.newPartImageUrl)) ? (
+                        {(wo.oldPartImageUrl || wo.newPartImageUrl) ? (
                           <View style={{ flexDirection: 'row', gap: 16, marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderColor: tColor.border }}>
                             {wo.oldPartImageUrl ? (
                               <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }} onPress={() => setExpandedImage({ path: wo.oldPartImageUrl, alt: 'Evidencia (Antes)' })}>
@@ -4975,41 +5134,57 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </TouchableOpacity>
                     </View>
                     <Text style={{ color: tColor.muted, marginBottom: 24 }}>Apaga los días que no trabajes y ajusta tus horas de apertura y cierre.</Text>
-                    {Platform.OS === 'web' ? (
-                      <div className="horarios-grid">
-                        {daysOfWeekMap.map((dayObj) => {
-                          const conf = localHours[dayObj.key] || { isOpen: true, open: '08:00', close: '18:00' };
-                          return (
-                            <View key={dayObj.key} style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24, opacity: conf.isOpen ? 1 : 0.5 }]}>
-                              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                                <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>{dayObj.label}</Text>
-                                <Switch 
-                                  value={conf.isOpen} 
-                                  onValueChange={(val) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, isOpen: val } })}
-                                  trackColor={{ false: '#3e3e3e', true: brandColor }}
-                                />
-                              </View>
-                              {conf.isOpen ? (
-                                <View style={{ flexDirection: 'row', gap: 12 }}>
-                                  <View style={{ flex: 1 }}>
-                                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Apertura</Text>
-                                    <input type="time" className="web-input-override" value={conf.open} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, open: e.target.value } })} />
-                                  </View>
-                                  <View style={{ flex: 1 }}>
-                                    <Text style={[styles.inputLabel, { color: tColor.muted }]}>Cierre</Text>
-                                    <input type="time" className="web-input-override" value={conf.close} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, close: e.target.value } })} />
-                                  </View>
-                                </View>
-                              ) : (
-                                <Text style={{ color: tColor.muted, textAlign: 'center', fontWeight: 'bold', marginTop: 10 }}>CERRADO</Text>
-                              )}
+                    <View style={[styles.bentoGrid, { gap: 16 }]}>
+                      {daysOfWeekMap.map((dayObj) => {
+                        const conf = localHours[dayObj.key] || { isOpen: true, open: '08:00', close: '18:00' };
+                        return (
+                          <View key={dayObj.key} style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 20, minWidth: isMobile ? '100%' : 280, flex: 1, opacity: conf.isOpen ? 1 : 0.55 }]}>
+                            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                              <Text style={{ color: tColor.text, fontSize: 18, fontWeight: 'bold' }}>{dayObj.label}</Text>
+                              <Switch 
+                                value={conf.isOpen} 
+                                onValueChange={(val) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, isOpen: val } })}
+                                trackColor={{ false: '#3e3e3e', true: brandColor }}
+                              />
                             </View>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <Text style={{ color: tColor.text }}>Gestión de horas optimizada para versión web.</Text>
-                    )}
+                            {conf.isOpen ? (
+                              <View style={{ flexDirection: 'row', gap: 12 }}>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Apertura</Text>
+                                  {Platform.OS === 'web' ? (
+                                    <input type="time" className="web-input-override" value={conf.open} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, open: e.target.value } })} />
+                                  ) : (
+                                    <TextInput
+                                      style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontWeight: '800' }]}
+                                      value={conf.open}
+                                      placeholder="08:00"
+                                      placeholderTextColor={tColor.muted}
+                                      onChangeText={(val) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, open: val } })}
+                                    />
+                                  )}
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Cierre</Text>
+                                  {Platform.OS === 'web' ? (
+                                    <input type="time" className="web-input-override" value={conf.close} onChange={(e) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, close: e.target.value } })} />
+                                  ) : (
+                                    <TextInput
+                                      style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontWeight: '800' }]}
+                                      value={conf.close}
+                                      placeholder="18:00"
+                                      placeholderTextColor={tColor.muted}
+                                      onChangeText={(val) => setLocalHours({ ...localHours, [dayObj.key]: { ...conf, close: val } })}
+                                    />
+                                  )}
+                                </View>
+                              </View>
+                            ) : (
+                              <Text style={{ color: tColor.muted, textAlign: 'center', fontWeight: 'bold', marginTop: 10 }}>CERRADO</Text>
+                            )}
+                          </View>
+                        );
+                      })}
+                    </View>
                   </View>
                 ) : null}
 
@@ -5310,19 +5485,20 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           {!portfolioFormPreview ? (
                             <View style={{ marginTop: 8 }}>
                               {Platform.OS === 'web' ? (
-                                <>
-                                  <input type="file" ref={portfolioInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handlePortfolioImageSelect} />
-                                  <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => portfolioInputRef.current?.click()}>
-                                    <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
-                                    <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Click para subir imagen</Text>
-                                  </TouchableOpacity>
-                                </>
+                                <input type="file" ref={portfolioInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handlePortfolioImageSelect} />
                               ) : null}
+                              <TouchableOpacity
+                                style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }}
+                                onPress={() => Platform.OS === 'web' ? portfolioInputRef.current?.click() : handleNativeImagePick('portfolio')}
+                              >
+                                <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
+                                <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Toca para subir imagen</Text>
+                              </TouchableOpacity>
                             </View>
                           ) : (
                             <View style={{ position: 'relative', width: '100%', height: 220, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
-                              {portfolioFormPreview.startsWith('blob:') ? (
-                                Platform.OS === 'web' ? <img src={portfolioFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null
+                              {(portfolioFormPreview.startsWith('blob:') || portfolioFormPreview.startsWith('file:') || portfolioFormPreview.startsWith('ph:') || portfolioFormPreview.startsWith('content:')) ? (
+                                Platform.OS === 'web' ? <img src={portfolioFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <Image source={{ uri: portfolioFormPreview }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                               ) : (
                                 <PrivateSupabaseImage path={portfolioFormPreview} alt="Preview" />
                               )}
@@ -6134,7 +6310,23 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         {activeCatalogServices.map((srv, idx) => <option key={`${srv.id}-${idx}`} value={srv.id}>{toTitleCase(srv.name)} - ${srv.price}</option>)}
                       </select>
                     ) : (
-                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={selectedServiceType} editable={false} />
+                      <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 12, padding: 14 }}>
+                        {(() => {
+                          const srvObj = servicesList.find(s => s.id === selectedServiceType);
+                          return (
+                            <View>
+                              <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, marginBottom: 2 }}>
+                                {toTitleCase(srvObj?.name || 'Servicio Seleccionado')} — ${srvObj?.price || '0'}
+                              </Text>
+                              {srvObj?.description ? (
+                                <Text style={{ color: tColor.muted, fontSize: 12.5 }} numberOfLines={2}>
+                                  {toSentenceCase(srvObj.description)}
+                                </Text>
+                              ) : null}
+                            </View>
+                          );
+                        })()}
+                      </View>
                     )}
                   </View>
 
@@ -6170,7 +6362,44 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           })}
                         </select>
                       ) : (
-                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Seleccionar Staff" placeholderTextColor={tColor.muted} />
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                          <TouchableOpacity
+                            onPress={() => setSelectedBookingStaff('')}
+                            style={{
+                              paddingVertical: 8,
+                              paddingHorizontal: 12,
+                              borderRadius: 10,
+                              borderWidth: 1,
+                              borderColor: !selectedBookingStaff ? brandColor : tColor.border,
+                              backgroundColor: !selectedBookingStaff ? brandColor : tColor.bg,
+                            }}
+                          >
+                            <Text style={{ color: !selectedBookingStaff ? '#FFFFFF' : tColor.text, fontSize: 12, fontWeight: '800' }}>
+                              ✨ Cualquiera disponible
+                            </Text>
+                          </TouchableOpacity>
+                          {activeStaffList.map((stf, idx) => {
+                            const isSel = selectedBookingStaff === stf.id;
+                            return (
+                              <TouchableOpacity
+                                key={`${stf.id}-mob-${idx}`}
+                                onPress={() => setSelectedBookingStaff(isSel ? '' : stf.id)}
+                                style={{
+                                  paddingVertical: 8,
+                                  paddingHorizontal: 12,
+                                  borderRadius: 10,
+                                  borderWidth: 1,
+                                  borderColor: isSel ? brandColor : tColor.border,
+                                  backgroundColor: isSel ? brandColor : tColor.bg,
+                                }}
+                              >
+                                <Text style={{ color: isSel ? '#FFFFFF' : tColor.text, fontSize: 12, fontWeight: '800' }}>
+                                  👤 {toTitleCase(stf.name)}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
                       )}
 
                       {/* Píldoras visuales de quién está libre en la hora elegida */}
@@ -6236,35 +6465,39 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         {isLegal ? '⚖️ Modalidad y Detalles del Caso Legal' : isDental ? '🦷 Detalles de Valoración Odontológica' : '✨ Preferencias de tu Cita'}
                       </Text>
 
-                      {/* Selector de Modalidad (Especialmente útil para Abogados y Consultas) */}
-                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Modalidad de Atención</Text>
-                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 10, marginBottom: 16 }}>
-                        {[
-                          { id: 'in_person', label: isDental ? '📍 En Consultorio' : '📍 En Oficina / Local' },
-                          { id: 'phone_call', label: '📞 Por Llamada Telefónica' },
-                          { id: 'video_call', label: '💻 Videollamada (Zoom/Meet)' }
-                        ].map((mod) => {
-                          const activeMod = appointmentModality === mod.id;
-                          return (
-                            <TouchableOpacity
-                              key={mod.id}
-                              onPress={() => setAppointmentModality(mod.id as any)}
-                              style={{
-                                flex: 1,
-                                paddingVertical: 10,
-                                paddingHorizontal: 12,
-                                borderRadius: 10,
-                                borderWidth: 1,
-                                borderColor: activeMod ? brandColor : tColor.border,
-                                backgroundColor: activeMod ? `${brandColor}20` : 'transparent',
-                                alignItems: 'center'
-                              }}
-                            >
-                              <Text style={{ color: activeMod ? brandColor : tColor.text, fontWeight: '800', fontSize: 12.5 }}>{mod.label}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
+                      {/* Selector de Modalidad (Solo para Abogados o Clínicas que ofrecen atenciones remotas) */}
+                      {(isLegal || isDental) ? (
+                        <View style={{ marginBottom: 16 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>Modalidad de Atención</Text>
+                          <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 10 }}>
+                            {[
+                              { id: 'in_person', label: isDental ? '📍 En Consultorio' : '📍 En Oficina / Local' },
+                              { id: 'phone_call', label: '📞 Por Llamada Telefónica' },
+                              { id: 'video_call', label: '💻 Videollamada (Zoom/Meet)' }
+                            ].map((mod) => {
+                              const activeMod = appointmentModality === mod.id;
+                              return (
+                                <TouchableOpacity
+                                  key={mod.id}
+                                  onPress={() => setAppointmentModality(mod.id as any)}
+                                  style={{
+                                    flex: 1,
+                                    paddingVertical: 10,
+                                    paddingHorizontal: 12,
+                                    borderRadius: 10,
+                                    borderWidth: 1,
+                                    borderColor: activeMod ? brandColor : tColor.border,
+                                    backgroundColor: activeMod ? `${brandColor}20` : 'transparent',
+                                    alignItems: 'center'
+                                  }}
+                                >
+                                  <Text style={{ color: activeMod ? brandColor : tColor.text, fontWeight: '800', fontSize: 12.5 }}>{mod.label}</Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      ) : null}
 
                       <Text style={[styles.inputLabel, { color: tColor.muted }]}>
                         {isLegal ? 'Área del Caso (Selecciona o escribe):' : isDental ? 'Motivo de Consulta Dental:' : 'Motivo o Servicio Rápido:'}
@@ -6312,6 +6545,113 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       />
                     </View>
                   )}
+
+                  {/* ⚡ TARJETA UI/UX: "¿YA ESTÁS REGISTRADO? AUTOCOMPLETAR MIS DATOS" (SIN SALIR A EXPEDIENTE) */}
+                  <View
+                    style={{
+                      backgroundColor: isExistingClient ? 'rgba(16, 185, 129, 0.1)' : 'rgba(59, 130, 246, 0.08)',
+                      borderWidth: 1,
+                      borderColor: isExistingClient ? '#10B981' : (showBookingQuickLookup ? brandColor : 'rgba(59, 130, 246, 0.35)'),
+                      borderRadius: 14,
+                      padding: 14,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 190 }}>
+                        <View
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 10,
+                            backgroundColor: isExistingClient ? 'rgba(16, 185, 129, 0.2)' : `${brandColor}22`,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          <Feather name={isExistingClient ? 'user-check' : 'zap'} size={16} color={isExistingClient ? '#10B981' : brandColor} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13.5 }}>
+                            {isExistingClient
+                              ? `¡Hola de nuevo, ${clientName.split(' ')[0] || 'Cliente VIP'}!`
+                              : '¿Ya estás registrado con nosotros?'}
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 11.5, marginTop: 1 }}>
+                            {isExistingClient
+                              ? `Cliente verificado • ${bookingMatchedVisits} visita(s) acumulada(s)${bookingClientCoupons > 0 ? ` • 🏆 ${bookingClientCoupons} cupón(es)` : ''}`
+                              : 'Autocompleta tu nombre, correo y beneficios con tu teléfono'}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          if (isExistingClient) {
+                            setIsExistingClient(false);
+                            setBookingMatchedVisits(0);
+                            setBookingClientCoupons(0);
+                            setClientName('');
+                            setClientEmail('');
+                            setClientPhone('');
+                            setBookingLookupQuery('');
+                            setShowBookingQuickLookup(true);
+                          } else {
+                            setShowBookingQuickLookup(!showBookingQuickLookup);
+                          }
+                        }}
+                        style={{
+                          paddingVertical: 8,
+                          paddingHorizontal: 12,
+                          borderRadius: 10,
+                          borderWidth: 1,
+                          borderColor: isExistingClient ? tColor.border : brandColor,
+                          backgroundColor: isExistingClient ? tColor.input : brandColor,
+                        }}
+                      >
+                        <Text style={{ color: isExistingClient ? tColor.muted : '#FFFFFF', fontWeight: '900', fontSize: 12 }}>
+                          {isExistingClient ? 'Cambiar cliente' : (showBookingQuickLookup ? 'Cerrar ✕' : '⚡ Autocompletar')}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {showBookingQuickLookup && !isExistingClient ? (
+                      <View style={{ marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: tColor.border, flexDirection: isMobile ? 'column' : 'row', gap: 10 }}>
+                        <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 11, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 46 }}>
+                          <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={100} />
+                          <TextInput
+                            style={{ flex: 1, color: tColor.text, paddingHorizontal: 12, fontSize: 14.5, fontWeight: '700', outlineStyle: 'none' } as any}
+                            placeholder="Tu teléfono o correo registrado..."
+                            placeholderTextColor={tColor.muted}
+                            value={bookingLookupQuery}
+                            onChangeText={setBookingLookupQuery}
+                            onSubmitEditing={handleQuickLookupInBooking}
+                          />
+                        </View>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={handleQuickLookupInBooking}
+                          disabled={isSearchingBookingClient}
+                          style={{
+                            backgroundColor: '#10B981',
+                            paddingVertical: 12,
+                            paddingHorizontal: 18,
+                            borderRadius: 11,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexDirection: 'row',
+                            gap: 6,
+                          }}
+                        >
+                          <Feather name="search" size={14} color="#FFFFFF" />
+                          <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13 }}>
+                            {isSearchingBookingClient ? 'Buscando...' : 'Cargar Mis Datos'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </View>
 
                   <View style={{ marginBottom: 16 }}>
                     <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Nombre Completo (Ej: Cesar Lopez)" placeholderTextColor={tColor.muted} value={clientName} onChangeText={text => setClientName(toTitleCase(text))} />
@@ -6371,36 +6711,233 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </View>
                   </View>
 
-                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 32 }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Día de la Cita</Text>
-                      {Platform.OS === 'web' ? (
-                        <input type="date" className="web-input-override" value={appointmentDate} onChange={e => setAppointmentDate(e.target.value)} />
-                      ) : (
-                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} value={appointmentDate} onChangeText={setAppointmentDate} />
-                      )}
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hora de la Cita</Text>
-                      {Platform.OS === 'web' ? (
-                        <select className="web-input-override" value={appointmentTime} onChange={e => setAppointmentTime(e.target.value)} disabled={!appointmentDate || availableTimes.length === 0}>
-                          <option value="" disabled>{!appointmentDate ? 'Primero elige un día' : availableTimes.length === 0 ? '❌ Sin turnos (Recuerda reservar con mínimo 3h de anticipación)' : 'Seleccione Hora'}</option>
-                          {availableTimes.map((t, idx) => {
-                            const freeStaffAtSlot = getFreeStaffForSlot(appointmentDate, t, selectedServiceType);
-                            const selectedStaffObj = activeStaffList.find(s => s.id === selectedBookingStaff);
-                            const labelSuffix = selectedStaffObj
-                              ? ` — 🟢 ${toTitleCase(selectedStaffObj.name)} Libre`
-                              : (activeStaffList.length > 0 ? ` — 🟢 ${freeStaffAtSlot.length} ${freeStaffAtSlot.length === 1 ? 'disponible' : 'disponibles'} (${freeStaffAtSlot.map(s => toTitleCase(s.name.split(' ')[0])).join(', ')})` : '');
+                  {/* 📅 CALENDARIO INTERACTIVO + GRILLA DE HORARIOS HABILITADOS POR EL DUEÑO */}
+                  <View style={{ marginBottom: 28, gap: 20 }}>
+                    {/* 1. SELECCIÓN DE DÍA EN CALENDARIO */}
+                    <View style={{ width: '100%' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 0 }]}>
+                          📅 Día de la Cita
+                        </Text>
+                        {appointmentDate ? (
+                          <Text style={{ color: brandColor, fontSize: 12.5, fontWeight: '900' }}>
+                            Seleccionado: {appointmentDate}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      {/* Tira deslizable de los próximos 14 días según los Horarios del Portal Interno */}
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={{ gap: 10, paddingVertical: 4 }}
+                      >
+                        {(() => {
+                          const currentHours: any = {
+                            ...defaultHoursConfig,
+                            ...(tenantInfo?.business_hours || tenantInfo?.businessHours || {}),
+                            ...(localHours || {}),
+                          };
+                          const dayKeys = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                          const dayShortLabels = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+                          const monthShortLabels = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+                          const base = new Date();
+
+                          return Array.from({ length: 14 }).map((_, idx) => {
+                            const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + idx);
+                            const yyyy = d.getFullYear();
+                            const mm = String(d.getMonth() + 1).padStart(2, '0');
+                            const dd = String(d.getDate()).padStart(2, '0');
+                            const iso = `${yyyy}-${mm}-${dd}`;
+                            const dKey = dayKeys[d.getDay()];
+                            const dayConf = currentHours[dKey];
+                            const isDayOpen = !dayConf || dayConf.isOpen !== false;
+                            const isSelected = appointmentDate === iso;
+
                             return (
-                              <option key={`${t}-${idx}`} value={t}>
-                                {t}{labelSuffix}
-                              </option>
+                              <TouchableOpacity
+                                key={iso}
+                                activeOpacity={0.8}
+                                disabled={!isDayOpen}
+                                onPress={() => setAppointmentDate(iso)}
+                                style={{
+                                  width: 74,
+                                  paddingVertical: 12,
+                                  paddingHorizontal: 8,
+                                  borderRadius: 14,
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  borderWidth: 1.5,
+                                  borderColor: isSelected ? brandColor : (isDayOpen ? tColor.border : 'rgba(239,68,68,0.25)'),
+                                  backgroundColor: isSelected ? brandColor : (isDayOpen ? tColor.input : 'rgba(239,68,68,0.06)'),
+                                  opacity: isDayOpen ? 1 : 0.45,
+                                }}
+                              >
+                                <Text style={{ color: isSelected ? '#FFF' : tColor.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase' }}>
+                                  {idx === 0 ? 'Hoy' : dayShortLabels[d.getDay()]}
+                                </Text>
+                                <Text style={{ color: isSelected ? '#FFF' : tColor.text, fontSize: 20, fontWeight: '900', marginVertical: 2 }}>
+                                  {d.getDate()}
+                                </Text>
+                                <Text style={{ color: isSelected ? '#FFF' : (isDayOpen ? '#10B981' : '#EF4444'), fontSize: 10, fontWeight: '800' }}>
+                                  {isDayOpen ? monthShortLabels[d.getMonth()] : 'Cerrado'}
+                                </Text>
+                              </TouchableOpacity>
                             );
-                          })}
-                        </select>
-                      ) : (
-                        <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder={availableTimes.length === 0 ? "Sin turnos" : "HH:MM"} placeholderTextColor={tColor.muted} value={appointmentTime} onChangeText={setAppointmentTime} editable={availableTimes.length > 0} />
-                      )}
+                          });
+                        })()}
+                      </ScrollView>
+
+                      {Platform.OS === 'web' ? (
+                        <View style={{ marginTop: 10 }}>
+                          <input
+                            type="date"
+                            className="web-input-override"
+                            value={appointmentDate}
+                            onChange={e => setAppointmentDate(e.target.value)}
+                          />
+                        </View>
+                      ) : null}
+                    </View>
+
+                    {/* 2. GRILLA DE HORARIOS DISPONIBLES POR JORNADA (☀️ MAÑANA / 🌤️ TARDE + BOTONES SIMÉTRICOS) */}
+                    <View style={{ width: '100%' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 0 }]}>
+                          🕒 Horarios Disponibles
+                        </Text>
+                        {appointmentTime ? (
+                          <Text style={{ color: '#10B981', fontSize: 12.5, fontWeight: '900' }}>
+                            ✓ Turno: {formatWallClockTime12h({ time: appointmentTime })}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      {availableTimes.length === 0 ? (
+                        <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 14, padding: 18, alignItems: 'center' }}>
+                          <Text style={{ color: '#F59E0B', fontWeight: '800', fontSize: 13.5, textAlign: 'center' }}>
+                            {!appointmentDate
+                              ? 'Selecciona un día arriba para ver los horarios.'
+                              : 'No hay turnos disponibles en esta fecha (Día cerrado o sin cupos). Elige otro día arriba.'}
+                          </Text>
+                        </View>
+                      ) : (() => {
+                        const morningSlots = availableTimes.filter((tSlot) => parseInt(String(tSlot).split(':')[0], 10) < 12);
+                        const afternoonSlots = availableTimes.filter((tSlot) => parseInt(String(tSlot).split(':')[0], 10) >= 12);
+                        const activeTab = (timePeriodTab === 'morning' && morningSlots.length === 0 && afternoonSlots.length > 0)
+                          ? 'afternoon'
+                          : (timePeriodTab === 'afternoon' && afternoonSlots.length === 0 && morningSlots.length > 0)
+                            ? 'morning'
+                            : timePeriodTab;
+                        const visibleSlots = activeTab === 'morning' ? morningSlots : afternoonSlots;
+
+                        return (
+                          <View>
+                            {/* Selector Segmentado: ☀️ Mañana vs 🌤️ Tarde */}
+                            <View
+                              style={{
+                                flexDirection: 'row',
+                                gap: 8,
+                                backgroundColor: 'rgba(0,0,0,0.35)',
+                                padding: 5,
+                                borderRadius: 14,
+                                borderWidth: 1,
+                                borderColor: tColor.border,
+                                marginBottom: 14,
+                              }}
+                            >
+                              <TouchableOpacity
+                                activeOpacity={0.85}
+                                disabled={morningSlots.length === 0}
+                                onPress={() => {
+                                  setTimePeriodTab('morning');
+                                  if (morningSlots.length > 0 && !morningSlots.includes(appointmentTime)) {
+                                    setAppointmentTime(morningSlots[0]);
+                                  }
+                                }}
+                                style={{
+                                  flex: 1,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: 6,
+                                  paddingVertical: 10,
+                                  borderRadius: 10,
+                                  backgroundColor: activeTab === 'morning' ? brandColor : 'transparent',
+                                  opacity: morningSlots.length === 0 ? 0.4 : 1,
+                                }}
+                              >
+                                <Feather name="sun" size={14} color={activeTab === 'morning' ? '#FFFFFF' : '#F59E0B'} />
+                                <Text style={{ color: activeTab === 'morning' ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 13 }}>
+                                  Mañana ({morningSlots.length})
+                                </Text>
+                              </TouchableOpacity>
+
+                              <TouchableOpacity
+                                activeOpacity={0.85}
+                                disabled={afternoonSlots.length === 0}
+                                onPress={() => {
+                                  setTimePeriodTab('afternoon');
+                                  if (afternoonSlots.length > 0 && !afternoonSlots.includes(appointmentTime)) {
+                                    setAppointmentTime(afternoonSlots[0]);
+                                  }
+                                }}
+                                style={{
+                                  flex: 1,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: 6,
+                                  paddingVertical: 10,
+                                  borderRadius: 10,
+                                  backgroundColor: activeTab === 'afternoon' ? brandColor : 'transparent',
+                                  opacity: afternoonSlots.length === 0 ? 0.4 : 1,
+                                }}
+                              >
+                                <Feather name="sunset" size={14} color={activeTab === 'afternoon' ? '#FFFFFF' : '#38BDF8'} />
+                                <Text style={{ color: activeTab === 'afternoon' ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 13 }}>
+                                  Tarde ({afternoonSlots.length})
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
+
+                            {/* Cuadrícula de 3 columnas exactas (sin flexGrow para que el último botón nunca se estire) */}
+                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                              {visibleSlots.map((tSlot) => {
+                                const isSelectedTime = appointmentTime === tSlot;
+                                const freeStaffAtSlot = getFreeStaffForSlot(appointmentDate, tSlot, selectedServiceType);
+                                return (
+                                  <TouchableOpacity
+                                    key={tSlot}
+                                    activeOpacity={0.8}
+                                    onPress={() => setAppointmentTime(tSlot)}
+                                    style={{
+                                      width: isMobile ? '31.4%' : '23.5%',
+                                      paddingVertical: 12,
+                                      paddingHorizontal: 6,
+                                      borderRadius: 12,
+                                      borderWidth: 1.5,
+                                      borderColor: isSelectedTime ? brandColor : tColor.border,
+                                      backgroundColor: isSelectedTime ? brandColor : tColor.input,
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                    }}
+                                  >
+                                    <Text style={{ color: isSelectedTime ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 13.5 }}>
+                                      {formatWallClockTime12h({ time: tSlot })}
+                                    </Text>
+                                    {activeStaffList.length > 0 ? (
+                                      <Text style={{ color: isSelectedTime ? '#FFFFFF' : '#10B981', fontSize: 10, fontWeight: '800', marginTop: 2 }}>
+                                        {freeStaffAtSlot.length} disp.
+                                      </Text>
+                                    ) : null}
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        );
+                      })()}
                     </View>
                   </View>
 
@@ -6537,13 +7074,61 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 <View style={{ marginBottom: 24 }}>
                   <Text style={[styles.inputLabel, { color: tColor.muted }]}>⚙️ Asignar Personal Responsable</Text>
                   {Platform.OS === 'web' ? (
-                    <select className="web-input-override" value={assignedMechanicId} onChange={e => setAssignedMechanicId(e.target.value)}>
+                    <select className="web-input-override" value={assignedMechanicId} onChange={e => setAssignedMechanicId(e.target.value)} style={{ marginBottom: 10 }}>
                       <option value="" disabled>Seleccione el personal a cargo</option>
                       {activeStaffList.map((m, idx) => <option key={`${m.id}-${idx}`} value={m.id}>{toTitleCase(m.name)} ({toTitleCase(m.role)})</option>)}
                     </select>
-                  ) : (
-                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Seleccionar Personal" placeholderTextColor={tColor.muted} />
-                  )}
+                  ) : null}
+
+                  {/* Lista interactiva de empleados (Funciona en iOS, Android y Web en 1 toque) */}
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+                    {activeStaffList.length > 0 ? activeStaffList.map((m, idx) => {
+                      const isSelStaff = assignedMechanicId === m.id;
+                      return (
+                        <TouchableOpacity
+                          key={`${m.id}-pos-${idx}`}
+                          activeOpacity={0.85}
+                          onPress={() => setAssignedMechanicId(m.id)}
+                          style={{
+                            flexGrow: 1,
+                            minWidth: isMobile ? '46%' : 160,
+                            paddingVertical: 12,
+                            paddingHorizontal: 14,
+                            borderRadius: 12,
+                            borderWidth: 1.5,
+                            borderColor: isSelStaff ? brandColor : tColor.border,
+                            backgroundColor: isSelStaff ? `${brandColor}22` : tColor.input,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            gap: 10,
+                          }}
+                        >
+                          <View
+                            style={{
+                              width: 28,
+                              height: 28,
+                              borderRadius: 14,
+                              backgroundColor: isSelStaff ? brandColor : tColor.border,
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <Feather name={isSelStaff ? 'check' : 'user'} size={14} color="#FFFFFF" />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13.5 }} numberOfLines={1}>
+                              {toTitleCase(m.name)}
+                            </Text>
+                            <Text style={{ color: isSelStaff ? brandColor : tColor.muted, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>
+                              {toTitleCase(m.role)}
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      );
+                    }) : (
+                      <Text style={{ color: tColor.muted, fontSize: 13 }}>No hay personal activo registrado.</Text>
+                    )}
+                  </View>
                 </View>
 
                 <View style={{ backgroundColor: tColor.input, padding: 24, borderRadius: 16, marginBottom: 24, borderWidth: 1, borderColor: tColor.border }}>
@@ -6551,51 +7136,65 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     {isAutomotive ? 'Reporte y Evidencias Técnicas' : 'Fotos del Trabajo (Opcional)'}
                   </Text>
                   <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 20 }}>
-                    <View style={{ flex: 1 }}>
+                    <View style={{ width: isMobile ? '100%' : undefined, flex: isMobile ? undefined : 1 }}>
                       <Text style={{ fontSize: 13, color: tColor.muted, fontWeight: 'bold' }}>
                         {isAutomotive ? 'Nota 1 / Estado Inicial' : 'Detalles Iniciales (Opcional)'}
                       </Text>
                       <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginTop: 8, marginBottom: 12 }]} placeholder="Detalle..." placeholderTextColor={tColor.muted} value={oldParts} onChangeText={t => setOldParts(toTitleCase(t))} />
                       {!oldPartPreview ? (
-                        <View>
+                        <View style={{ marginTop: 4 }}>
                           {Platform.OS === 'web' ? (
-                            <View style={{ marginTop: 8 }}>
-                              <input type="file" ref={oldFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'old')} />
-                              <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => oldFileInputRef.current?.click()}>
-                                 <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>📸 Subir Foto (Antes)</Text>
-                              </TouchableOpacity>
-                            </View>
+                            <input type="file" ref={oldFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'old')} />
                           ) : null}
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 1.5, borderColor: brandColor, borderRadius: 12, backgroundColor: `${brandColor}12`, borderStyle: 'dashed', flexDirection: 'row', gap: 8 }}
+                            onPress={() => Platform.OS === 'web' ? oldFileInputRef.current?.click() : handleNativeImagePick('old')}
+                          >
+                            <Feather name="camera" size={16} color={brandColor} />
+                            <Text style={{ color: tColor.text, fontSize: 13, fontWeight: '800' }}>📸 Subir Foto (Antes)</Text>
+                          </TouchableOpacity>
                         </View>
                       ) : (
-                        <View style={{ position: 'relative', width: '100%', height: 120, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
-                          {Platform.OS === 'web' ? <img src={oldPartPreview} alt="Evidencia Antes WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}
-                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.7)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setOldPartPreview(null); setOldPartImage(null); }}>
+                        <View style={{ position: 'relative', width: '100%', height: 140, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
+                          {Platform.OS === 'web' ? (
+                            <img src={oldPartPreview} alt="Evidencia Antes WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          ) : (
+                            <Image source={{ uri: oldPartPreview }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                          )}
+                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.75)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setOldPartPreview(null); setOldPartImage(null); }}>
                             <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
                           </TouchableOpacity>
                         </View>
                       )}
                     </View>
-                    <View style={{ flex: 1 }}>
+                    <View style={{ width: isMobile ? '100%' : undefined, flex: isMobile ? undefined : 1 }}>
                       <Text style={{ fontSize: 13, color: tColor.muted, fontWeight: 'bold' }}>
                         {isAutomotive ? 'Nota 2 / Resultado' : 'Resultado Final (Opcional)'}
                       </Text>
                       <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, marginTop: 8, marginBottom: 12 }]} placeholder="Detalle..." placeholderTextColor={tColor.muted} value={newParts} onChangeText={t => setNewParts(toTitleCase(t))} />
                       {!newPartPreview ? (
-                        <View>
+                        <View style={{ marginTop: 4 }}>
                           {Platform.OS === 'web' ? (
-                            <View style={{ marginTop: 8 }}>
-                              <input type="file" ref={newFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'new')} />
-                              <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => newFileInputRef.current?.click()}>
-                                 <Text style={{ color: tColor.muted, fontSize: 13, fontWeight: 'bold' }}>📸 Subir Foto (Después)</Text>
-                              </TouchableOpacity>
-                            </View>
+                            <input type="file" ref={newFileInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={(e) => handleImageChange(e as any, 'new')} />
                           ) : null}
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            style={{ alignItems: 'center', justifyContent: 'center', padding: 14, borderWidth: 1.5, borderColor: '#10B981', borderRadius: 12, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderStyle: 'dashed', flexDirection: 'row', gap: 8 }}
+                            onPress={() => Platform.OS === 'web' ? newFileInputRef.current?.click() : handleNativeImagePick('new')}
+                          >
+                            <Feather name="camera" size={16} color="#10B981" />
+                            <Text style={{ color: tColor.text, fontSize: 13, fontWeight: '800' }}>📸 Subir Foto (Después)</Text>
+                          </TouchableOpacity>
                         </View>
                       ) : (
-                        <View style={{ position: 'relative', width: '100%', height: 120, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
-                          {Platform.OS === 'web' ? <img src={newPartPreview} alt="Evidencia Después WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null}
-                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.7)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setNewPartPreview(null); setNewPartImage(null); }}>
+                        <View style={{ position: 'relative', width: '100%', height: 140, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' }}>
+                          {Platform.OS === 'web' ? (
+                            <img src={newPartPreview} alt="Evidencia Después WebP" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          ) : (
+                            <Image source={{ uri: newPartPreview }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                          )}
+                          <TouchableOpacity style={{ position: 'absolute', top: 6, right: 6, backgroundColor: 'rgba(0,0,0,0.75)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.25)', borderRadius: 14, width: 28, height: 28, alignItems: 'center', justifyContent: 'center' }} onPress={() => { setNewPartPreview(null); setNewPartImage(null); }}>
                             <Text style={{ color: '#FFF', fontSize: 14, fontWeight: 'bold' }}>✕</Text>
                           </TouchableOpacity>
                         </View>
@@ -6653,19 +7252,20 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   {!catalogFormPreview ? (
                     <View style={{ marginTop: 8 }}>
                       {Platform.OS === 'web' ? (
-                        <>
-                          <input type="file" ref={catalogInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handleCatalogImageSelect} />
-                          <TouchableOpacity style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }} onPress={() => catalogInputRef.current?.click()}>
-                            <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
-                            <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Click para subir foto</Text>
-                          </TouchableOpacity>
-                        </>
+                        <input type="file" ref={catalogInputRef as any} accept="image/*" style={{ display: 'none' }} onChange={handleCatalogImageSelect} />
                       ) : null}
+                      <TouchableOpacity
+                        style={{ alignItems: 'center', justifyContent: 'center', padding: 24, borderWidth: 2, borderColor: tColor.border, borderRadius: 12, backgroundColor: tColor.input, borderStyle: 'dashed' }}
+                        onPress={() => Platform.OS === 'web' ? catalogInputRef.current?.click() : handleNativeImagePick('catalog')}
+                      >
+                        <Text style={{ fontSize: 32, marginBottom: 8 }}>📸</Text>
+                        <Text style={{ color: tColor.muted, fontSize: 14, fontWeight: 'bold' }}>Toca para subir foto</Text>
+                      </TouchableOpacity>
                     </View>
                   ) : (
                     <View style={{ position: 'relative', width: '100%', height: 200, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: tColor.border, marginTop: 8, backgroundColor: '#000' }}>
-                      {catalogFormPreview.startsWith('blob:') ? (
-                        Platform.OS === 'web' ? <img src={catalogFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : null
+                      {(catalogFormPreview.startsWith('blob:') || catalogFormPreview.startsWith('file:') || catalogFormPreview.startsWith('ph:') || catalogFormPreview.startsWith('content:')) ? (
+                        Platform.OS === 'web' ? <img src={catalogFormPreview} alt="Preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <Image source={{ uri: catalogFormPreview }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
                       ) : (
                         <PrivateSupabaseImage path={catalogFormPreview} alt="Preview" />
                       )}

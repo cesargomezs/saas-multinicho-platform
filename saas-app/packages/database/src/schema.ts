@@ -342,6 +342,26 @@ export const userLegalAcceptances = pgTable('user_legal_acceptances', {
 });
 
 // ============================================================================
+// 15. PROMO CODES (Cupones de Registro / Activación — Estilo Viviendo en USA)
+// SELECT id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at FROM public.promo_codes;
+// ============================================================================
+export const promoCodes = pgTable('promo_codes', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  code: varchar('code', { length: 60 }).notNull().unique(),
+  isUsed: boolean('is_used').default(false).notNull(),
+  usedByUserId: uuid('used_by_user_id'),
+  usedForEntityId: uuid('used_for_entity_id'),
+  entityType: varchar('entity_type', { length: 50 }).default('tenant'), // Ej: 'tenant' | 'subscription' | 'service_listing'
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  usedAt: timestamp('used_at'),
+}, (table) => {
+  return {
+    codeIdx: uniqueIndex('promo_codes_code_unique_idx').on(table.code),
+    isUsedIdx: index('promo_codes_is_used_idx').on(table.isUsed),
+  };
+});
+
+// ============================================================================
 // DEFINICIÓN DE RELACIONES (Drizzle ORM)
 // ============================================================================
 export const tenantsRelations = relations(tenants, ({ many }) => ({
@@ -418,4 +438,9 @@ export const reportsRelations = relations(reports, ({ one }) => ({
 
 export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
   tenant: one(tenants, { fields: [auditLogs.tenantId], references: [tenants.id] }),
+}));
+
+export const promoCodesRelations = relations(promoCodes, ({ one }) => ({
+  usedByUser: one(users, { fields: [promoCodes.usedByUserId], references: [users.id] }),
+  usedForTenant: one(tenants, { fields: [promoCodes.usedForEntityId], references: [tenants.id] }),
 }));

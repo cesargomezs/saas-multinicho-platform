@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Platform, useWindowDimensions, TextInput, ActivityIndicator, Image, StatusBar } from 'react-native';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
 
@@ -18,6 +18,30 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 });
 
 export const SAFE_TOP_INSET = Platform.OS === 'ios' ? 54 : Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 12 : 0;
+
+// 💾 Helper universal de Favoritos (Funciona en iOS, Android y Web sin perderse al navegar)
+const readStoredFavorites = (): string[] => {
+  const mem = (globalThis as any).__autoflowFavorites;
+  if (Array.isArray(mem)) return mem;
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem('autoflow_favorites_v1');
+      const parsed = raw ? JSON.parse(raw) : [];
+      (globalThis as any).__autoflowFavorites = parsed;
+      return parsed;
+    } catch (_e) {}
+  }
+  return [];
+};
+
+const writeStoredFavorites = (list: string[]) => {
+  (globalThis as any).__autoflowFavorites = list;
+  if (Platform.OS === 'web' && typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem('autoflow_favorites_v1', JSON.stringify(list));
+    } catch (_e) {}
+  }
+};
 
 interface Business {
   id: string;
@@ -74,7 +98,7 @@ const getNicheIconProps = (niche?: string, primaryColor?: string | null) => {
   return { family: 'Ionicons' as const, name: 'car-sport-outline', color: primaryColor || '#FF5E00' };
 };
 
-const DirectoryLogo = ({ logoUrl, niche, primaryColor }: { logoUrl: string | null, icon?: string, niche?: string, primaryColor?: string | null }) => {
+const DirectoryLogo = ({ logoUrl, niche, primaryColor, size = 56 }: { logoUrl: string | null, icon?: string, niche?: string, primaryColor?: string | null, size?: number }) => {
   const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -98,7 +122,7 @@ const DirectoryLogo = ({ logoUrl, niche, primaryColor }: { logoUrl: string | nul
 
   if (!resolvedUrl) {
     const iconProps = getNicheIconProps(niche, primaryColor);
-    return <ProIconBox family={iconProps.family} name={iconProps.name} color={iconProps.color} size={26} boxSize={56} />;
+    return <ProIconBox family={iconProps.family} name={iconProps.name} color={iconProps.color} size={Math.round(size * 0.46)} boxSize={size} />;
   }
 
   if (Platform.OS === 'web') {
@@ -106,12 +130,12 @@ const DirectoryLogo = ({ logoUrl, niche, primaryColor }: { logoUrl: string | nul
       <img 
         src={resolvedUrl} 
         alt="Logo" 
-        style={{ width: '56px', height: '56px', borderRadius: '14px', objectFit: 'cover', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: '#000' }} 
+        style={{ width: `${size}px`, height: `${size}px`, borderRadius: '14px', objectFit: 'cover', border: '1px solid rgba(255,255,255,0.2)', backgroundColor: '#000' }} 
       />
     );
   }
 
-  return <Image source={{ uri: resolvedUrl }} style={{ width: 56, height: 56, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', backgroundColor: '#000' }} resizeMode="cover" />;
+  return <Image source={{ uri: resolvedUrl }} style={{ width: size, height: size, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)', backgroundColor: '#000' }} resizeMode="cover" />;
 };
 
 export default function GlobalDirectory() {
@@ -120,15 +144,40 @@ export default function GlobalDirectory() {
   const isMobile = width <= 850;
 
   const [locationQuery, setLocationQuery] = useState('');
-  const [selectedRadius, setSelectedRadius] = useState('15'); // ➔ Por defecto en 15 millas exactas como pediste
+  const [selectedRadius, setSelectedRadius] = useState('15');
   const params = useLocalSearchParams();
   const [activeCategory, setActiveCategory] = useState<string | null>((params.category as string) || null);
   const [nameQuery, setNameQuery] = useState('');
-  
+  const [onlyFavoritesFilter, setOnlyFavoritesFilter] = useState(false);
+
   const [globalResults, setGlobalResults] = useState<Business[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => readStoredFavorites());
 
   const radiusOptions = ['5', '10', '15', '25', '50'];
+
+  useFocusEffect(
+    useCallback(() => {
+      setFavoriteIds([...readStoredFavorites()]);
+    }, [])
+  );
+
+  const isBusinessFavorite = useCallback((bizId: string) => {
+    const cleanId = String(bizId || '').toLowerCase();
+    return favoriteIds.some((f) => String(f).toLowerCase() === `tenant:${cleanId}` || String(f).toLowerCase() === cleanId);
+  }, [favoriteIds]);
+
+  const toggleBusinessFavorite = (bizId: string) => {
+    const key = `tenant:${String(bizId).toLowerCase()}`;
+    setFavoriteIds((prev) => {
+      const exists = prev.some((f) => String(f).toLowerCase() === key);
+      const next = exists
+        ? prev.filter((f) => String(f).toLowerCase() !== key)
+        : [key, ...prev];
+      writeStoredFavorites(next);
+      return next;
+    });
+  };
 
   const enrichBusinessesWithReviews = useCallback(async (businesses: Business[]): Promise<Business[]> => {
     return Promise.all(
@@ -201,6 +250,10 @@ export default function GlobalDirectory() {
     fetchDirectory();
   };
 
+  const favoriteBusinesses = useMemo(() => {
+    return globalResults.filter((b) => isBusinessFavorite(b.id));
+  }, [globalResults, isBusinessFavorite]);
+
   const categoryCounts = useMemo(() => {
     return {
       automotive: globalResults.filter(b => b.niche === 'automotive').length,
@@ -217,8 +270,15 @@ export default function GlobalDirectory() {
     if (nameQuery) {
       results = results.filter(biz => biz.name.toLowerCase().includes(nameQuery.toLowerCase()));
     }
-    return results;
-  }, [activeCategory, globalResults, nameQuery]);
+    if (onlyFavoritesFilter) {
+      results = results.filter(biz => isBusinessFavorite(biz.id));
+    }
+    return [...results].sort((a, b) => {
+      const aFav = isBusinessFavorite(a.id) ? 1 : 0;
+      const bFav = isBusinessFavorite(b.id) ? 1 : 0;
+      return bFav - aFav;
+    });
+  }, [activeCategory, globalResults, nameQuery, onlyFavoritesFilter, isBusinessFavorite]);
 
   if (!activeCategory) {
     return (
@@ -277,7 +337,6 @@ export default function GlobalDirectory() {
                   />
                 </View>
                 
-                {/* 🌟 LÍNEA UI/UX DE SELECCIÓN DE MILLAS (PROFESIONAL Y MODERNA) 🌟 */}
                 <View>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                     <Text style={styles.inputLabel}>Radio de Búsqueda</Text>
@@ -299,10 +358,6 @@ export default function GlobalDirectory() {
                             borderRadius: 10,
                             alignItems: 'center',
                             backgroundColor: isSelected ? '#FF5E00' : 'transparent',
-                            shadowColor: isSelected ? '#FF5E00' : 'transparent',
-                            shadowOffset: { width: 0, height: 4 },
-                            shadowOpacity: 0.3,
-                            shadowRadius: 6,
                           }}
                         >
                           <Text style={{ color: isSelected ? '#FFFFFF' : '#94A3B8', fontWeight: isSelected ? '900' : '600', fontSize: 13.5 }}>
@@ -327,6 +382,92 @@ export default function GlobalDirectory() {
               </View>
             </View>
           </View>
+
+          {/* ❤️ SECCIÓN ACCESO RÁPIDO: MIS NEGOCIOS FAVORITOS EN LA VENTANA PRINCIPAL ❤️ */}
+          {favoriteBusinesses.length > 0 ? (
+            <View style={{ marginBottom: 32 }}>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(239, 68, 68, 0.18)', borderWidth: 1, borderColor: '#EF4444', alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="heart" size={15} color="#EF4444" />
+                  </View>
+                  <Text style={{ color: '#FFFFFF', fontSize: isMobile ? 18 : 20, fontWeight: '900' }}>
+                    Mis Favoritos ({favoriteBusinesses.length})
+                  </Text>
+                </View>
+                <Text style={{ color: '#94A3B8', fontSize: 12, fontWeight: '700' }}>
+                  Acceso directo ⚡
+                </Text>
+              </View>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 14, paddingBottom: 4 }}
+              >
+                {favoriteBusinesses.map((favBiz) => {
+                  const rawLoyalty = favBiz.loyaltyConfig || favBiz.loyalty_config || {};
+                  let loyalty: any = {};
+                  try {
+                    loyalty = typeof rawLoyalty === 'string' ? JSON.parse(rawLoyalty || '{}') : rawLoyalty;
+                  } catch (_e) {}
+                  const reviews = Array.isArray(loyalty?.reviews) ? loyalty.reviews : [];
+                  const avg = reviews.length > 0
+                    ? (reviews.reduce((acc: number, r: any) => acc + Number(r.rating || 5), 0) / reviews.length).toFixed(1)
+                    : '5.0';
+                  const dist = favBiz.distance !== undefined && favBiz.distance !== null
+                    ? Number(favBiz.distance).toFixed(1)
+                    : '2.4';
+
+                  return (
+                    <TouchableOpacity
+                      key={`fav-${favBiz.id}`}
+                      activeOpacity={0.85}
+                      onPress={() => router.push(`/${favBiz.id}` as any)}
+                      style={{
+                        width: isMobile ? 275 : 310,
+                        backgroundColor: 'rgba(18, 22, 28, 0.9)',
+                        borderWidth: 1.5,
+                        borderColor: favBiz.primaryColor || '#FF5E00',
+                        borderRadius: 20,
+                        padding: 18,
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+                        <DirectoryLogo logoUrl={favBiz.logoUrl} niche={favBiz.niche} primaryColor={favBiz.primaryColor} size={46} />
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.15)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                            <Ionicons name="star" size={11} color="#F59E0B" />
+                            <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 11.5 }}>{avg}</Text>
+                          </View>
+                          <TouchableOpacity
+                            onPress={() => toggleBusinessFavorite(favBiz.id)}
+                            style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(239, 68, 68, 0.2)', borderWidth: 1, borderColor: '#EF4444', alignItems: 'center', justifyContent: 'center' }}
+                          >
+                            <Ionicons name="heart" size={14} color="#EF4444" />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 17, marginBottom: 3 }} numberOfLines={1}>
+                        {favBiz.name}
+                      </Text>
+                      <Text style={{ color: '#94A3B8', fontSize: 12.5, marginBottom: 12 }} numberOfLines={1}>
+                        {favBiz.label} • A {dist} mi
+                      </Text>
+
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.08)', paddingTop: 10 }}>
+                        <Text style={{ color: favBiz.primaryColor || '#FF5E00', fontWeight: '900', fontSize: 12.5 }}>
+                          Agendar Ahora
+                        </Text>
+                        <Feather name="arrow-right" size={14} color={favBiz.primaryColor || '#FF5E00'} />
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          ) : null}
 
           <Text style={{ color: '#FFF', fontSize: isMobile ? 18 : 20, fontWeight: 'bold', marginBottom: 18 }}>Categorías Disponibles</Text>
           <View style={[styles.bentoGrid, isMobile && { gap: 16 }]}>
@@ -427,7 +568,7 @@ export default function GlobalDirectory() {
       >
         <TouchableOpacity
           style={[styles.backButton, { marginBottom: 0, flexDirection: 'row', alignItems: 'center', gap: 8 }]}
-          onPress={() => { setActiveCategory(null); setNameQuery(''); }}
+          onPress={() => { setActiveCategory(null); setNameQuery(''); setOnlyFavoritesFilter(false); }}
         >
           <Feather name="arrow-left" size={16} color="#FFFFFF" />
           <Text style={[styles.backButtonText, { color: '#FFFFFF' }]}>Volver a Categorías</Text>
@@ -457,17 +598,91 @@ export default function GlobalDirectory() {
             Encontramos {specificResults.length} opciones a menos de {selectedRadius} millas de tu búsqueda.
           </Text>
           
+          {/* 🔍 CONSOLA DE BÚSQUEDA UI/UX PRO: ETIQUETA LIMPIA ARRIBA + BOTÓN CORAZÓN INTEGRADO DENTRO DEL INPUT 🔍 */}
           <View style={[styles.searchConsole, isMobile && { padding: 18, borderRadius: 18 }]}>
-            <Text style={styles.inputLabel}>¿Buscas un negocio en específico?</Text>
-            <View style={{ flexDirection: 'row', gap: 12 }}>
-              <TextInput 
-                style={[styles.searchInput, { flex: 1 }]} 
-                placeholder="Buscar por nombre de negocio..." 
+            <Text style={[styles.inputLabel, { marginBottom: 10 }]}>¿Buscas un negocio en específico?</Text>
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: 'rgba(0, 0, 0, 0.45)',
+                borderWidth: 1,
+                borderColor: onlyFavoritesFilter ? 'rgba(239, 68, 68, 0.55)' : 'rgba(255,255,255,0.09)',
+                borderRadius: 14,
+                paddingLeft: 14,
+                paddingRight: 6,
+                height: 54,
+              }}
+            >
+              <Feather name="search" size={17} color="#94A3B8" style={{ marginRight: 10 }} />
+
+              <TextInput
+                style={{
+                  flex: 1,
+                  color: '#FFFFFF',
+                  fontSize: 15,
+                  height: '100%',
+                  ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : {}),
+                } as any}
+                placeholder={onlyFavoritesFilter ? 'Buscar en tus favoritos...' : 'Buscar por nombre de negocio...'}
                 placeholderTextColor="#94A3B8"
-                value={nameQuery} 
+                value={nameQuery}
                 onChangeText={setNameQuery}
               />
+
+              {nameQuery.length > 0 ? (
+                <TouchableOpacity
+                  onPress={() => setNameQuery('')}
+                  style={{ padding: 6, marginRight: 2 }}
+                >
+                  <Feather name="x-circle" size={16} color="#94A3B8" />
+                </TouchableOpacity>
+              ) : null}
+
+              {/* Botón filtro de Favoritos integrado dentro de la barra (Cero desborde) */}
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => setOnlyFavoritesFilter(!onlyFavoritesFilter)}
+                accessibilityLabel="Filtrar solo favoritos"
+                style={{
+                  height: 40,
+                  paddingHorizontal: isMobile ? 11 : 14,
+                  borderRadius: 10,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  backgroundColor: onlyFavoritesFilter ? '#EF4444' : 'rgba(255,255,255,0.06)',
+                  borderWidth: 1,
+                  borderColor: onlyFavoritesFilter ? '#EF4444' : 'rgba(255,255,255,0.12)',
+                }}
+              >
+                <Ionicons
+                  name={onlyFavoritesFilter ? 'heart' : 'heart-outline'}
+                  size={16}
+                  color={onlyFavoritesFilter ? '#FFFFFF' : '#94A3B8'}
+                />
+                {!isMobile ? (
+                  <Text style={{ color: onlyFavoritesFilter ? '#FFFFFF' : '#94A3B8', fontSize: 12, fontWeight: '800' }}>
+                    Favoritos
+                  </Text>
+                ) : null}
+              </TouchableOpacity>
             </View>
+
+            {onlyFavoritesFilter ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 10, paddingHorizontal: 2 }}>
+                <Text style={{ color: '#EF4444', fontSize: 12, fontWeight: '800' }}>
+                  ❤️ Mostrando únicamente tus negocios favoritos
+                </Text>
+                <TouchableOpacity onPress={() => setOnlyFavoritesFilter(false)}>
+                  <Text style={{ color: '#94A3B8', fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' }}>
+                    Ver todos
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
           </View>
         </View>
 
@@ -487,11 +702,20 @@ export default function GlobalDirectory() {
             const dist = biz.distance !== undefined && biz.distance !== null
               ? Number(biz.distance).toFixed(1)
               : '2.4';
+            const isFav = isBusinessFavorite(biz.id);
 
             return (
               <TouchableOpacity 
                 key={biz.id} 
-                style={[styles.glassCard, { minWidth: isMobile ? '100%' : '48%', padding: isMobile ? 22 : 28, position: 'relative' }]} 
+                style={[
+                  styles.glassCard,
+                  {
+                    minWidth: isMobile ? '100%' : '48%',
+                    padding: isMobile ? 22 : 28,
+                    position: 'relative',
+                    borderColor: isFav ? 'rgba(239, 68, 68, 0.55)' : 'rgba(255, 255, 255, 0.08)',
+                  }
+                ]} 
                 activeOpacity={0.75}
                 onPress={() => router.push(`/${biz.id}` as any)}
               >
@@ -499,10 +723,29 @@ export default function GlobalDirectory() {
                   <DirectoryLogo logoUrl={biz.logoUrl} icon={biz.icon} niche={biz.niche} primaryColor={biz.primaryColor} />
 
                   <View style={{ alignItems: 'flex-end', gap: 6, flexShrink: 1 }}>
-                    <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                      <Ionicons name="star" size={13} color="#F59E0B" />
-                      <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 13 }}>{avg}</Text>
-                      <Text style={{ color: '#94A3B8', fontSize: 11.5, fontWeight: '700' }}>({reviews.length})</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <View style={{ backgroundColor: 'rgba(245, 158, 11, 0.14)', borderWidth: 1, borderColor: 'rgba(245, 158, 11, 0.45)', paddingHorizontal: 11, paddingVertical: 5, borderRadius: 20, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                        <Ionicons name="star" size={13} color="#F59E0B" />
+                        <Text style={{ color: '#F59E0B', fontWeight: '900', fontSize: 13 }}>{avg}</Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 11.5, fontWeight: '700' }}>({reviews.length})</Text>
+                      </View>
+
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => toggleBusinessFavorite(biz.id)}
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 16,
+                          backgroundColor: isFav ? 'rgba(239, 68, 68, 0.22)' : 'rgba(255,255,255,0.06)',
+                          borderWidth: 1,
+                          borderColor: isFav ? '#EF4444' : 'rgba(255,255,255,0.16)',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <Ionicons name={isFav ? 'heart' : 'heart-outline'} size={16} color={isFav ? '#EF4444' : '#FFFFFF'} />
+                      </TouchableOpacity>
                     </View>
 
                     <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.35)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 16, flexDirection: 'row', alignItems: 'center', gap: 5 }}>
@@ -512,7 +755,14 @@ export default function GlobalDirectory() {
                   </View>
                 </View>
 
-                <Text style={[styles.cardTitle, isMobile && { fontSize: 21 }]}>{biz.name}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <Text style={[styles.cardTitle, isMobile && { fontSize: 21 }, { marginBottom: 0 }]}>{biz.name}</Text>
+                  {isFav ? (
+                    <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.16)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1, borderColor: '#EF4444' }}>
+                      <Text style={{ color: '#EF4444', fontSize: 10, fontWeight: '900' }}>FAVORITO</Text>
+                    </View>
+                  ) : null}
+                </View>
                 <Text style={styles.cardSubtitle}>{biz.label} • {biz.city}, {biz.zipCode}</Text>
                 
                 <View style={[styles.cardFooter, { justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }]}>
@@ -537,7 +787,7 @@ export default function GlobalDirectory() {
                 <ProIconBox family="Feather" name="compass" color="#94A3B8" size={32} boxSize={64} />
               </View>
               <Text style={{ color: '#FFF', fontSize: 19, fontWeight: 'bold', marginBottom: 8, textAlign: 'center' }}>No encontramos coincidencias</Text>
-              <Text style={{ color: '#94A3B8', textAlign: 'center' }}>Intenta buscar con otro nombre o ubicación.</Text>
+              <Text style={{ color: '#94A3B8', textAlign: 'center' }}>Intenta buscar con otro nombre o desactiva el filtro de favoritos.</Text>
             </View>
           )}
         </View>

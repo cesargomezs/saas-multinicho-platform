@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator, Share } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
@@ -106,6 +106,21 @@ export default function B2BRegistrationScreen() {
   const [showOwnerLoginPassword, setShowOwnerLoginPassword] = useState(false);
   const [isLoggingInOwner, setIsLoggingInOwner] = useState(false);
   const [myOwnedTenants, setMyOwnedTenants] = useState<any[]>([]);
+
+  // 🎟️ Estados del Generador de Códigos Promocionales (Al iniciar sesión con tu cuenta en "Ya tengo un Negocio")
+  const [showPromoAdminPanel, setShowPromoAdminPanel] = useState(false);
+  const [promoCodesList, setPromoCodesList] = useState<any[]>([]);
+  const [isLoadingPromos, setIsLoadingPromos] = useState(false);
+  const [isCreatingPromo, setIsCreatingPromo] = useState(false);
+  const [customPromoInput, setCustomPromoInput] = useState('');
+  const [promoEntityType, setPromoEntityType] = useState<'tenant' | 'subscription'>('tenant');
+
+  // 💳 Estados para el Paso 4: Opciones de Pago vs Cupón Promocional (`public.promo_codes`)
+  const [paymentMethod, setPaymentMethod] = useState<'card' | 'promo_code'>('promo_code');
+  const [promoCodeInput, setPromoCodeInput] = useState('');
+  const [isValidatingPromo, setIsValidatingPromo] = useState(false);
+  const [validatedPromoObj, setValidatedPromoObj] = useState<any | null>(null);
+  const [promoErrorMsg, setPromoErrorMsg] = useState('');
 
   // Paso 1: Cuenta & Seguridad
   const [email, setEmail] = useState('');
@@ -287,6 +302,176 @@ export default function B2BRegistrationScreen() {
     setStep(step + 1);
   };
 
+  const getApiBaseUrl = () => {
+    const raw =
+      process.env.EXPO_PUBLIC_API_URL ||
+      process.env.NEXT_PUBLIC_API_URL ||
+      (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
+    return raw.replace(/\/$/, '');
+  };
+
+  // 🎟️ Cargar lista de cupones desde `public.promo_codes` (Vía API backend + fallback directo Supabase)
+  const fetchPromoCodesList = async () => {
+    setIsLoadingPromos(true);
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/promo-codes`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.promoCodes)) {
+          setPromoCodesList(data.promoCodes);
+          setIsLoadingPromos(false);
+          return;
+        }
+      }
+    } catch (_e) {}
+
+    try {
+      const { data, error } = await supabase
+        .from('promo_codes')
+        .select('id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at')
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (!error && Array.isArray(data)) {
+        setPromoCodesList(data);
+      }
+    } catch (_err) {}
+    setIsLoadingPromos(false);
+  };
+
+  // ⚡ Generar un nuevo código promocional único en `public.promo_codes`
+  const handleGeneratePromoCode = async () => {
+    setIsCreatingPromo(true);
+    const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const finalCode = customPromoInput.trim()
+      ? customPromoInput.trim().toUpperCase().replace(/\s+/g, '-')
+      : `PICKTIME-${randomSuffix}`;
+
+    try {
+      let createdItem: any = null;
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/api/promo-codes/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: finalCode,
+            entity_type: promoEntityType,
+            ownerEmail: ownerLoginEmail.trim().toLowerCase(),
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.promoCode) {
+            createdItem = data.promoCode;
+          }
+        }
+      } catch (_e) {}
+
+      if (!createdItem) {
+        const { data, error } = await supabase
+          .from('promo_codes')
+          .insert([{ code: finalCode, is_used: false, entity_type: promoEntityType }])
+          .select()
+          .single();
+        if (error) {
+          alert(`No se pudo crear el cupón (${error.message}). Verifica que no esté repetido.`);
+          setIsCreatingPromo(false);
+          return;
+        }
+        createdItem = data;
+      }
+
+      setCustomPromoInput('');
+      setPromoCodesList((prev) => [createdItem, ...prev.filter((p) => p.code !== createdItem.code)]);
+      alert(`🎉 ¡Código ${createdItem.code} generado y listo para compartir!`);
+    } catch (err: any) {
+      alert('Error generando el código promocional.');
+    } finally {
+      setIsCreatingPromo(false);
+    }
+  };
+
+  // 📲 Compartir código promocional por WhatsApp / SMS / Share nativo (iOS, Android y Web)
+  const handleSharePromoCode = async (codeStr: string) => {
+    const shareMessage = `🎁 ¡Hola! Te comparto un código promocional VIP de activación para registrar tu negocio en Pick-Time Book / AutoFlow:\n\n🎟️ Código: ${codeStr}\n\nIngresa a la app en "Soy un Negocio" ➔ Paso 4 (Plan) ➔ "Tengo un Cupón Promocional" y actívalo gratis.`;
+    try {
+      if (Platform.OS === 'web') {
+        if (typeof navigator !== 'undefined' && (navigator as any).share) {
+          await (navigator as any).share({ title: 'Cupón VIP AutoFlow', text: shareMessage });
+          return;
+        }
+        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+          await navigator.clipboard.writeText(shareMessage);
+          alert(`📋 ¡Código ${codeStr} e invitación copiados al portapapeles listos para pegar en WhatsApp!`);
+          return;
+        }
+      }
+      await Share.share({
+        title: `Código Promocional: ${codeStr}`,
+        message: shareMessage,
+      });
+    } catch (_e) {}
+  };
+
+  // 🔍 Validar si el cupón existe en `public.promo_codes` y `is_used === false` (Paso 4)
+  const handleValidatePromoCodeInStep4 = async () => {
+    const cleanCode = promoCodeInput.trim().toUpperCase();
+    if (!cleanCode) {
+      setPromoErrorMsg('Escribe un código promocional para validar.');
+      return;
+    }
+    setIsValidatingPromo(true);
+    setPromoErrorMsg('');
+    setValidatedPromoObj(null);
+
+    try {
+      // 1. Intentar validar contra el endpoint del backend `/api/promo-codes/validate`
+      let checkedViaBackend = false;
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/api/promo-codes/validate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: cleanCode }),
+        });
+        if (res.ok || res.status === 400 || res.status === 404) {
+          const data = await res.json();
+          checkedViaBackend = true;
+          if (res.ok && data.success && data.promoCode) {
+            setValidatedPromoObj(data.promoCode);
+            if (!selectedPlan) setSelectedPlan('pro');
+            setIsValidatingPromo(false);
+            return;
+          } else {
+            setPromoErrorMsg(data.message || 'Este cupón no existe o ya fue utilizado.');
+            setIsValidatingPromo(false);
+            return;
+          }
+        }
+      } catch (_e) {}
+
+      // 2. Fallback directo a Supabase (`public.promo_codes`) si el backend aún no tiene la ruta montada
+      if (!checkedViaBackend) {
+        const { data, error } = await supabase
+          .from('promo_codes')
+          .select('id, code, is_used, used_by_user_id, used_for_entity_id, entity_type, created_at, used_at')
+          .eq('code', cleanCode)
+          .maybeSingle();
+
+        if (error || !data) {
+          setPromoErrorMsg('❌ El código ingresado no existe en la base de datos.');
+        } else if (data.is_used) {
+          setPromoErrorMsg('⚠️ Este código promocional ya fue utilizado anteriormente.');
+        } else {
+          setValidatedPromoObj(data);
+          if (!selectedPlan) setSelectedPlan('pro');
+        }
+      }
+    } catch (_err) {
+      setPromoErrorMsg('Error de conexión al validar el cupón.');
+    } finally {
+      setIsValidatingPromo(false);
+    }
+  };
+
   const handleOwnerLogin = async () => {
     const cleanEmail = ownerLoginEmail.trim().toLowerCase();
     if (!cleanEmail || !ownerLoginPassword) {
@@ -307,6 +492,7 @@ export default function B2BRegistrationScreen() {
       const data = await res.json();
       if (res.ok && data.success && Array.isArray(data.tenants)) {
         setMyOwnedTenants(data.tenants);
+        fetchPromoCodesList();
       } else {
         alert(data.message || 'No encontramos negocios con esas credenciales.');
       }
@@ -319,6 +505,9 @@ export default function B2BRegistrationScreen() {
 
   const handleFinalCheckoutAndStore = async () => {
     if (!selectedPlan) return alert('Por favor selecciona un plan para continuar.');
+    if (paymentMethod === 'promo_code' && !validatedPromoObj) {
+      return alert('Por favor valida un Código Promocional activo antes de completar el registro con cupón, o elige Pago con Tarjeta.');
+    }
     setIsSubmitting(true);
 
     try {
@@ -355,7 +544,10 @@ export default function B2BRegistrationScreen() {
         subscriptionStatus: 'active',
         adminEmail: email,
         password,
-        portalPin: portalPin.trim()
+        portalPin: portalPin.trim(),
+        paymentMethod,
+        promoCode: paymentMethod === 'promo_code' && validatedPromoObj ? validatedPromoObj.code : null,
+        promoCodeId: paymentMethod === 'promo_code' && validatedPromoObj ? validatedPromoObj.id : null,
       };
 
       const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
@@ -369,6 +561,21 @@ export default function B2BRegistrationScreen() {
 
       if (!response.ok || !json.success) {
         throw new Error(json.message || 'Error al registrar el negocio en el servidor.');
+      }
+
+      // 🎟️ Si se usó un cupón válido, asegurar que quede marcado como `is_used = true` y vinculado al negocio creado
+      if (paymentMethod === 'promo_code' && validatedPromoObj?.code) {
+        try {
+          await supabase
+            .from('promo_codes')
+            .update({
+              is_used: true,
+              used_for_entity_id: newTenantId,
+              entity_type: 'tenant',
+              used_at: new Date().toISOString(),
+            })
+            .eq('code', validatedPromoObj.code);
+        } catch (_e) {}
       }
 
       if (Platform.OS === 'web' && typeof window !== 'undefined') {
@@ -636,6 +843,187 @@ export default function B2BRegistrationScreen() {
                         </TouchableOpacity>
                       );
                     })}
+
+                    {/* 🎟️ PANEL GENERADOR Y COMPARTIDOR DE CÓDIGOS PROMOCIONALES (AL INICIAR SESIÓN CON TU CUENTA) */}
+                    <View style={{ marginTop: 12, paddingTop: 18, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)' }}>
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          const nextState = !showPromoAdminPanel;
+                          setShowPromoAdminPanel(nextState);
+                          if (nextState) fetchPromoCodesList();
+                        }}
+                        style={{
+                          backgroundColor: showPromoAdminPanel ? 'rgba(16, 185, 129, 0.16)' : 'rgba(255, 94, 0, 0.12)',
+                          borderWidth: 1,
+                          borderColor: showPromoAdminPanel ? '#10B981' : primaryColor,
+                          borderRadius: 14,
+                          paddingVertical: 14,
+                          paddingHorizontal: 16,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 10,
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                          <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: showPromoAdminPanel ? 'rgba(16, 185, 129, 0.25)' : `${primaryColor}25`, alignItems: 'center', justifyContent: 'center' }}>
+                            <Feather name="gift" size={17} color={showPromoAdminPanel ? '#10B981' : primaryColor} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
+                              🎟️ Códigos Promocionales VIP
+                            </Text>
+                            <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 1 }}>
+                              Genera y comparte cupones de registro (1 solo uso)
+                            </Text>
+                          </View>
+                        </View>
+                        <Feather name={showPromoAdminPanel ? 'chevron-up' : 'chevron-down'} size={18} color="#FFFFFF" />
+                      </TouchableOpacity>
+
+                      {showPromoAdminPanel ? (
+                        <View style={{ marginTop: 14, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 16, padding: 16, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', gap: 14 }}>
+                          <Text style={{ color: '#E2E8F0', fontSize: 12.5, lineHeight: 18 }}>
+                            Crea un código personalizado o deja el campo vacío para generar uno aleatorio en <Text style={{ color: '#10B981', fontWeight: '800' }}>public.promo_codes</Text>:
+                          </Text>
+
+                          <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 10 }}>
+                            <TextInput
+                              style={[styles.formInput, { flex: 1, height: 48, fontSize: 14, fontWeight: '800', letterSpacing: 1 }]}
+                              placeholder="Opcional: Ej. VIP-BARBER2026"
+                              placeholderTextColor="#64748B"
+                              autoCapitalize="characters"
+                              value={customPromoInput}
+                              onChangeText={(t) => setCustomPromoInput(t.toUpperCase())}
+                            />
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={handleGeneratePromoCode}
+                              disabled={isCreatingPromo}
+                              style={{
+                                backgroundColor: '#10B981',
+                                height: 48,
+                                paddingHorizontal: 18,
+                                borderRadius: 12,
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: 8,
+                              }}
+                            >
+                              {isCreatingPromo ? (
+                                <ActivityIndicator color="#FFFFFF" size="small" />
+                              ) : (
+                                <>
+                                  <Feather name="plus-circle" size={16} color="#FFFFFF" />
+                                  <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13.5 }}>
+                                    Generar Código
+                                  </Text>
+                                </>
+                              )}
+                            </TouchableOpacity>
+                          </View>
+
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                            <Text style={{ color: '#94A3B8', fontSize: 11.5, fontWeight: '800', textTransform: 'uppercase' }}>
+                              Cupones en Base de Datos ({promoCodesList.length})
+                            </Text>
+                            <TouchableOpacity onPress={fetchPromoCodesList}>
+                              <Text style={{ color: primaryColor, fontSize: 12, fontWeight: '800' }}>
+                                {isLoadingPromos ? 'Actualizando...' : '↻ Actualizar'}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <ScrollView style={{ maxHeight: 240 }} nestedScrollEnabled showsVerticalScrollIndicator={false}>
+                            <View style={{ gap: 8 }}>
+                              {promoCodesList.length === 0 ? (
+                                <Text style={{ color: '#64748B', fontSize: 12.5, textAlign: 'center', paddingVertical: 12 }}>
+                                  Aún no hay códigos generados. Pulsa "Generar Código" arriba.
+                                </Text>
+                              ) : (
+                                promoCodesList.map((pItem, idx) => {
+                                  const used = Boolean(pItem.is_used ?? pItem.isUsed);
+                                  return (
+                                    <View
+                                      key={pItem.id || `${pItem.code}-${idx}`}
+                                      style={{
+                                        backgroundColor: 'rgba(255,255,255,0.03)',
+                                        borderWidth: 1,
+                                        borderColor: used ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.35)',
+                                        borderRadius: 12,
+                                        paddingVertical: 10,
+                                        paddingHorizontal: 12,
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 8,
+                                      }}
+                                    >
+                                      <View style={{ flex: 1, minWidth: 0 }}>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                          <Text
+                                            style={{
+                                              color: used ? '#64748B' : '#FFFFFF',
+                                              fontWeight: '900',
+                                              fontSize: 14,
+                                              letterSpacing: 0.8,
+                                              textDecorationLine: used ? 'line-through' : 'none',
+                                            }}
+                                            numberOfLines={1}
+                                          >
+                                            {pItem.code}
+                                          </Text>
+                                          <View
+                                            style={{
+                                              backgroundColor: used ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.18)',
+                                              paddingHorizontal: 7,
+                                              paddingVertical: 2,
+                                              borderRadius: 6,
+                                            }}
+                                          >
+                                            <Text style={{ color: used ? '#EF4444' : '#10B981', fontSize: 9.5, fontWeight: '900' }}>
+                                              {used ? 'USADO' : 'DISPONIBLE'}
+                                            </Text>
+                                          </View>
+                                        </View>
+                                        <Text style={{ color: '#64748B', fontSize: 10.5, marginTop: 2 }}>
+                                          {used && (pItem.used_at || pItem.usedAt)
+                                            ? `Usado el ${new Date(pItem.used_at || pItem.usedAt).toLocaleDateString()}`
+                                            : `Tipo: ${pItem.entity_type || pItem.entityType || 'tenant'}`}
+                                        </Text>
+                                      </View>
+
+                                      {!used ? (
+                                        <TouchableOpacity
+                                          activeOpacity={0.8}
+                                          onPress={() => handleSharePromoCode(pItem.code)}
+                                          style={{
+                                            backgroundColor: primaryColor,
+                                            paddingVertical: 8,
+                                            paddingHorizontal: 12,
+                                            borderRadius: 9,
+                                            flexDirection: 'row',
+                                            alignItems: 'center',
+                                            gap: 5,
+                                          }}
+                                        >
+                                          <Feather name="share-2" size={13} color="#FFFFFF" />
+                                          <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 11.5 }}>
+                                            Compartir
+                                          </Text>
+                                        </TouchableOpacity>
+                                      ) : null}
+                                    </View>
+                                  );
+                                })
+                              )}
+                            </View>
+                          </ScrollView>
+                        </View>
+                      ) : null}
+                    </View>
                   </View>
                 )}
               </View>
@@ -1114,7 +1502,180 @@ export default function B2BRegistrationScreen() {
             {step === 4 && (
               <View style={{ width: '100%', alignItems: 'center' }}>
                 <Text style={[styles.title, { textAlign: 'center' }]}>Desbloquea tu Potencial</Text>
-                <Text style={[styles.subtitle, { textAlign: 'center', marginBottom: 40 }]}>Selecciona el plan que mejor se adapte a tu volumen operativo mensual.</Text>
+                <Text style={[styles.subtitle, { textAlign: 'center', marginBottom: 24 }]}>Selecciona el plan que mejor se adapte a tu volumen operativo mensual y elige tu método de activación.</Text>
+
+                {/* 💳 SELECTOR DE MÉTODO DE ACTIVACIÓN: PAGO CON TARJETA VS CUPÓN PROMOCIONAL (`public.promo_codes`) */}
+                <View style={[styles.glassCard, { width: '100%', maxWidth: 760, padding: isMobile ? 20 : 28, marginBottom: 32, borderColor: validatedPromoObj ? '#10B981' : 'rgba(255,255,255,0.12)' }]}>
+                  <Text style={[styles.inputLabel, { marginBottom: 12, color: '#E2E8F0' }]}>
+                    1. Elige cómo deseas activar tu cuenta hoy:
+                  </Text>
+
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12, marginBottom: paymentMethod === 'promo_code' ? 18 : 0 }}>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => setPaymentMethod('promo_code')}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 14,
+                        paddingHorizontal: 16,
+                        borderRadius: 14,
+                        borderWidth: 1.5,
+                        borderColor: paymentMethod === 'promo_code' ? '#10B981' : 'rgba(255,255,255,0.1)',
+                        backgroundColor: paymentMethod === 'promo_code' ? 'rgba(16, 185, 129, 0.14)' : 'rgba(0,0,0,0.35)',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10,
+                      }}
+                    >
+                      <Ionicons
+                        name={paymentMethod === 'promo_code' ? 'pricetag' : 'pricetag-outline'}
+                        size={18}
+                        color={paymentMethod === 'promo_code' ? '#10B981' : '#94A3B8'}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
+                          🎟️ Tengo un Código Promocional
+                        </Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
+                          Activación inmediata con cupón válido
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => setPaymentMethod('card')}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 14,
+                        paddingHorizontal: 16,
+                        borderRadius: 14,
+                        borderWidth: 1.5,
+                        borderColor: paymentMethod === 'card' ? primaryColor : 'rgba(255,255,255,0.1)',
+                        backgroundColor: paymentMethod === 'card' ? `${primaryColor}18` : 'rgba(0,0,0,0.35)',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 10,
+                      }}
+                    >
+                      <Feather
+                        name="credit-card"
+                        size={18}
+                        color={paymentMethod === 'card' ? primaryColor : '#94A3B8'}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
+                          💳 Suscripción Mensual Estándar
+                        </Text>
+                        <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
+                          Facturación según el plan elegido abajo
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+
+                  {paymentMethod === 'promo_code' ? (
+                    <View style={{ backgroundColor: 'rgba(0,0,0,0.4)', padding: 16, borderRadius: 14, borderWidth: 1, borderColor: validatedPromoObj ? '#10B981' : 'rgba(255,255,255,0.08)' }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '900', textTransform: 'uppercase' }}>
+                          Ingresa tu Cupón VIP (1 solo uso)
+                        </Text>
+                        {validatedPromoObj ? (
+                          <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '900' }}>
+                            ✓ CUPÓN VÁLIDO Y DISPONIBLE
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 10 }}>
+                        <TextInput
+                          style={[
+                            styles.formInput,
+                            {
+                              flex: 1,
+                              height: 50,
+                              fontWeight: '900',
+                              letterSpacing: 1.5,
+                              borderColor: validatedPromoObj ? '#10B981' : promoErrorMsg ? '#EF4444' : 'rgba(255,255,255,0.12)',
+                            },
+                          ]}
+                          placeholder="Ej: PICKTIME-VIP"
+                          placeholderTextColor="#64748B"
+                          autoCapitalize="characters"
+                          editable={!validatedPromoObj}
+                          value={promoCodeInput}
+                          onChangeText={(txt) => {
+                            setPromoCodeInput(txt.toUpperCase());
+                            setPromoErrorMsg('');
+                          }}
+                        />
+
+                        {validatedPromoObj ? (
+                          <TouchableOpacity
+                            onPress={() => {
+                              setValidatedPromoObj(null);
+                              setPromoCodeInput('');
+                            }}
+                            style={{
+                              backgroundColor: 'rgba(239, 68, 68, 0.16)',
+                              borderWidth: 1,
+                              borderColor: '#EF4444',
+                              height: 50,
+                              paddingHorizontal: 18,
+                              borderRadius: 12,
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>Cambiar Cupón</Text>
+                          </TouchableOpacity>
+                        ) : (
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={handleValidatePromoCodeInStep4}
+                            disabled={isValidatingPromo}
+                            style={{
+                              backgroundColor: '#10B981',
+                              height: 50,
+                              paddingHorizontal: 22,
+                              borderRadius: 12,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 8,
+                            }}
+                          >
+                            {isValidatingPromo ? (
+                              <ActivityIndicator color="#FFFFFF" size="small" />
+                            ) : (
+                              <>
+                                <Feather name="check-circle" size={16} color="#FFFFFF" />
+                                <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
+                                  Validar Cupón
+                                </Text>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      {promoErrorMsg ? (
+                        <Text style={{ color: '#EF4444', fontSize: 12.5, fontWeight: '700', marginTop: 8 }}>
+                          {promoErrorMsg}
+                        </Text>
+                      ) : null}
+
+                      {validatedPromoObj ? (
+                        <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(16, 185, 129, 0.25)', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Ionicons name="checkmark-done-circle" size={18} color="#10B981" />
+                          <Text style={{ color: '#E2E8F0', fontSize: 12.5, flex: 1 }}>
+                            Código <Text style={{ color: '#10B981', fontWeight: '900' }}>{validatedPromoObj.code}</Text> verificado en <Text style={{ fontWeight: '700' }}>public.promo_codes</Text>. Al completar el registro quedará marcado como usado para tu negocio.
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
+                </View>
                 
                 <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 24, width: '100%', justifyContent: 'center' }}>
                   {plans.map((plan, idx) => (
