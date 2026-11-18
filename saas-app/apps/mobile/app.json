@@ -32,7 +32,7 @@
     "web": {
       "bundler": "metro",
       "output": "server",
-      "favicon": "./assets/images/pick_time_book.ico"
+      "favicon": "./assets/images/logopicktime.jpg"
     },
     "plugins": [
       "expo-router",
@@ -44,7 +44,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#000000"
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true

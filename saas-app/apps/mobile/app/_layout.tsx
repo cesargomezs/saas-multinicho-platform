@@ -1,55 +1,63 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, Image, StyleSheet, Animated, Easing, StatusBar, Dimensions } from 'react-native';
+import { View, Text, Image, StyleSheet, Animated, Easing, StatusBar, Dimensions, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 
-// Evita que Expo retenga la pantalla blanca nativa más de lo necesario
-SplashScreen.preventAutoHideAsync().catch(() => {});
+if (Platform.OS !== 'web') {
+  SplashScreen.preventAutoHideAsync().catch(() => {});
+}
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { width: NATIVE_WIDTH, height: NATIVE_HEIGHT } = Dimensions.get('window');
+const IS_WEB = Platform.OS === 'web';
+const USE_NATIVE_DRIVER = !IS_WEB;
 
 export default function RootLayout() {
+  // En Web esperamos el montaje del cliente antes de hidratar rutas con window/localStorage/Date
+  // Esto elimina al 100% el error "Hydration failed because the server rendered HTML didn't match the client"
+  const [isWebClientReady, setIsWebClientReady] = useState(!IS_WEB);
   const [showCustomSplash, setShowCustomSplash] = useState(true);
+
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(0.88)).current;
   const scissorsAnim = useRef(new Animated.Value(-85)).current;
   const iconsAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // 1. Apagar el splash blanco de Expo Go apenas cargue el JS
-    SplashScreen.hideAsync().catch(() => {});
+    if (IS_WEB) {
+      setIsWebClientReady(true);
+    } else {
+      SplashScreen.hideAsync().catch(() => {});
+    }
 
-    // 2. Animación del logo grande + tijeras cortando hacia el calendario + íconos de servicios
     Animated.parallel([
       Animated.spring(scaleAnim, {
         toValue: 1,
         friction: 6,
         tension: 45,
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
       Animated.timing(scissorsAnim, {
         toValue: 85,
         duration: 1700,
         easing: Easing.inOut(Easing.quad),
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
       Animated.timing(iconsAnim, {
         toValue: 1,
         duration: 900,
         delay: 250,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }),
     ]).start();
 
-    // 3. Al terminar, desvanecer suavemente y dar paso al Stack principal
     const timer = setTimeout(() => {
       Animated.timing(fadeAnim, {
         toValue: 0,
         duration: 400,
-        useNativeDriver: true,
+        useNativeDriver: USE_NATIVE_DRIVER,
       }).start(() => {
         setShowCustomSplash(false);
       });
@@ -58,10 +66,15 @@ export default function RootLayout() {
     return () => clearTimeout(timer);
   }, []);
 
-  // 🔒 MIENTRAS CARGA: Pantalla negra 100% centrada con Logo Grande + Tijeras + Íconos de Servicios
+  // En Web durante el render SSR estático devuelve un lienzo negro idéntico en servidor y cliente (0 Hydration Error)
+  if (IS_WEB && !isWebClientReady) {
+    return <View style={styles.ssrBlankCanvas} />;
+  }
+
+  // 🔒 MIENTRAS CARGA: Estilos separados para Nativo (iOS/Android grande) vs Web
   if (showCustomSplash) {
     return (
-      <View style={styles.fullBlackScreen}>
+      <View style={IS_WEB ? styles.fullBlackScreenWeb : styles.fullBlackScreenNative}>
         <StatusBar barStyle="light-content" />
         <Animated.View
           style={{
@@ -73,11 +86,11 @@ export default function RootLayout() {
             width: '100%',
           }}
         >
-          {/* Contenedor del Logo Ampliado (recorta el exceso de borde negro y destaca el diseño) */}
-          <View style={styles.logoContainer}>
+          {/* Contenedor del Logo Ampliado con estilos dedicados para iOS/Android vs Web */}
+          <View style={IS_WEB ? styles.logoContainerWeb : styles.logoContainerNative}>
             <Image
               source={require('../assets/images/logopicktime.jpg')}
-              style={styles.logo}
+              style={IS_WEB ? styles.logoWeb : styles.logoNative}
               resizeMode="contain"
             />
           </View>
@@ -158,27 +171,60 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#05070C',
   },
-  fullBlackScreen: {
+  ssrBlankCanvas: {
     flex: 1,
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT,
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#000000',
+  },
+
+  // 📱 ESTILOS NATIVOS (iOS y Android — Logo Grande y Pantalla Completa Exacta)
+  fullBlackScreenNative: {
+    flex: 1,
+    width: NATIVE_WIDTH,
+    height: NATIVE_HEIGHT,
     backgroundColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  logoContainer: {
-    width: Math.min(SCREEN_WIDTH * 0.92, 360),
-    height: 240,
+  logoContainerNative: {
+    width: Math.min(NATIVE_WIDTH * 0.94, 380),
+    height: 270,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
     marginBottom: 18,
   },
-  logo: {
-    width: '100%',
-    height: '100%',
-    transform: [{ scale: 1.45 }], // Amplía el gráfico central eliminando el margen negro vacío
+  logoNative: {
+    width: Math.min(NATIVE_WIDTH * 0.94, 380),
+    height: 270,
+    transform: [{ scale: 1.62 }], // Zoom amplio en iOS y Android para que el logo se vea grande e imponente
   },
+
+  // 💻 ESTILOS WEB (Navegador Desktop y Mobile Web)
+  fullBlackScreenWeb: {
+    flex: 1,
+    width: '100%',
+    minHeight: '100vh' as any,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoContainerWeb: {
+    width: 360,
+    maxWidth: '92%',
+    height: 250,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    marginBottom: 18,
+  },
+  logoWeb: {
+    width: 360,
+    height: 250,
+    transform: [{ scale: 1.48 }],
+  },
+
   cutLineWrapper: {
     width: 230,
     height: 36,

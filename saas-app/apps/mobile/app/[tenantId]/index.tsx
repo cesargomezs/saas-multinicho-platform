@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator, Share } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
@@ -623,7 +623,7 @@ interface ReviewItem { id: string; clientKey: string; clientName: string; rating
 interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; }
 interface VapiVoiceConfig { isActive?: boolean; phoneNumber?: string; privateApiKey?: string; phoneNumberId?: string; assistantId?: string; languageMode?: 'bilingual' | 'es' | 'en'; transferPhone?: string; webhookBaseUrl?: string; allowUrgentOverride?: boolean; lastSyncedAt?: string; }
 interface TelegramChannelConfig { isActive?: boolean; channelName?: string; chatId?: string; botToken?: string; notifyNewAppointments?: boolean; notifyRecordings?: boolean; notifyConfirmationsAndCancels?: boolean; notifyPOSClosures?: boolean; updatedAt?: string; }
-interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; telegramConfig?: TelegramChannelConfig; }
+interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; telegramConfig?: TelegramChannelConfig; staffPortalPin?: string; }
 interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
 interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
 interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
@@ -955,6 +955,9 @@ export default function TenantDashboardScreen() {
   const [mechanicPin, setMechanicPin] = useState('');
   const [showMechanicPassword, setShowMechanicPassword] = useState(false);
   const [isAuthenticatingStaff, setIsAuthenticatingStaff] = useState(false);
+  const [staffAccessPin, setStaffAccessPin] = useState('1234');
+  const [showStaffAccessPin, setShowStaffAccessPin] = useState(false);
+  const [isSavingStaffPin, setIsSavingStaffPin] = useState(false);
   
   const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad' | 'recepcion_ia'>('today');
   const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
@@ -967,7 +970,8 @@ export default function TenantDashboardScreen() {
   const [reportsData, setReportsData] = useState<ReportItem[]>([]);
   const [annualReportsData, setAnnualReportsData] = useState<ReportItem[]>([]);
   const [showTrafficChart, setShowTrafficChart] = useState<boolean>(true);
-  const [hoveredMonthIdx, setHoveredMonthIdx] = useState<number | null>(null);
+  const [hoveredMonthIdx, setHoveredMonthIdx] = useState<number | null>(() => new Date().getMonth());
+  const trafficChartScrollRef = useRef<any>(null);
   const [isPrinting, setIsPrinting] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
   const [cancellingOrder, setCancellingOrder] = useState<any | null>(null);
@@ -990,6 +994,9 @@ export default function TenantDashboardScreen() {
   const [newStaffName, setNewStaffName] = useState('');
   const [selectedStaffRole, setSelectedStaffRole] = useState('');
   const [customStaffRole, setCustomStaffRole] = useState('');
+  const [isStaffRoleDropdownOpen, setIsStaffRoleDropdownOpen] = useState(false);
+  const [isCatalogServiceDropdownOpen, setIsCatalogServiceDropdownOpen] = useState(false);
+  const [isCatalogDurationDropdownOpen, setIsCatalogDurationDropdownOpen] = useState(false);
   
   const [finalCost, setFinalCost] = useState('');
   const [exitMileage, setExitMileage] = useState('');
@@ -1184,6 +1191,8 @@ export default function TenantDashboardScreen() {
   defaultStart.setDate(defaultStart.getDate() - 30);
   const [reportStartDate, setReportStartDate] = useState<string>(defaultStart.toISOString().split('T')[0] || '');
   const [reportEndDate, setReportEndDate] = useState<string>(new Date().toISOString().split('T')[0] || '');
+  const [activeReportDateField, setActiveReportDateField] = useState<'start' | 'end' | null>(null);
+  const [reportCalendarMonth, setReportCalendarMonth] = useState<Date>(() => new Date());
   const [reportMechanic, setReportMechanic] = useState('');
   const [reportPage, setReportPage] = useState(1);
   const ITEMS_PER_PAGE = 10;
@@ -1594,6 +1603,13 @@ export default function TenantDashboardScreen() {
           setTenantInfo(updatedTenant);
           setLocalHours(mergedHours);
           if (parsedPortfolio) setLocalPortfolio(parsedPortfolio);
+          const initialPin =
+            parsedLoyalty?.staffPortalPin ||
+            dataInfo.tenant?.portalPin ||
+            dataInfo.tenant?.portal_pin ||
+            '1234';
+          setStaffAccessPin(String(initialPin));
+
           if (parsedLoyalty) {
             setLocalLoyalty(parsedLoyalty);
             if (Array.isArray(parsedLoyalty.reviews)) {
@@ -1843,8 +1859,11 @@ export default function TenantDashboardScreen() {
 
   // 📱 Selector universal de imágenes para iOS / Android (Antes, Después, Portafolio y Catálogo)
   const handleNativeImagePick = async (target: 'old' | 'new' | 'portfolio' | 'catalog') => {
+    if (Platform.OS === 'web') return;
     try {
-      const ImagePicker = await import('expo-image-picker');
+      const dynamicReq: any = typeof require !== 'undefined' ? require : null;
+      const ImagePicker = dynamicReq ? dynamicReq('expo-image-picker') : null;
+      if (!ImagePicker) return;
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
         alert('Se requiere permiso para acceder a tus fotos.');
@@ -2321,6 +2340,50 @@ export default function TenantDashboardScreen() {
     if (isDental) return ['Odontólogo General', 'Ortodoncista', 'Endodoncista / Cirujano Oral', 'Implantólogo / Rehabilitador', 'Higienista Dental'];
     return ['Especialista', 'Técnico', 'Asistente', 'Gerente'];
   }, [isAutomotive, isSpa, isBarbershop, isLegal, isDental]);
+
+  // 📋 Plantillas predefinidas de Servicios por Nicho para el modal "+ Nuevo Servicio"
+  const availableServiceTemplates = useMemo(() => {
+    if (isBarbershop) {
+      return [
+        { name: 'Corte Clásico / Fade', price: '35', duration: '30', desc: 'Corte De Cabello Personalizado Con Degradado Limpio Y Peinado.' },
+        { name: 'Corte + Perfilado De Barba VIP', price: '50', duration: '45', desc: 'Corte Completo, Perfilado De Barba Con Toalla Caliente Y Vapor De Ozono.' },
+        { name: 'Perfilado Y Ritual De Barba', price: '25', duration: '30', desc: 'Afeitado Tradicional Con Navaja, Aceites Esenciales Y Toalla Caliente.' },
+        { name: 'Corte De Niño (Kids Cut)', price: '28', duration: '30', desc: 'Corte Moderno O Clásico Para Niños Con Paciencia Y Estilo.' },
+        { name: 'Cejas + Limpieza Facial Express', price: '20', duration: '15', desc: 'Perfilado De Cejas Con Navaja Y Mascarilla Negra Purificante.' },
+      ];
+    }
+    if (isSpa) {
+      return [
+        { name: 'Masaje Relajante Cuerpo Completo', price: '85', duration: '60', desc: 'Terapia De Relajación Profunda Con Aromaterapia Y Aceites Tibios.' },
+        { name: 'Limpieza Facial Profunda', price: '75', duration: '60', desc: 'Extracción De Impurezas, Hidratación Y Máscara LED Rejuvenecedora.' },
+        { name: 'Masaje Descontracturante (Tejido Profundo)', price: '95', duration: '60', desc: 'Alivio De Tensión Muscular En Espalda, Cuello Y Hombros.' },
+        { name: 'Drenaje Linfático / Reductor', price: '90', duration: '60', desc: 'Activación De Circulación Y Eliminación De Retención De Líquidos.' },
+      ];
+    }
+    if (isLegal) {
+      return [
+        { name: 'Consulta Legal Inicial (Evaluación)', price: '100', duration: '45', desc: 'Análisis De Viabilidad Del Caso, Revisión De Documentos Y Estrategia Legal.' },
+        { name: 'Asesoría De Inmigración / Petición Familiar', price: '150', duration: '60', desc: 'Revisión De Estatus Migratorio, Visas, Residencia O Ciudadanía.' },
+        { name: 'Consulta De Derecho De Familia / Divorcio', price: '120', duration: '45', desc: 'Custodia, Manutención, Acuerdos Prenupciales Y Divorcio.' },
+        { name: 'Redacción Y Revisión De Contratos', price: '180', duration: '60', desc: 'Blindaje Legal Para Contratos Comerciales, Civiles O Laborales.' },
+      ];
+    }
+    if (isDental) {
+      return [
+        { name: 'Valoración Odontológica + Diagnóstico', price: '50', duration: '30', desc: 'Examen Clínico Completo Y Plan De Tratamiento Personalizado.' },
+        { name: 'Limpieza Dental Ultrasónica (Profilaxis)', price: '90', duration: '45', desc: 'Eliminación De Sarro, Pulido Dental Y Aplicación De Flúor.' },
+        { name: 'Blanqueamiento Dental LED', price: '220', duration: '60', desc: 'Aclaramiento Dental Seguro En Consultorio Con Gel De Alta Concentración.' },
+        { name: 'Urgencia / Dolor Dental', price: '80', duration: '30', desc: 'Atención Inmediata Para Dolor Agudo, Fractura O Infección.' },
+      ];
+    }
+    return [
+      { name: 'Cambio De Aceite Sintético + Filtro', price: '75', duration: '45', desc: 'Aceite Full Sintético, Filtro Nuevo Y Revisión De 15 Puntos De Seguridad.' },
+      { name: 'Diagnóstico Computarizado (Scanner)', price: '65', duration: '30', desc: 'Lectura De Códigos Check Engine Y Revisión Electrónica Completa.' },
+      { name: 'Servicio De Frenos (Pastillas Y Discos)', price: '160', duration: '60', desc: 'Inspección Y Reemplazo De Pastillas De Freno Con Purgado De Líquido.' },
+      { name: 'Alineación Y Balanceo Computarizado', price: '85', duration: '45', desc: 'Ajuste De Geometría De Suspensión Y Balanceo De Las 4 Ruedas.' },
+      { name: 'Mantenimiento General Preventivo', price: '140', duration: '90', desc: 'Revisión De Niveles, Frenos, Suspensión, Batería Y Filtros.' },
+    ];
+  }, [isBarbershop, isSpa, isLegal, isDental]);
 
   const activeStaffList = useMemo(() => staffList.filter(s => s.isActive !== false), [staffList]);
   const activeCatalogServices = useMemo(() => servicesList.filter(s => s.isActive !== false), [servicesList]);
@@ -3085,26 +3148,136 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     } catch (error) { alert('Error agendando cita.'); } finally { setIsSubmitting(false); }
   };
 
-  const exportToCSV = () => {
+  const exportToCSV = async () => {
+    const headers = ["Fecha", "Identificador", "Beneficio / Promo", "Cliente", "Servicio", "Personal", "Total Cobrado"];
+    const csvRows = reportsData.map(r => {
+      const promoInfo = getReportDiscountInfo(r, servicesList);
+      const dateFormatted = r.date ? new Date(r.date).toLocaleDateString('es-ES') : (r.createdAt ? new Date(r.createdAt).toLocaleDateString('es-ES') : 'N/A');
+      return `${dateFormatted},${isAutomotive ? (r.plate || 'N/A') : (r.id ? r.id.slice(0,6).toUpperCase() : 'N/A')},${promoInfo ? promoInfo.label : 'Tarifa Regular'},${r.clientName || ''},${r.service || ''},${r.mechanicName || ''},$${r.cost || r.finalCost || 0}`;
+    });
+    const rawCsv = headers.join(",") + "\n" + csvRows.join("\n");
+
     if (Platform.OS === 'web') {
-      const headers = ["Fecha", "Identificador", "Beneficio / Promo", "Cliente", "Servicio", "Personal", "Total Cobrado"];
-      const csvRows = reportsData.map(r => {
-        const promoInfo = getReportDiscountInfo(r, servicesList);
-        return `${r.date || r.createdAt || ''},${isAutomotive ? r.plate : (r.id ? r.id.slice(0,6).toUpperCase() : '')},${promoInfo ? promoInfo.label : 'Tarifa Regular'},${r.clientName || ''},${r.service || ''},${r.mechanicName || ''},$${r.cost || r.finalCost || 0}`;
-      });
-      const csvContent = "data:text/csv;charset=utf-8," + headers.join(",") + "\n" + csvRows.join("\n");
+      const csvContent = "data:text/csv;charset=utf-8," + rawCsv;
       const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a"); link.href = url; link.setAttribute("download", `Reporte_AutoFlow_${reportStartDate}_al_${reportEndDate}.csv`);
       document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
+      return;
     }
+
+    try {
+      await Share.share({
+        title: `Reporte CSV (${reportStartDate} al ${reportEndDate})`,
+        message: rawCsv,
+      });
+    } catch (_e) {}
   };
 
-  const exportToPDF = () => {
+  // 🖨️ Generador de archivo PDF real en memoria (Estándar PDF 1.4 nativo sin librerías externas)
+  const buildRealPdfBase64 = (linesArr: string[]): string => {
+    const sanitizePdfText = (str: string) =>
+      String(str || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^\x20-\x7E]/g, ' ')
+        .replace(/\\/g, '\\\\')
+        .replace(/\(/g, '\\(')
+        .replace(/\)/g, '\\)');
+
+    const maxLines = 44;
+    const safeLines = linesArr.slice(0, maxLines);
+    let streamContent = 'BT\n/F1 10 Tf\n50 750 Td\n15 TL\n';
+    safeLines.forEach((line, idx) => {
+      const clean = sanitizePdfText(line);
+      if (idx === 0) {
+        streamContent += `/F1 13 Tf (${clean}) Tj\n/F1 10 Tf\n`;
+      } else {
+        streamContent += `T* (${clean}) Tj\n`;
+      }
+    });
+    streamContent += 'ET';
+
+    const objs = [
+      '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+      '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+      '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n',
+      `4 0 obj\n<< /Length ${streamContent.length} >>\nstream\n${streamContent}\nendstream\nendobj\n`,
+      '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+    ];
+
+    let pdfStr = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    objs.forEach((o) => {
+      offsets.push(pdfStr.length);
+      pdfStr += o;
+    });
+    const xrefStart = pdfStr.length;
+    pdfStr += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+    offsets.forEach((off) => {
+      pdfStr += `${String(off).padStart(10, '0')} 00000 n \n`;
+    });
+    pdfStr += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let b64 = '';
+    for (let i = 0; i < pdfStr.length; i += 3) {
+      const b0 = pdfStr.charCodeAt(i) & 0xff;
+      const b1 = i + 1 < pdfStr.length ? pdfStr.charCodeAt(i + 1) & 0xff : 0;
+      const b2 = i + 2 < pdfStr.length ? pdfStr.charCodeAt(i + 2) & 0xff : 0;
+      b64 += chars[b0 >> 2];
+      b64 += chars[((b0 & 3) << 4) | (b1 >> 4)];
+      b64 += i + 1 < pdfStr.length ? chars[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+      b64 += i + 2 < pdfStr.length ? chars[b2 & 63] : '=';
+    }
+    return `data:application/pdf;base64,${b64}`;
+  };
+
+  const exportToPDF = async () => {
     if (Platform.OS === 'web') {
       setIsPrinting(true);
-      setTimeout(() => { window.print(); setIsPrinting(false); }, 800); 
-    } else { alert('Optimizado para Web.'); }
+      setTimeout(() => { window.print(); setIsPrinting(false); }, 800);
+      return;
+    }
+
+    const textLines = reportsData.map((r: any, idx: number) => {
+      const dateStr = r.date ? new Date(r.date).toLocaleDateString('es-ES') : (r.createdAt ? new Date(r.createdAt).toLocaleDateString('es-ES') : 'N/A');
+      const promoInfo = getReportDiscountInfo(r, servicesList);
+      return `${idx + 1}. [${dateStr}] ${toTitleCase(r.clientName || 'Cliente')} - ${toTitleCase(r.service || 'Servicio')} ($${Number(r.cost || r.finalCost || 0).toLocaleString('en-US')}) - ${promoInfo ? promoInfo.label : 'Tarifa Regular'}`;
+    });
+
+    const reportLines = [
+      `REPORTE OFICIAL DE SERVICIOS - ${(tenantInfo?.name || 'AutoFlow').toUpperCase()}`,
+      `Periodo: ${reportStartDate} al ${reportEndDate}`,
+      `Total de Ingresos: $${totalRevenue.toLocaleString('en-US')}   |   Servicios Completados: ${reportsData.length}`,
+      `-------------------------------------------------------------------------`,
+      ...(textLines.length > 0 ? textLines : ['Sin registros en este rango de fechas.']),
+    ];
+
+    const summaryReport = reportLines.join('\n');
+    const pdfDataUri = buildRealPdfBase64(reportLines);
+
+    try {
+      if (Platform.OS === 'ios') {
+        // En iOS pasamos UNICAMENTE `url: pdfDataUri` (sin `message`) para que iOS comparta el PDF real y nunca lo convierta en texto
+        await Share.share({
+          title: `Reporte_${(tenantInfo?.name || 'AutoFlow').replace(/\s+/g, '_')}_${reportStartDate}.pdf`,
+          url: pdfDataUri,
+        });
+      } else {
+        await Share.share({
+          title: `Reporte Oficial ${tenantInfo?.name || 'AutoFlow'}`,
+          message: summaryReport,
+        });
+      }
+    } catch (_err) {
+      try {
+        await Share.share({
+          title: `Reporte Oficial ${tenantInfo?.name || 'AutoFlow'}`,
+          message: summaryReport,
+        });
+      } catch (_e2) {}
+    }
   };
 
   const handleAddStaff = async () => {
@@ -3116,7 +3289,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       if (res.ok) {
         const data = await res.json();
         setStaffList([...staffList, data.member || { id: Date.now().toString(), name: finalName, role: finalRole, isActive: true }]);
-        setNewStaffName(''); setSelectedStaffRole(''); setCustomStaffRole('');
+        setNewStaffName(''); setSelectedStaffRole(''); setCustomStaffRole(''); setIsStaffRoleDropdownOpen(false);
       }
     } catch (err) { alert('Error guardando staff'); }
   };
@@ -3127,6 +3300,50 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       await apiFetch(`/api/staff/${id}`, { method: 'PUT', body: JSON.stringify({ isActive: nextStatus }) });
       setStaffList(staffList.map(s => s.id === id ? { ...s, isActive: nextStatus } : s));
     } catch (err) { console.error(err); }
+  };
+
+  // 🔐 Actualizar el Código PIN de Empleados en tiempo real (revoca acceso inmediato al personal que se retira)
+  const handleSaveStaffPin = async () => {
+    const cleanPin = staffAccessPin.trim().replace(/\D/g, '');
+    if (cleanPin.length < 4 || cleanPin.length > 6) {
+      alert(tr('El código PIN de empleados debe tener entre 4 y 6 números.', 'The employee PIN must be between 4 and 6 digits.'));
+      return;
+    }
+    setIsSavingStaffPin(true);
+    try {
+      const updatedLoyalty: LoyaltyConfig = {
+        ...localLoyalty,
+        reviews: reviewsList,
+        campaigns: pushCampaignsList,
+        vapiConfig,
+        telegramConfig,
+        staffPortalPin: cleanPin,
+      };
+      const res = await apiFetch('/api/tenants/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          portalPin: cleanPin,
+          loyaltyConfig: updatedLoyalty,
+        }),
+      });
+      if (res.ok) {
+        setStaffAccessPin(cleanPin);
+        setLocalLoyalty(updatedLoyalty);
+        setTenantInfo((prev) => (prev ? { ...prev, loyaltyConfig: updatedLoyalty, portalPin: cleanPin } as any : prev));
+        alert(
+          tr(
+            `🔒 ¡Código de acceso actualizado a "${cleanPin}"!\n\nEl código anterior quedó invalidado de inmediato. Solo quienes tengan este nuevo PIN podrán ver las citas y cerrar órdenes.`,
+            `🔒 Staff access code updated to "${cleanPin}"!\n\nThe previous code is now invalid.`
+          )
+        );
+      } else {
+        alert(tr('No se pudo actualizar el PIN en el servidor.', 'Could not update PIN on the server.'));
+      }
+    } catch (_e) {
+      alert(tr('Error de red al guardar el nuevo PIN.', 'Network error saving new PIN.'));
+    } finally {
+      setIsSavingStaffPin(false);
+    }
   };
 
   const handleToggleServiceStatus = async (id: string, currentStatus: boolean) => {
@@ -4503,18 +4720,30 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     }
                     setIsAuthenticatingStaff(true);
                     try {
-                      const res = await apiFetch('/api/tenants/auth-staff', {
-                        method: 'POST',
-                        body: JSON.stringify({ password: cleanPin }),
-                      });
-                      const json = await res.json();
-                      if (res.ok && json.success) {
-                        setPortalAccessRole('staff');
-                        setAgendaFilter('today');
-                        setIsMechanicAuth(true);
-                        setMechanicPin('');
+                      const configuredPin = localLoyalty?.staffPortalPin || (tenantInfo as any)?.portalPin || (tenantInfo as any)?.portal_pin;
+                      if (configuredPin) {
+                        if (cleanPin === String(configuredPin).trim()) {
+                          setPortalAccessRole('staff');
+                          setAgendaFilter('today');
+                          setIsMechanicAuth(true);
+                          setMechanicPin('');
+                        } else {
+                          alert(t.wrongPin);
+                        }
                       } else {
-                        alert(json.message || t.wrongPin);
+                        const res = await apiFetch('/api/tenants/auth-staff', {
+                          method: 'POST',
+                          body: JSON.stringify({ password: cleanPin }),
+                        });
+                        const json = await res.json();
+                        if (res.ok && json.success) {
+                          setPortalAccessRole('staff');
+                          setAgendaFilter('today');
+                          setIsMechanicAuth(true);
+                          setMechanicPin('');
+                        } else {
+                          alert(json.message || t.wrongPin);
+                        }
                       }
                     } catch (_e) {
                       alert(tr('Error de conexión al validar el código.', 'Connection error validating access code.'));
@@ -5820,11 +6049,11 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 ) : null}
 
                 {agendaFilter === 'reports' ? (
-                  <View>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16, marginBottom: 24, display: isPrinting ? 'none' : 'flex' }}>
-                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0 }]}>Facturación y Analítica de Tráfico</Text>
+                  <View style={{ width: '100%', gap: isMobile ? 18 : 24 }}>
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 12, display: isPrinting ? 'none' : 'flex' }}>
+                      <Text style={[styles.sectionTitle, { color: tColor.text, marginBottom: 0, fontSize: isMobile ? 20 : 22 }]}>Facturación y Analítica de Tráfico</Text>
                       <TouchableOpacity 
-                        style={[styles.secondaryButton, { backgroundColor: showTrafficChart ? brandColor : tColor.input, borderColor: showTrafficChart ? brandColor : tColor.border, paddingVertical: 10, paddingHorizontal: 18 }]} 
+                        style={[styles.secondaryButton, { backgroundColor: showTrafficChart ? brandColor : tColor.input, borderColor: showTrafficChart ? brandColor : tColor.border, paddingVertical: 11, paddingHorizontal: 16 }]} 
                         onPress={() => setShowTrafficChart(!showTrafficChart)}
                       >
                         <Text style={[styles.secondaryButtonText, { color: showTrafficChart ? '#FFF' : tColor.text, fontSize: 13 }]}>
@@ -5833,26 +6062,26 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </TouchableOpacity>
                     </View>
                     
-                    <View style={[styles.bentoGrid, { marginBottom: 32, display: isPrinting ? 'none' : 'flex' }]}>
-                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: brandColor, padding: 24 }]}>
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', flexWrap: 'wrap', gap: isMobile ? 12 : 20, width: '100%', display: isPrinting ? 'none' : 'flex' }}>
+                      <View style={[styles.glassCard, { flex: isMobile ? undefined : 1, minWidth: isMobile ? '100%' : 240, backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: brandColor, padding: isMobile ? 18 : 24 }]}>
                         <Text style={[styles.kpiLabel, { color: tColor.muted }]}>TOTAL DE INGRESOS</Text>
-                        <Text style={[styles.kpiValue, { color: tColor.text }]}>${totalRevenue.toLocaleString('en-US')}</Text>
+                        <Text style={[styles.kpiValue, { color: tColor.text, fontSize: isMobile ? 28 : 36 }]}>${totalRevenue.toLocaleString('en-US')}</Text>
                       </View>
-                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24 }]}>
+                      <View style={[styles.glassCard, { flex: isMobile ? undefined : 1, minWidth: isMobile ? '100%' : 240, backgroundColor: tColor.card, borderColor: tColor.border, padding: isMobile ? 18 : 24 }]}>
                         <Text style={[styles.kpiLabel, { color: tColor.muted }]}>SERVICIOS COMPLETADOS</Text>
-                        <Text style={[styles.kpiValue, { color: tColor.text }]}>{reportsData.length}</Text>
+                        <Text style={[styles.kpiValue, { color: tColor.text, fontSize: isMobile ? 28 : 36 }]}>{reportsData.length}</Text>
                       </View>
-                      <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: '#3B82F6', padding: 24 }]}>
+                      <View style={[styles.glassCard, { flex: isMobile ? undefined : 1, minWidth: isMobile ? '100%' : 240, backgroundColor: tColor.card, borderColor: tColor.border, borderLeftWidth: 4, borderLeftColor: '#3B82F6', padding: isMobile ? 18 : 24 }]}>
                         <Text style={[styles.kpiLabel, { color: tColor.muted }]}>PROMOS / REFERIDOS APLICADOS</Text>
-                        <Text style={[styles.kpiValue, { color: '#3B82F6' }]}>
+                        <Text style={[styles.kpiValue, { color: '#3B82F6', fontSize: isMobile ? 28 : 36 }]}>
                           {reportsData.filter(r => getReportDiscountInfo(r, servicesList) !== null).length}
                         </Text>
                       </View>
                     </View>
 
                     {(showTrafficChart && !isPrinting) ? (
-                      <View style={[styles.bentoGrid, { marginBottom: 32 }]}>
-                        <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, flex: 2, minWidth: isMobile ? '100%' : 540, padding: 24 }]}>
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 18 : 24, width: '100%' }}>
+                        <View style={[styles.glassCard, { flex: isMobile ? undefined : 2, width: '100%', backgroundColor: tColor.card, borderColor: tColor.border, padding: isMobile ? 18 : 24 }]}>
                           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
                             <View style={{ flex: 1, minWidth: 240 }}>
                               <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>📈 Tráfico Mensual y Recaudo ({new Date().getFullYear()})</Text>
@@ -5953,7 +6182,20 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             )}
                           </View>
 
-                          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                          <ScrollView
+                            ref={trafficChartScrollRef}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            onLayout={() => {
+                              const currentM = new Date().getMonth();
+                              setHoveredMonthIdx((prev) => (prev === null ? currentM : prev));
+                              if (currentM >= 5) {
+                                setTimeout(() => {
+                                  trafficChartScrollRef.current?.scrollTo({ x: Math.max(0, (currentM - 3) * 48), animated: true });
+                                }, 120);
+                              }
+                            }}
+                          >
                             <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', height: 215, minWidth: 560, width: '100%', paddingTop: 36, paddingBottom: 8, gap: 10, borderBottomWidth: 1, borderColor: tColor.border }}>
                               {monthlyTrafficStats.items.map((m) => {
                                 const isHovered = hoveredMonthIdx === m.index;
@@ -6026,7 +6268,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </ScrollView>
                         </View>
 
-                        <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, flex: 1, minWidth: isMobile ? '100%' : 300, padding: 24, justifyContent: 'space-between' }]}>
+                        <View style={[styles.glassCard, { flex: isMobile ? undefined : 1, width: '100%', backgroundColor: tColor.card, borderColor: tColor.border, padding: isMobile ? 18 : 24, justifyContent: 'space-between' }]}>
                           <View>
                             <View style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, alignSelf: 'flex-start', marginBottom: 12, borderWidth: 1, borderColor: '#EF4444' }}>
                               <Text style={{ color: '#EF4444', fontSize: 11, fontWeight: '900' }}>💡 ALERTA DE TRÁFICO PARA EL DUEÑO</Text>
@@ -6050,7 +6292,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </View>
 
                           <TouchableOpacity 
-                            style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 12 }]} 
+                            style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 13 }]} 
                             onPress={() => {
                               setCampaignTitle(toTitleCase(`🔥 Promo Especial De ${monthlyTrafficStats.lowestMonthName}`));
                               setCampaignAudience('all_clients');
@@ -6058,30 +6300,302 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               setAgendaFilter('fidelidad');
                             }}
                           >
-                            <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>🎁 Crear Campaña en Fidelidad</Text>
+                            <Text style={[styles.primaryButtonText, { fontSize: 13.5 }]}>🎁 Crear Campaña en Fidelidad</Text>
                           </TouchableOpacity>
                         </View>
                       </View>
                     ) : null}
 
-                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 24, marginBottom: 32, flexDirection: isMobile ? 'column' : 'row', gap: 16, alignItems: isMobile ? 'stretch' : 'flex-end', zIndex: 10, display: isPrinting ? 'none' : 'flex' }]}>
-                      <View style={styles.filterGroup}>
-                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Desde:</Text>
-                        {Platform.OS === 'web' ? (
-                          <input type="date" className="web-input-override" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} />
-                        ) : (
-                          <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={reportStartDate} onChangeText={setReportStartDate} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} />
-                        )}
-                      </View>
-                      <View style={styles.filterGroup}>
-                        <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hasta:</Text>
-                        {Platform.OS === 'web' ? (
-                          <input type="date" className="web-input-override" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} />
-                        ) : (
-                          <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} value={reportEndDate} onChangeText={setReportEndDate} placeholder="YYYY-MM-DD" placeholderTextColor={tColor.muted} />
-                        )}
-                      </View>
-                      <View style={styles.filterGroup}>
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: isMobile ? 18 : 24, flexDirection: isMobile ? 'column' : 'row', gap: 14, alignItems: isMobile ? 'stretch' : 'flex-end', display: isPrinting ? 'none' : 'flex' }]}>
+                      {Platform.OS !== 'web' ? (
+                        /* 📅 SELECTOR DE FECHAS INTERACTIVO Y RANGOS RÁPIDOS PARA MÓVIL (SIN TECLADO NI "PASTE/SELECT") */
+                        <View style={{ width: '100%', gap: 12 }}>
+                          {/* Atajos rápidos de rango de fecha */}
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>⚡ Periodo Rápido:</Text>
+                            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                              {[
+                                {
+                                  label: 'Hoy',
+                                  apply: () => {
+                                    const now = new Date();
+                                    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                                    setReportStartDate(iso);
+                                    setReportEndDate(iso);
+                                    setActiveReportDateField(null);
+                                  },
+                                },
+                                {
+                                  label: 'Últimos 7 Días',
+                                  apply: () => {
+                                    const end = new Date();
+                                    const start = new Date();
+                                    start.setDate(end.getDate() - 7);
+                                    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                                    setReportStartDate(fmt(start));
+                                    setReportEndDate(fmt(end));
+                                    setActiveReportDateField(null);
+                                  },
+                                },
+                                {
+                                  label: 'Este Mes',
+                                  apply: () => {
+                                    const now = new Date();
+                                    const startIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+                                    const endIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                                    setReportStartDate(startIso);
+                                    setReportEndDate(endIso);
+                                    setActiveReportDateField(null);
+                                  },
+                                },
+                                {
+                                  label: 'Últimos 30 Días',
+                                  apply: () => {
+                                    const end = new Date();
+                                    const start = new Date();
+                                    start.setDate(end.getDate() - 30);
+                                    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                                    setReportStartDate(fmt(start));
+                                    setReportEndDate(fmt(end));
+                                    setActiveReportDateField(null);
+                                  },
+                                },
+                                {
+                                  label: `Año ${new Date().getFullYear()}`,
+                                  apply: () => {
+                                    const yr = new Date().getFullYear();
+                                    setReportStartDate(`${yr}-01-01`);
+                                    setReportEndDate(`${yr}-12-31`);
+                                    setActiveReportDateField(null);
+                                  },
+                                },
+                              ].map((preset, pIdx) => (
+                                <TouchableOpacity
+                                  key={pIdx}
+                                  activeOpacity={0.8}
+                                  onPress={preset.apply}
+                                  style={{
+                                    paddingVertical: 7,
+                                    paddingHorizontal: 12,
+                                    borderRadius: 10,
+                                    backgroundColor: tColor.input,
+                                    borderWidth: 1,
+                                    borderColor: tColor.border,
+                                  }}
+                                >
+                                  <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800' }}>{preset.label}</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </ScrollView>
+                          </View>
+
+                          {/* Botones Desde y Hasta que abren el calendario visual al tocarlos */}
+                          <View style={{ flexDirection: 'row', gap: 12, width: '100%' }}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={[styles.inputLabel, { color: tColor.muted }]}>Desde:</Text>
+                              <TouchableOpacity
+                                activeOpacity={0.85}
+                                onPress={() => {
+                                  const next = activeReportDateField === 'start' ? null : 'start';
+                                  setActiveReportDateField(next);
+                                  if (next && reportStartDate) {
+                                    const parts = reportStartDate.split('-').map(Number);
+                                    if (parts[0] && parts[1]) setReportCalendarMonth(new Date(parts[0], parts[1] - 1, 1));
+                                  }
+                                }}
+                                style={[
+                                  styles.formInput,
+                                  {
+                                    backgroundColor: tColor.input,
+                                    borderColor: activeReportDateField === 'start' ? brandColor : tColor.border,
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    paddingHorizontal: 12,
+                                  },
+                                ]}
+                              >
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+                                  <Feather name="calendar" size={15} color={brandColor} />
+                                  <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 13.5 }}>
+                                    {reportStartDate || 'Elegir fecha'}
+                                  </Text>
+                                </View>
+                                <Feather name={activeReportDateField === 'start' ? 'chevron-up' : 'chevron-down'} size={15} color={tColor.muted} />
+                              </TouchableOpacity>
+                            </View>
+
+                            <View style={{ flex: 1 }}>
+                              <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hasta:</Text>
+                              <TouchableOpacity
+                                activeOpacity={0.85}
+                                onPress={() => {
+                                  const next = activeReportDateField === 'end' ? null : 'end';
+                                  setActiveReportDateField(next);
+                                  if (next && reportEndDate) {
+                                    const parts = reportEndDate.split('-').map(Number);
+                                    if (parts[0] && parts[1]) setReportCalendarMonth(new Date(parts[0], parts[1] - 1, 1));
+                                  }
+                                }}
+                                style={[
+                                  styles.formInput,
+                                  {
+                                    backgroundColor: tColor.input,
+                                    borderColor: activeReportDateField === 'end' ? brandColor : tColor.border,
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    paddingHorizontal: 12,
+                                  },
+                                ]}
+                              >
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+                                  <Feather name="calendar" size={15} color={brandColor} />
+                                  <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 13.5 }}>
+                                    {reportEndDate || 'Elegir fecha'}
+                                  </Text>
+                                </View>
+                                <Feather name={activeReportDateField === 'end' ? 'chevron-up' : 'chevron-down'} size={15} color={tColor.muted} />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+
+                          {/* Calendario mensual desplegable al tocar "Desde" o "Hasta" */}
+                          {activeReportDateField ? (() => {
+                            const monthNames = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+                            const dayHeaders = ['Do', 'Lu', 'Ma', 'Mi', 'Ju', 'Vi', 'Sá'];
+                            const yr = reportCalendarMonth.getFullYear();
+                            const mo = reportCalendarMonth.getMonth();
+                            const firstDayWeek = new Date(yr, mo, 1).getDay();
+                            const daysInMonth = new Date(yr, mo + 1, 0).getDate();
+                            const selectedIso = activeReportDateField === 'start' ? reportStartDate : reportEndDate;
+
+                            const cells: (number | null)[] = [];
+                            for (let i = 0; i < firstDayWeek; i++) cells.push(null);
+                            for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+                            return (
+                              <View
+                                style={{
+                                  backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+                                  borderWidth: 1.5,
+                                  borderColor: brandColor,
+                                  borderRadius: 16,
+                                  padding: 14,
+                                  marginTop: 4,
+                                }}
+                              >
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                  <TouchableOpacity
+                                    onPress={() => setReportCalendarMonth(new Date(yr, mo - 1, 1))}
+                                    style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: tColor.input, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: tColor.border }}
+                                  >
+                                    <Feather name="chevron-left" size={16} color={tColor.text} />
+                                  </TouchableOpacity>
+
+                                  <View style={{ alignItems: 'center' }}>
+                                    <Text style={{ color: brandColor, fontSize: 10.5, fontWeight: '900', textTransform: 'uppercase' }}>
+                                      Seleccionando fecha {activeReportDateField === 'start' ? 'DESDE' : 'HASTA'}
+                                    </Text>
+                                    <Text style={{ color: tColor.text, fontSize: 15, fontWeight: '900', marginTop: 2 }}>
+                                      {monthNames[mo]} {yr}
+                                    </Text>
+                                  </View>
+
+                                  <TouchableOpacity
+                                    onPress={() => setReportCalendarMonth(new Date(yr, mo + 1, 1))}
+                                    style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: tColor.input, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: tColor.border }}
+                                  >
+                                    <Feather name="chevron-right" size={16} color={tColor.text} />
+                                  </TouchableOpacity>
+                                </View>
+
+                                <View style={{ flexDirection: 'row', marginBottom: 6 }}>
+                                  {dayHeaders.map((dh) => (
+                                    <View key={dh} style={{ flex: 1, alignItems: 'center' }}>
+                                      <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800' }}>{dh}</Text>
+                                    </View>
+                                  ))}
+                                </View>
+
+                                <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                                  {cells.map((dayNum, cIdx) => {
+                                    if (!dayNum) {
+                                      return <View key={`empty-${cIdx}`} style={{ width: '14.28%', height: 38 }} />;
+                                    }
+                                    const isoStr = `${yr}-${String(mo + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                                    const isSel = selectedIso === isoStr;
+                                    const isInRange = reportStartDate && reportEndDate && isoStr >= reportStartDate && isoStr <= reportEndDate;
+
+                                    return (
+                                      <TouchableOpacity
+                                        key={isoStr}
+                                        activeOpacity={0.8}
+                                        onPress={() => {
+                                          if (activeReportDateField === 'start') {
+                                            setReportStartDate(isoStr);
+                                            if (reportEndDate && isoStr > reportEndDate) {
+                                              setReportEndDate(isoStr);
+                                            }
+                                            setActiveReportDateField('end');
+                                          } else {
+                                            setReportEndDate(isoStr);
+                                            if (reportStartDate && isoStr < reportStartDate) {
+                                              setReportStartDate(isoStr);
+                                            }
+                                            setActiveReportDateField(null);
+                                          }
+                                        }}
+                                        style={{
+                                          width: '14.28%',
+                                          height: 38,
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          borderRadius: 10,
+                                          backgroundColor: isSel
+                                            ? brandColor
+                                            : isInRange
+                                            ? `${brandColor}22`
+                                            : 'transparent',
+                                        }}
+                                      >
+                                        <Text
+                                          style={{
+                                            color: isSel ? '#FFFFFF' : isInRange ? brandColor : tColor.text,
+                                            fontWeight: isSel || isInRange ? '900' : '600',
+                                            fontSize: 13,
+                                          }}
+                                        >
+                                          {dayNum}
+                                        </Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+
+                                <TouchableOpacity
+                                  onPress={() => setActiveReportDateField(null)}
+                                  style={{ marginTop: 10, paddingVertical: 8, alignItems: 'center', borderRadius: 10, backgroundColor: tColor.input }}
+                                >
+                                  <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '800' }}>Cerrar Calendario</Text>
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          })() : null}
+                        </View>
+                      ) : (
+                        <>
+                          <View style={{ width: isMobile ? '100%' : undefined, flex: isMobile ? undefined : 1, minWidth: 140 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Desde:</Text>
+                            <input type="date" className="web-input-override" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} />
+                          </View>
+                          <View style={{ width: isMobile ? '100%' : undefined, flex: isMobile ? undefined : 1, minWidth: 140 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Hasta:</Text>
+                            <input type="date" className="web-input-override" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} />
+                          </View>
+                        </>
+                      )}
+                      <View style={{ width: isMobile ? '100%' : undefined, flex: isMobile ? undefined : 1, minWidth: 140 }}>
                         <Text style={[styles.inputLabel, { color: tColor.muted }]}>Filtrar Personal:</Text>
                         {Platform.OS === 'web' ? (
                           <select className="web-input-override" value={reportMechanic} onChange={(e) => setReportMechanic(e.target.value)}>
@@ -6126,7 +6640,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                        </View>
                     ) : null}
 
-                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden', minHeight: 500 }, isPrinting ? { backgroundColor: 'transparent', borderWidth: 0, overflow: 'visible', minHeight: 'auto' } : {}]}>
+                    <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 0, overflow: 'hidden' }, isPrinting ? { backgroundColor: 'transparent', borderWidth: 0, overflow: 'visible' } : {}]}>
                       {Platform.OS === 'web' ? (
                         <div className="table-responsive">
                           <table className="glass-table">
@@ -6198,17 +6712,95 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </table>
                         </div>
                       ) : (
-                        <Text style={{ color: tColor.text, padding: 20 }}>Visualización optimizada para Web.</Text>
+                        /* 📱 VISTA NATIVA MÓVIL DE REPORTES (iOS / ANDROID SIN CRUCES NI MENSAJES DE SOLO WEB) 📱 */
+                        <View style={{ padding: 16, gap: 12 }}>
+                          {reportsData.length > 0 ? (
+                            reportsData
+                              .slice((reportPage - 1) * ITEMS_PER_PAGE, reportPage * ITEMS_PER_PAGE)
+                              .map((r: any, i: number) => {
+                                const discountBadge = getReportDiscountInfo(r, servicesList);
+                                const dateFormatted = r.date
+                                  ? new Date(r.date).toLocaleDateString('es-ES')
+                                  : r.createdAt
+                                  ? new Date(r.createdAt).toLocaleDateString('es-ES')
+                                  : 'N/A';
+
+                                return (
+                                  <View
+                                    key={`${r.id || 'mob-row'}-${i}`}
+                                    style={{
+                                      backgroundColor: tColor.input,
+                                      borderWidth: 1,
+                                      borderColor: tColor.border,
+                                      borderRadius: 14,
+                                      padding: 14,
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                        <View style={{ backgroundColor: `${brandColor}22`, borderWidth: 1, borderColor: `${brandColor}55`, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                                          <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900' }}>
+                                            {isAutomotive ? (r.plate || 'N/A') : (r.id ? r.id.slice(0, 6).toUpperCase() : 'ORD')}
+                                          </Text>
+                                        </View>
+                                        <Text style={{ color: tColor.muted, fontSize: 12, fontWeight: '700' }}>
+                                          🗓️ {dateFormatted}
+                                        </Text>
+                                      </View>
+                                      <Text style={{ color: discountBadge ? '#FFD700' : brandColor, fontSize: 17, fontWeight: '900' }}>
+                                        ${Number(r.cost || r.finalCost || 0).toLocaleString('en-US')}
+                                      </Text>
+                                    </View>
+
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                                      <Text style={{ color: tColor.text, fontSize: 14.5, fontWeight: '800', flex: 1 }} numberOfLines={1}>
+                                        👤 {toTitleCase(r.clientName || 'Cliente General')}
+                                      </Text>
+                                      {discountBadge ? (
+                                        <View style={{ backgroundColor: discountBadge.bg, borderWidth: 1, borderColor: discountBadge.color, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6 }}>
+                                          <Text style={{ color: discountBadge.color, fontSize: 10, fontWeight: '900' }}>
+                                            {discountBadge.label}
+                                          </Text>
+                                        </View>
+                                      ) : (
+                                        <Text style={{ color: tColor.muted, fontSize: 11 }}>Tarifa Regular</Text>
+                                      )}
+                                    </View>
+
+                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: tColor.border, paddingTop: 8 }}>
+                                      <Text style={{ color: tColor.muted, fontSize: 12.5, flex: 1 }} numberOfLines={1}>
+                                        ✨ {toTitleCase(r.service || 'Servicio General')}
+                                      </Text>
+                                      <Text style={{ color: tColor.muted, fontSize: 11.5, fontWeight: '700' }}>
+                                        {staffTerm}: {toTitleCase(r.mechanicName || 'General')}
+                                      </Text>
+                                    </View>
+                                  </View>
+                                );
+                              })
+                          ) : (
+                            <View style={{ paddingVertical: 36, alignItems: 'center' }}>
+                              <Feather name="file-text" size={32} color={tColor.muted} style={{ marginBottom: 10 }} />
+                              <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 15 }}>
+                                No hay registros en estas fechas
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12.5, marginTop: 4, textAlign: 'center' }}>
+                                Ajusta el rango de fechas arriba o cierra una orden en el POS para verla aquí.
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                       )}
 
                       {!isPrinting ? (
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 24, borderTopWidth: 1, borderTopColor: tColor.border, backgroundColor: theme === 'dark' ? '#12161C' : '#E2E8F0', position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border }, reportPage === 1 ? { opacity: 0.5 } : {}]} disabled={reportPage === 1} onPress={() => setReportPage(p => Math.max(1, p - 1))}>
-                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Anterior</Text>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: isMobile ? 16 : 24, borderTopWidth: 1, borderTopColor: tColor.border, backgroundColor: theme === 'dark' ? '#12161C' : '#E2E8F0' }}>
+                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingVertical: 10, paddingHorizontal: 14 }, reportPage === 1 ? { opacity: 0.5 } : {}]} disabled={reportPage === 1} onPress={() => setReportPage(p => Math.max(1, p - 1))}>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: 13 }]}>Anterior</Text>
                           </TouchableOpacity>
-                          <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 14 }}>Página {reportPage} de {totalPages}</Text>
-                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border }, reportPage === totalPages ? { opacity: 0.5 } : {}]} disabled={reportPage === totalPages} onPress={() => setReportPage(p => Math.min(totalPages, p + 1))}>
-                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Siguiente</Text>
+                          <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 13.5 }}>Página {reportPage} de {totalPages}</Text>
+                          <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingVertical: 10, paddingHorizontal: 14 }, reportPage === totalPages ? { opacity: 0.5 } : {}]} disabled={reportPage === totalPages} onPress={() => setReportPage(p => Math.min(totalPages, p + 1))}>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: 13 }]}>Siguiente</Text>
                           </TouchableOpacity>
                         </View>
                       ) : null}
@@ -6219,6 +6811,166 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 {agendaFilter === 'staff' ? (
                   <View>
                     <Text style={[styles.sectionTitle, { color: tColor.text }]}>Gestión de Equipo / Staff</Text>
+
+                    {/* 🔐 TARJETA DE SEGURIDAD EXCLUSIVA DEL DUEÑO: VER Y CAMBIAR EL PIN DE ACCESO A LAS CITAS */}
+                    <View
+                      style={[
+                        styles.glassCard,
+                        {
+                          backgroundColor: tColor.card,
+                          borderColor: brandColor,
+                          borderWidth: 1.5,
+                          padding: isMobile ? 18 : 24,
+                          marginBottom: 24,
+                        },
+                      ]}
+                    >
+                      <View
+                        style={{
+                          flexDirection: isMobile ? 'column' : 'row',
+                          justifyContent: 'space-between',
+                          alignItems: isMobile ? 'stretch' : 'center',
+                          gap: 16,
+                        }}
+                      >
+                        <View style={{ flex: 1 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
+                            <View
+                              style={{
+                                width: 34,
+                                height: 34,
+                                borderRadius: 10,
+                                backgroundColor: `${brandColor}22`,
+                                borderWidth: 1,
+                                borderColor: brandColor,
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                              }}
+                            >
+                              <Feather name="shield" size={17} color={brandColor} />
+                            </View>
+                            <Text style={{ color: tColor.text, fontSize: isMobile ? 16 : 18, fontWeight: '900' }}>
+                              {tr('Código de Acceso para Empleados (PIN de Citas y POS)', 'Employee Access Code (Appointments & POS PIN)')}
+                            </Text>
+                            <View
+                              style={{
+                                backgroundColor: 'rgba(16, 185, 129, 0.14)',
+                                borderWidth: 1,
+                                borderColor: '#10B981',
+                                paddingHorizontal: 8,
+                                paddingVertical: 2,
+                                borderRadius: 6,
+                              }}
+                            >
+                              <Text style={{ color: '#10B981', fontSize: 10.5, fontWeight: '900' }}>
+                                {tr('SOLO VISIBLE PARA EL DUEÑO', 'OWNER ONLY')}
+                              </Text>
+                            </View>
+                          </View>
+                          <Text style={{ color: tColor.muted, fontSize: 13, lineHeight: 19 }}>
+                            {tr(
+                              `Con este PIN de 4 a 6 dígitos tus profesionales (${staffTerm}) entran a "Portal Interno" únicamente para ver las citas del día y cerrar órdenes. Si alguien se retira del negocio, cámbialo aquí y su acceso quedará bloqueado al instante.`,
+                              `Your staff (${staffTerm}) use this 4–6 digit PIN to view daily appointments and close orders. If someone leaves the team, change it here to revoke their access immediately.`
+                            )}
+                          </Text>
+                        </View>
+
+                        <View
+                          style={{
+                            flexDirection: isMobile ? 'column' : 'row',
+                            alignItems: isMobile ? 'stretch' : 'center',
+                            gap: 10,
+                            minWidth: isMobile ? '100%' : 340,
+                          }}
+                        >
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              backgroundColor: tColor.input,
+                              borderWidth: 1,
+                              borderColor: tColor.border,
+                              borderRadius: 12,
+                              height: 48,
+                              paddingHorizontal: 12,
+                              flex: 1,
+                            }}
+                          >
+                            <Feather name="key" size={16} color={brandColor} style={{ marginRight: 8 }} />
+                            <TextInput
+                              style={{
+                                flex: 1,
+                                color: tColor.text,
+                                fontSize: 18,
+                                fontWeight: '900',
+                                letterSpacing: 6,
+                                outlineStyle: 'none',
+                              } as any}
+                              placeholder="1234"
+                              placeholderTextColor={tColor.muted}
+                              secureTextEntry={!showStaffAccessPin}
+                              keyboardType="numeric"
+                              maxLength={6}
+                              value={staffAccessPin}
+                              onChangeText={(txt) => setStaffAccessPin(txt.replace(/\D/g, ''))}
+                            />
+                            <TouchableOpacity
+                              onPress={() => setShowStaffAccessPin((prev) => !prev)}
+                              style={{ padding: 6 }}
+                              accessibilityLabel="Ver u ocultar PIN"
+                            >
+                              <Feather name={showStaffAccessPin ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                            </TouchableOpacity>
+                          </View>
+
+                          <TouchableOpacity
+                            onPress={() => {
+                              const randomPin = String(Math.floor(1000 + Math.random() * 9000));
+                              setStaffAccessPin(randomPin);
+                              setShowStaffAccessPin(true);
+                            }}
+                            style={{
+                              height: 48,
+                              paddingHorizontal: 12,
+                              borderRadius: 12,
+                              backgroundColor: tColor.input,
+                              borderWidth: 1,
+                              borderColor: tColor.border,
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              flexDirection: 'row',
+                              gap: 6,
+                            }}
+                          >
+                            <Feather name="refresh-cw" size={14} color={tColor.text} />
+                            <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                              {tr('Generar PIN', 'Random PIN')}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            style={[
+                              styles.primaryButton,
+                              {
+                                backgroundColor: brandColor,
+                                height: 48,
+                                paddingHorizontal: 18,
+                                flexDirection: 'row',
+                                gap: 7,
+                              },
+                            ]}
+                            onPress={handleSaveStaffPin}
+                            disabled={isSavingStaffPin}
+                          >
+                            <Feather name="lock" size={15} color="#FFFFFF" />
+                            <Text style={styles.primaryButtonText}>
+                              {isSavingStaffPin ? tr('Guardando...', 'Saving...') : tr('Cambiar PIN', 'Update PIN')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+
                     <View style={styles.bentoGrid}>
                       <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
                         <Text style={[styles.cardTitle, { color: tColor.text }]}>➕ Registrar Miembro</Text>
@@ -6231,15 +6983,131 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           
                           <View>
                             <Text style={[styles.inputLabel, { color: tColor.muted }]}>Especialidad / Cargo</Text>
-                            {Platform.OS === 'web' ? (
-                              <select className="web-input-override" value={selectedStaffRole} onChange={e => setSelectedStaffRole(e.target.value)}>
-                                <option value="" disabled>Seleccione especialidad acorde al negocio</option>
-                                {availableRoles.map((role, idx) => <option key={`${role}-${idx}`} value={role}>{role}</option>)}
-                                <option value="custom">Otro (Personalizado)...</option>
-                              </select>
-                            ) : (
-                              <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej: Especialista General" placeholderTextColor={tColor.muted} value={selectedStaffRole} onChangeText={text => setSelectedStaffRole(toTitleCase(text))} />
-                            )}
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={() => setIsStaffRoleDropdownOpen((prev) => !prev)}
+                              style={[
+                                styles.formInput,
+                                {
+                                  backgroundColor: tColor.input,
+                                  borderColor: isStaffRoleDropdownOpen || selectedStaffRole ? brandColor : tColor.border,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  paddingHorizontal: 16,
+                                  height: 52,
+                                },
+                              ]}
+                            >
+                              <Text
+                                numberOfLines={1}
+                                style={{
+                                  flex: 1,
+                                  fontSize: 15,
+                                  fontWeight: selectedStaffRole ? '800' : '500',
+                                  color: selectedStaffRole ? tColor.text : tColor.muted,
+                                }}
+                              >
+                                {selectedStaffRole === 'custom'
+                                  ? '➕ Otro (Personalizado)...'
+                                  : selectedStaffRole
+                                  ? selectedStaffRole
+                                  : 'Seleccione especialidad acorde al negocio...'}
+                              </Text>
+                              <Feather
+                                name={isStaffRoleDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                                size={18}
+                                color={isStaffRoleDropdownOpen ? brandColor : tColor.muted}
+                              />
+                            </TouchableOpacity>
+
+                            {isStaffRoleDropdownOpen ? (
+                              <View
+                                style={{
+                                  marginTop: 8,
+                                  backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+                                  borderWidth: 1,
+                                  borderColor: tColor.border,
+                                  borderRadius: 14,
+                                  padding: 8,
+                                  gap: 6,
+                                }}
+                              >
+                                {availableRoles.map((role, idx) => {
+                                  const isSelectedRole = selectedStaffRole === role;
+                                  return (
+                                    <TouchableOpacity
+                                      key={`${role}-${idx}`}
+                                      activeOpacity={0.8}
+                                      onPress={() => {
+                                        setSelectedStaffRole(role);
+                                        setIsStaffRoleDropdownOpen(false);
+                                      }}
+                                      style={{
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        paddingVertical: 12,
+                                        paddingHorizontal: 14,
+                                        borderRadius: 10,
+                                        backgroundColor: isSelectedRole ? `${brandColor}22` : tColor.input,
+                                        borderWidth: 1,
+                                        borderColor: isSelectedRole ? brandColor : 'transparent',
+                                      }}
+                                    >
+                                      <Text
+                                        style={{
+                                          color: isSelectedRole ? brandColor : tColor.text,
+                                          fontWeight: isSelectedRole ? '900' : '600',
+                                          fontSize: 14,
+                                        }}
+                                      >
+                                        {role}
+                                      </Text>
+                                      <Ionicons
+                                        name={isSelectedRole ? 'checkmark-circle' : 'ellipse-outline'}
+                                        size={18}
+                                        color={isSelectedRole ? brandColor : tColor.muted}
+                                      />
+                                    </TouchableOpacity>
+                                  );
+                                })}
+
+                                <TouchableOpacity
+                                  activeOpacity={0.8}
+                                  onPress={() => {
+                                    setSelectedStaffRole('custom');
+                                    setIsStaffRoleDropdownOpen(false);
+                                  }}
+                                  style={{
+                                    flexDirection: 'row',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    paddingVertical: 12,
+                                    paddingHorizontal: 14,
+                                    borderRadius: 10,
+                                    backgroundColor: selectedStaffRole === 'custom' ? `${brandColor}22` : tColor.input,
+                                    borderWidth: 1,
+                                    borderColor: selectedStaffRole === 'custom' ? brandColor : 'transparent',
+                                  }}
+                                >
+                                  <Text
+                                    style={{
+                                      color: selectedStaffRole === 'custom' ? brandColor : tColor.muted,
+                                      fontWeight: '800',
+                                      fontSize: 14,
+                                    }}
+                                  >
+                                    ➕ Otro (Personalizado)...
+                                  </Text>
+                                  <Ionicons
+                                    name={selectedStaffRole === 'custom' ? 'checkmark-circle' : 'add-circle-outline'}
+                                    size={18}
+                                    color={selectedStaffRole === 'custom' ? brandColor : tColor.muted}
+                                  />
+                                </TouchableOpacity>
+                              </View>
+                            ) : null}
                           </View>
 
                           {selectedStaffRole === 'custom' ? (
@@ -7277,8 +8145,97 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 </View>
 
                 <View>
-                  <Text style={[styles.inputLabel, { color: tColor.muted }]}>Nombre del Servicio</Text>
-                  <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej. Corte Clásico" placeholderTextColor={tColor.muted} value={catalogFormName} onChangeText={t => setCatalogFormName(toTitleCase(t))} />
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 0 }]}>Nombre del Servicio</Text>
+                    <TouchableOpacity
+                      activeOpacity={0.85}
+                      onPress={() => setIsCatalogServiceDropdownOpen((prev) => !prev)}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 5,
+                        paddingVertical: 4,
+                        paddingHorizontal: 10,
+                        borderRadius: 8,
+                        backgroundColor: `${brandColor}18`,
+                        borderWidth: 1,
+                        borderColor: `${brandColor}50`,
+                      }}
+                    >
+                      <Feather name="list" size={12} color={brandColor} />
+                      <Text style={{ color: brandColor, fontSize: 11.5, fontWeight: '900' }}>
+                        {isCatalogServiceDropdownOpen ? 'Ocultar sugeridos' : 'Elegir servicio predefinido'}
+                      </Text>
+                      <Feather name={isCatalogServiceDropdownOpen ? 'chevron-up' : 'chevron-down'} size={13} color={brandColor} />
+                    </TouchableOpacity>
+                  </View>
+
+                  {isCatalogServiceDropdownOpen ? (
+                    <View
+                      style={{
+                        marginBottom: 12,
+                        backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+                        borderWidth: 1,
+                        borderColor: tColor.border,
+                        borderRadius: 14,
+                        padding: 8,
+                        gap: 6,
+                      }}
+                    >
+                      <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800', paddingHorizontal: 6, paddingVertical: 2 }}>
+                        ⚡ Toca uno para autocompletar nombre, precio y duración:
+                      </Text>
+                      {availableServiceTemplates.map((tpl, idx) => {
+                        const isSelectedTpl = catalogFormName.toLowerCase() === tpl.name.toLowerCase();
+                        return (
+                          <TouchableOpacity
+                            key={`${tpl.name}-${idx}`}
+                            activeOpacity={0.8}
+                            onPress={() => {
+                              setCatalogFormName(tpl.name);
+                              setCatalogFormDesc(tpl.desc);
+                              setCatalogFormPrice(formatCurrency(tpl.price));
+                              setCatalogFormDuration(tpl.duration);
+                              setIsCatalogServiceDropdownOpen(false);
+                            }}
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              paddingVertical: 10,
+                              paddingHorizontal: 12,
+                              borderRadius: 10,
+                              backgroundColor: isSelectedTpl ? `${brandColor}22` : tColor.input,
+                              borderWidth: 1,
+                              borderColor: isSelectedTpl ? brandColor : 'transparent',
+                            }}
+                          >
+                            <View style={{ flex: 1, paddingRight: 8 }}>
+                              <Text style={{ color: isSelectedTpl ? brandColor : tColor.text, fontWeight: '800', fontSize: 13.5 }}>
+                                {tpl.name}
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                                ⏱️ {tpl.duration} min • Sugerido: ${tpl.price}
+                              </Text>
+                            </View>
+                            <Ionicons
+                              name={isSelectedTpl ? 'checkmark-circle' : 'add-circle-outline'}
+                              size={18}
+                              color={isSelectedTpl ? brandColor : tColor.muted}
+                            />
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  ) : null}
+
+                  <TextInput
+                    style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]}
+                    placeholder="Escribe el nombre o elige uno arriba..."
+                    placeholderTextColor={tColor.muted}
+                    value={catalogFormName}
+                    onChangeText={t => setCatalogFormName(toTitleCase(t))}
+                  />
                 </View>
 
                 <View>
@@ -7298,10 +8255,74 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         <option value="15">15 minutos</option><option value="30">30 minutos</option><option value="45">45 minutos</option><option value="60">1 hora</option><option value="90">1.5 horas</option><option value="120">2 horas</option><option value="180">3 horas</option>
                       </select>
                     ) : (
-                      <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="30" keyboardType="numeric" placeholderTextColor={tColor.muted} value={catalogFormDuration} onChangeText={setCatalogFormDuration} />
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setIsCatalogDurationDropdownOpen((prev) => !prev)}
+                        style={[
+                          styles.formInput,
+                          {
+                            backgroundColor: tColor.input,
+                            borderColor: isCatalogDurationDropdownOpen ? brandColor : tColor.border,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            paddingHorizontal: 14,
+                          },
+                        ]}
+                      >
+                        <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 14 }}>
+                          {catalogFormDuration === '60'
+                            ? '1 hora (60m)'
+                            : catalogFormDuration === '90'
+                            ? '1.5 horas (90m)'
+                            : catalogFormDuration === '120'
+                            ? '2 horas (120m)'
+                            : catalogFormDuration === '180'
+                            ? '3 horas (180m)'
+                            : `${catalogFormDuration || '30'} min`}
+                        </Text>
+                        <Feather name={isCatalogDurationDropdownOpen ? 'chevron-up' : 'chevron-down'} size={16} color={tColor.muted} />
+                      </TouchableOpacity>
                     )}
                   </View>
                 </View>
+
+                {isCatalogDurationDropdownOpen && Platform.OS !== 'web' ? (
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, backgroundColor: tColor.input, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: tColor.border }}>
+                    {[
+                      { val: '15', label: '15 min' },
+                      { val: '30', label: '30 min' },
+                      { val: '45', label: '45 min' },
+                      { val: '60', label: '1 hora' },
+                      { val: '90', label: '1.5 horas' },
+                      { val: '120', label: '2 horas' },
+                      { val: '180', label: '3 horas' },
+                    ].map((dOpt) => {
+                      const activeDur = catalogFormDuration === dOpt.val;
+                      return (
+                        <TouchableOpacity
+                          key={dOpt.val}
+                          onPress={() => {
+                            setCatalogFormDuration(dOpt.val);
+                            setIsCatalogDurationDropdownOpen(false);
+                          }}
+                          style={{
+                            paddingVertical: 8,
+                            paddingHorizontal: 12,
+                            borderRadius: 8,
+                            backgroundColor: activeDur ? brandColor : tColor.bg,
+                            borderWidth: 1,
+                            borderColor: activeDur ? brandColor : tColor.border,
+                          }}
+                        >
+                          <Text style={{ color: activeDur ? '#FFFFFF' : tColor.text, fontSize: 12, fontWeight: '800' }}>
+                            {dOpt.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                ) : null}
                 
                 <View style={{ marginTop: 8 }}>
                   <ContentTermsCheck value={acceptedContentTerms} onChange={setAcceptedContentTerms} tColor={tColor} brandColor={brandColor} />
@@ -7553,9 +8574,9 @@ const styles = StyleSheet.create({
   tabsContainer: { flexDirection: 'row', gap: 10, flexWrap: 'wrap', marginBottom: 28, padding: 8, borderRadius: 16 },
   tab: { flex: 1, minWidth: 120, paddingVertical: 12, alignItems: 'center', borderRadius: 12 },
   tabText: { fontWeight: '800', fontSize: 14 },
-  bentoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 20, width: '100%' },
+  bentoGrid: { flexDirection: Platform.OS === 'web' ? 'row' : 'column', flexWrap: 'wrap', gap: 20, width: '100%' },
   glassCard: { borderWidth: 1, borderRadius: 22, padding: 22, width: '100%', maxWidth: '100%' },
-  flexCard: { borderWidth: 1, borderRadius: 22, padding: 22, flex: 1, minWidth: 260, maxWidth: '100%' },
+  flexCard: { borderWidth: 1, borderRadius: 22, padding: 22, flexGrow: 1, minWidth: 260, maxWidth: '100%' },
   modalOverlay: { backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 1000 },
   modalContentWrapper: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16 },
   modalContent: { borderWidth: 1, borderRadius: 24, padding: 24, width: '100%', maxWidth: 750 },
@@ -7563,7 +8584,7 @@ const styles = StyleSheet.create({
   chip: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, marginRight: 8, marginBottom: 8 },
   chipText: { fontWeight: 'bold', fontSize: 13 },
   activeChipText: { color: '#FFFFFF' },
-  filterGroup: { flex: 1, minWidth: 140 },
+  filterGroup: { width: '100%', minWidth: 140 },
   cardTitle: { fontSize: 18, fontWeight: '800', marginBottom: 16 },
   emptyText: { textAlign: 'center', fontWeight: 'bold', fontSize: 16 },
   orderCard: { borderWidth: 1, borderRadius: 16, padding: 20, flex: 1, minWidth: 260, maxWidth: '100%', display: 'flex', flexDirection: 'column' },
