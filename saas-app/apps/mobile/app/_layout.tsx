@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { View, Text, Image, StyleSheet, Animated, Easing, StatusBar, Dimensions, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -9,25 +9,29 @@ if (Platform.OS !== 'web') {
   SplashScreen.preventAutoHideAsync().catch(() => {});
 }
 
+// Precarga inmediata del asset en memoria apenas se importa el archivo (antes del primer render)
+const LOGO_SOURCE = require('../assets/images/logopicktime.jpg');
+
 const { width: NATIVE_WIDTH, height: NATIVE_HEIGHT } = Dimensions.get('window');
 const IS_WEB = Platform.OS === 'web';
 const USE_NATIVE_DRIVER = !IS_WEB;
 
 export default function RootLayout() {
-  // En Web esperamos el montaje del cliente antes de hidratar rutas con window/localStorage/Date
-  // Esto elimina al 100% el error "Hydration failed because the server rendered HTML didn't match the client"
   const [isWebClientReady, setIsWebClientReady] = useState(!IS_WEB);
   const [showCustomSplash, setShowCustomSplash] = useState(true);
+  const hasStartedAnim = useRef(false);
 
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const scaleAnim = useRef(new Animated.Value(0.88)).current;
   const scissorsAnim = useRef(new Animated.Value(-85)).current;
   const iconsAnim = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => {
-    if (IS_WEB) {
-      setIsWebClientReady(true);
-    } else {
+  // Función que arranca la intro SOLO cuando el logo ya está decodificado en pantalla en iOS/Android
+  const triggerSplashSequence = useCallback(() => {
+    if (hasStartedAnim.current) return;
+    hasStartedAnim.current = true;
+
+    if (!IS_WEB) {
       SplashScreen.hideAsync().catch(() => {});
     }
 
@@ -47,13 +51,13 @@ export default function RootLayout() {
       Animated.timing(iconsAnim, {
         toValue: 1,
         duration: 900,
-        delay: 250,
+        delay: 200,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: USE_NATIVE_DRIVER,
       }),
     ]).start();
 
-    const timer = setTimeout(() => {
+    setTimeout(() => {
       Animated.timing(fadeAnim, {
         toValue: 0,
         duration: 400,
@@ -61,17 +65,28 @@ export default function RootLayout() {
       }).start(() => {
         setShowCustomSplash(false);
       });
-    }, 2600);
-
-    return () => clearTimeout(timer);
+    }, 2500);
   }, []);
 
-  // En Web durante el render SSR estático devuelve un lienzo negro idéntico en servidor y cliente (0 Hydration Error)
+  useEffect(() => {
+    if (IS_WEB) {
+      setIsWebClientReady(true);
+      triggerSplashSequence();
+      return;
+    }
+
+    // Fallback de seguridad en iOS/Android por si onLoadEnd tarda más de 350ms
+    const safetyTimer = setTimeout(() => {
+      triggerSplashSequence();
+    }, 350);
+
+    return () => clearTimeout(safetyTimer);
+  }, [triggerSplashSequence]);
+
   if (IS_WEB && !isWebClientReady) {
     return <View style={styles.ssrBlankCanvas} />;
   }
 
-  // 🔒 MIENTRAS CARGA: Estilos separados para Nativo (iOS/Android grande) vs Web
   if (showCustomSplash) {
     return (
       <View style={IS_WEB ? styles.fullBlackScreenWeb : styles.fullBlackScreenNative}>
@@ -86,12 +101,15 @@ export default function RootLayout() {
             width: '100%',
           }}
         >
-          {/* Contenedor del Logo Ampliado con estilos dedicados para iOS/Android vs Web */}
+          {/* Contenedor del Logo Ampliado con decodificación instantánea en iOS (fadeDuration=0 + onLoad) */}
           <View style={IS_WEB ? styles.logoContainerWeb : styles.logoContainerNative}>
             <Image
-              source={require('../assets/images/logopicktime.jpg')}
+              source={LOGO_SOURCE}
               style={IS_WEB ? styles.logoWeb : styles.logoNative}
               resizeMode="contain"
+              fadeDuration={0}
+              onLoad={triggerSplashSequence}
+              onError={triggerSplashSequence}
             />
           </View>
 
@@ -152,7 +170,6 @@ export default function RootLayout() {
     );
   }
 
-  // 🚀 UNA VEZ TERMINA EL SPLASH: Carga el Stack normal de la aplicación
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
@@ -198,7 +215,7 @@ const styles = StyleSheet.create({
   logoNative: {
     width: Math.min(NATIVE_WIDTH * 0.94, 380),
     height: 270,
-    transform: [{ scale: 1.62 }], // Zoom amplio en iOS y Android para que el logo se vea grande e imponente
+    transform: [{ scale: 1.62 }],
   },
 
   // 💻 ESTILOS WEB (Navegador Desktop y Mobile Web)

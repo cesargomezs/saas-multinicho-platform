@@ -997,6 +997,7 @@ export default function TenantDashboardScreen() {
   const [isStaffRoleDropdownOpen, setIsStaffRoleDropdownOpen] = useState(false);
   const [isCatalogServiceDropdownOpen, setIsCatalogServiceDropdownOpen] = useState(false);
   const [isCatalogDurationDropdownOpen, setIsCatalogDurationDropdownOpen] = useState(false);
+  const [isPortfolioTitleDropdownOpen, setIsPortfolioTitleDropdownOpen] = useState(false);
   
   const [finalCost, setFinalCost] = useState('');
   const [exitMileage, setExitMileage] = useState('');
@@ -2016,6 +2017,7 @@ export default function TenantDashboardScreen() {
     setPortfolioFormDesc('');
     setPortfolioFormFile(null);
     setPortfolioFormPreview(null);
+    setIsPortfolioTitleDropdownOpen(false);
   };
 
   const handleCatalogImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -5739,12 +5741,93 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
 
                         <View style={{ marginBottom: 16 }}>
-                          <Text style={[styles.inputLabel, { color: tColor.muted }]}>
-                            {isLegal ? 'Título del Caso o Área de Práctica' : 'Título del Trabajo'}
-                          </Text>
+                          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 0 }]}>
+                              {isLegal ? 'Título del Caso o Área de Práctica' : 'Título del Trabajo'}
+                            </Text>
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={() => setIsPortfolioTitleDropdownOpen((prev) => !prev)}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 5,
+                                paddingVertical: 4,
+                                paddingHorizontal: 10,
+                                borderRadius: 8,
+                                backgroundColor: `${brandColor}18`,
+                                borderWidth: 1,
+                                borderColor: `${brandColor}50`,
+                              }}
+                            >
+                              <Feather name="list" size={12} color={brandColor} />
+                              <Text style={{ color: brandColor, fontSize: 11.5, fontWeight: '900' }}>
+                                {isPortfolioTitleDropdownOpen ? 'Ocultar sugeridos' : 'Elegir trabajo sugerido'}
+                              </Text>
+                              <Feather name={isPortfolioTitleDropdownOpen ? 'chevron-up' : 'chevron-down'} size={13} color={brandColor} />
+                            </TouchableOpacity>
+                          </View>
+
+                          {isPortfolioTitleDropdownOpen ? (
+                            <View
+                              style={{
+                                marginBottom: 12,
+                                backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+                                borderWidth: 1,
+                                borderColor: tColor.border,
+                                borderRadius: 14,
+                                padding: 8,
+                                gap: 6,
+                              }}
+                            >
+                              <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800', paddingHorizontal: 6, paddingVertical: 2 }}>
+                                ⚡ Toca uno para autocompletar título y descripción del trabajo:
+                              </Text>
+                              {availableServiceTemplates.map((tpl, idx) => {
+                                const isSelectedWork = portfolioFormTitle.toLowerCase() === tpl.name.toLowerCase();
+                                return (
+                                  <TouchableOpacity
+                                    key={`port-tpl-${tpl.name}-${idx}`}
+                                    activeOpacity={0.8}
+                                    onPress={() => {
+                                      setPortfolioFormTitle(toTitleCase(tpl.name));
+                                      setPortfolioFormDesc(toTitleCase(tpl.desc));
+                                      setIsPortfolioTitleDropdownOpen(false);
+                                    }}
+                                    style={{
+                                      flexDirection: 'row',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      paddingVertical: 10,
+                                      paddingHorizontal: 12,
+                                      borderRadius: 10,
+                                      backgroundColor: isSelectedWork ? `${brandColor}22` : tColor.input,
+                                      borderWidth: 1,
+                                      borderColor: isSelectedWork ? brandColor : 'transparent',
+                                    }}
+                                  >
+                                    <View style={{ flex: 1, paddingRight: 8 }}>
+                                      <Text style={{ color: isSelectedWork ? brandColor : tColor.text, fontWeight: '800', fontSize: 13.5 }}>
+                                        {tpl.name}
+                                      </Text>
+                                      <Text style={{ color: tColor.muted, fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+                                        ✨ {tpl.desc}
+                                      </Text>
+                                    </View>
+                                    <Ionicons
+                                      name={isSelectedWork ? 'checkmark-circle' : 'add-circle-outline'}
+                                      size={18}
+                                      color={isSelectedWork ? brandColor : tColor.muted}
+                                    />
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+                          ) : null}
+
                           <TextInput 
                             style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} 
-                            placeholder={isLegal ? 'Ej: Residencia Permanente Aprobada' : isDental ? 'Ej: Diseño De Sonrisa Y Blanqueamiento' : isAutomotive ? 'Ej: Reparación Completa De Motor' : 'Ej: Fade + Barba'} 
+                            placeholder={isLegal ? 'Escribe el título o elige uno arriba (Ej: Residencia Aprobada)...' : isDental ? 'Escribe el título o elige uno arriba (Ej: Diseño De Sonrisa)...' : isAutomotive ? 'Escribe el título o elige uno arriba (Ej: Reparación De Motor)...' : 'Escribe el título o elige uno arriba (Ej: Fade + Barba)...'} 
                             placeholderTextColor={tColor.muted} 
                             value={portfolioFormTitle} 
                             onChangeText={t => setPortfolioFormTitle(toTitleCase(t))} 
