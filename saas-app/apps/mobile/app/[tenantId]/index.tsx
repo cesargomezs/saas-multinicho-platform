@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator, Share, Modal } from 'react-native';
+import * as AppleAuthentication from 'expo-apple-authentication';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
@@ -15,6 +16,8 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false },
   realtime: { params: { eventsPerSecond: 0 } }
 });
+
+
 
 // ==========================================
 // 🌎 LISTA PARAMETRIZADA DE INDICATIVOS DE PAÍS
@@ -1124,8 +1127,200 @@ export default function TenantDashboardScreen() {
   const [referredByPhone, setReferredByPhone] = useState('');
   const [bookingClientCoupons, setBookingClientCoupons] = useState<number>(0);
   const [bookingAuthMethod, setBookingAuthMethod] = useState<'apple' | 'google' | 'manual' | null>(null);
+  const [bookingEntryMode, setBookingEntryMode] = useState<'existing' | 'new' | null>(null);
+  const [isAuthenticatingProvider, setIsAuthenticatingProvider] = useState<boolean>(false);
+
+  const lookupExistingClientByIdentifier = async (identifier: string) => {
+    const cleanQ = String(identifier || '').trim().toLowerCase();
+    if (!cleanQ) return null;
+    try {
+      const res = await apiFetch(`/api/clients/history/${encodeURIComponent(cleanQ)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.client) {
+          let meta = data.client.metadata;
+          if (typeof meta === 'string') {
+            try { meta = JSON.parse(meta); } catch (_e) { meta = {}; }
+          }
+          const dbEarned = Number(meta?.earnedReferralDiscounts || 0);
+          const cPhoneClean = cleanPhoneDigits(data.client.phone);
+          const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+          const totalEarned = Math.max(0, dbEarned + liveEarned);
+          const visitsCount = Number(data.client.loyaltyVisits ?? (Array.isArray(data.serviceHistory) ? data.serviceHistory.length : 0));
+
+          if (data.client.name) setClientName(toTitleCase(data.client.name));
+          if (data.client.email) setClientEmail(data.client.email);
+          if (data.client.phone) {
+            const rawPhone = String(data.client.phone);
+            const matchedCode = COUNTRY_CODES.find((c) => rawPhone.startsWith(c.code));
+            if (matchedCode) setBookingCountryCode(matchedCode.code);
+            setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+          }
+          setBookingMatchedVisits(visitsCount);
+          setBookingClientCoupons(totalEarned);
+          setIsExistingClient(visitsCount > 0 || (Array.isArray(data.serviceHistory) && data.serviceHistory.length > 0));
+          if (data.vehicle) {
+            setSearchPlate(data.vehicle.plate || '');
+            setCarBrand(toTitleCase(data.vehicle.brand || ''));
+            setCarModel(toTitleCase(data.vehicle.model || ''));
+            setCarYear(data.vehicle.year || '');
+            setCarMileage(data.vehicle.currentMileage || '');
+          }
+          return data.client;
+        }
+      }
+    } catch (_e) {}
+    return null;
+  };
+
+  const handleAppleProviderAuth = async () => {
+    if (Platform.OS !== 'ios') {
+      alert(tr('La autenticación con iOS (Apple ID) está disponible en iPhone/iPad.', 'iOS (Apple ID) authentication is available on iOS devices.'));
+      return;
+    }
+
+    setIsAuthenticatingProvider(true);
+    try {
+      const isAvailable = await AppleAuthentication.isAvailableAsync();
+      if (!isAvailable) {
+        alert(tr('Inicia sesión con tu Apple ID en Ajustes del simulador o recompila el binario nativo con pod install.', 'Sign in with your Apple ID in Simulator Settings or rebuild the native binary with pod install.'));
+        setIsAuthenticatingProvider(false);
+        return;
+      }
+
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+
+      const appleFullName = [credential?.fullName?.givenName, credential?.fullName?.familyName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      const appleEmail = credential?.email || '';
+      const appleUserId = credential?.user || '';
+
+      let matchedClient: any = null;
+      if (appleEmail) {
+        matchedClient = await lookupExistingClientByIdentifier(appleEmail);
+      }
+      if (!matchedClient && appleUserId) {
+        matchedClient = await lookupExistingClientByIdentifier(appleUserId);
+      }
+
+      if (matchedClient) {
+        // Cuenta existente encontrada: autocompletar datos reales y beneficios
+        setBookingAuthMethod('apple');
+        setBookingEntryMode(null);
+        setShowBookingQuickLookup(false);
+      } else {
+        // Usuario nuevo con Apple ID: limpiar datos previos y dejar campos listos para completar
+        setIsExistingClient(false);
+        setBookingMatchedVisits(0);
+        setBookingClientCoupons(0);
+        setClientName(appleFullName ? toTitleCase(appleFullName) : '');
+        setClientEmail(appleEmail || '');
+        setClientPhone('');
+        setBookingAuthMethod('apple');
+        setBookingEntryMode(null);
+        setShowBookingQuickLookup(false);
+      }
+    } catch (err: any) {
+      if (err?.code === 'ERR_REQUEST_CANCELED') {
+        return;
+      }
+      const errDetail = [err?.code, err?.message].filter(Boolean).join(' - ');
+      alert(
+        tr(
+          `No se pudo validar tu cuenta de iOS (Apple).${errDetail ? `\n\nDetalle: ${errDetail}` : ''}\n\nVerifica que el simulador tenga sesión de Apple ID en Ajustes y que el target de Xcode tenga "Sign in with Apple" firmado con una cuenta Apple Developer.`,
+          `Could not verify your iOS (Apple) account.${errDetail ? `\n\nDetail: ${errDetail}` : ''}\n\nMake sure Simulator is signed into an Apple ID in Settings and Xcode has "Sign in with Apple" signed with an Apple Developer account.`
+        )
+      );
+    } finally {
+      setIsAuthenticatingProvider(false);
+    }
+  };
   const [acceptedBookingTerms, setAcceptedBookingTerms] = useState<boolean>(false);
   const [isTermsModalOpen, setIsTermsModalOpen] = useState<boolean>(false);
+  const [legalDocHtml, setLegalDocHtml] = useState<string>('');
+  const [legalDocVersion, setLegalDocVersion] = useState<string>('');
+  const [isLoadingLegalDoc, setIsLoadingLegalDoc] = useState<boolean>(false);
+
+  const loadActiveTermsFromDb = async () => {
+    setIsLoadingLegalDoc(true);
+    try {
+      // 1) Intentar endpoint del backend (/api/legal-documents/active)
+      const res = await apiFetch('/api/legal-documents/active?type=terms_and_conditions');
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.document?.content_html || data?.document?.contentHtml) {
+          setLegalDocHtml(String(data.document.content_html || data.document.contentHtml));
+          setLegalDocVersion(String(data.document.version || ''));
+          setIsLoadingLegalDoc(false);
+          return;
+        }
+      }
+    } catch (_e) {}
+
+    try {
+      // 2) Fallback directo a Supabase REST (public.legal_documents)
+      const activeTid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+      const { data: rows } = await supabase
+        .from('legal_documents')
+        .select('id, tenant_id, document_type, version, content_html, is_active, published_at')
+        .eq('is_active', true)
+        .order('published_at', { ascending: false })
+        .limit(10);
+
+      if (Array.isArray(rows) && rows.length > 0) {
+        const matched =
+          rows.find((r: any) => String(r.tenant_id || '') === activeTid && /term/i.test(String(r.document_type || ''))) ||
+          rows.find((r: any) => !r.tenant_id && /term/i.test(String(r.document_type || ''))) ||
+          rows[0];
+        if (matched?.content_html) {
+          setLegalDocHtml(String(matched.content_html));
+          setLegalDocVersion(String(matched.version || ''));
+        }
+      }
+    } catch (_e2) {}
+    setIsLoadingLegalDoc(false);
+  };
+
+  useEffect(() => {
+    if (isTermsModalOpen) {
+      loadActiveTermsFromDb();
+    }
+  }, [isTermsModalOpen]);
+
+  const parseHtmlBlocksForModal = (htmlStr: string) => {
+    const clean = String(htmlStr || '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<br\s*\/?>/gi, '')
+      .replace(/<\/(p|div|h1|h2|h3|h4|li|section|article)>/gi, '')
+      .replace(/<(h1|h2|h3|h4)[^>]*>/gi, '###TITLE###')
+      .replace(/<li[^>]*>/gi, '• ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>');
+
+    return clean
+      .split(/{2,}/)
+      .map((b) => b.trim())
+      .filter(Boolean)
+      .map((block) => {
+        if (block.startsWith('###TITLE###')) {
+          return { isTitle: true, text: block.replace(/^###TITLE###/, '').trim() };
+        }
+        return { isTitle: false, text: block };
+      });
+  };
   const [isExistingClient, setIsExistingClient] = useState(false);
   const [showBookingQuickLookup, setShowBookingQuickLookup] = useState(false);
   const [bookingLookupQuery, setBookingLookupQuery] = useState('');
@@ -3181,6 +3376,11 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           staffId: finalAssignedStaffId, 
           appointmentDate: combinedDateTime, 
           notes: toTitleCase(quickNotes), 
+          acceptedTerms: acceptedBookingTerms,
+          deviceInfo: {
+            os: Platform.OS,
+            authProvider: bookingAuthMethod || 'manual'
+          },
           metadata: JSON.stringify(metadataObj)
         })
       });
@@ -7750,240 +7950,310 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </View>
                   )}
 
-                  {/* ⚡ TARJETA UI/UX: "¿YA ESTÁS REGISTRADO? AUTOCOMPLETAR MIS DATOS" (SIN SALIR A EXPEDIENTE) */}
+                  {/* ⚡ TARJETA "¿YA ESTÁS REGISTRADO?" — AUTOCOMPLETAR O SOY NUEVO -> iOS / GOOGLE / USUARIO */}
                   <View
                     style={{
                       backgroundColor: isExistingClient ? 'rgba(16, 185, 129, 0.1)' : 'rgba(59, 130, 246, 0.08)',
                       borderWidth: 1,
-                      borderColor: isExistingClient ? '#10B981' : (showBookingQuickLookup ? brandColor : 'rgba(59, 130, 246, 0.35)'),
-                      borderRadius: 14,
-                      padding: 14,
-                      marginBottom: 12,
+                      borderColor: isExistingClient ? '#10B981' : (bookingEntryMode !== null ? brandColor : 'rgba(59, 130, 246, 0.35)'),
+                      borderRadius: 16,
+                      padding: isMobile ? 14 : 16,
+                      marginBottom: 14,
                     }}
                   >
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 190 }}>
-                        <View
-                          style={{
-                            width: 34,
-                            height: 34,
-                            borderRadius: 10,
-                            backgroundColor: isExistingClient ? 'rgba(16, 185, 129, 0.2)' : `${brandColor}22`,
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                          }}
-                        >
-                          <Feather name={isExistingClient ? 'user-check' : 'zap'} size={16} color={isExistingClient ? '#10B981' : brandColor} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13.5 }}>
-                            {isExistingClient
-                              ? `¡Hola de nuevo, ${clientName.split(' ')[0] || 'Cliente VIP'}!`
-                              : '¿Ya estás registrado con nosotros?'}
-                          </Text>
-                          <Text style={{ color: tColor.muted, fontSize: 11.5, marginTop: 1 }}>
-                            {isExistingClient
-                              ? `Cliente verificado • ${bookingMatchedVisits} visita(s) acumulada(s)${bookingClientCoupons > 0 ? ` • 🏆 ${bookingClientCoupons} cupón(es)` : ''}`
-                              : 'Autocompleta tu nombre, correo y beneficios con tu teléfono'}
-                          </Text>
-                        </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                      <View
+                        style={{
+                          width: 34,
+                          height: 34,
+                          borderRadius: 10,
+                          backgroundColor: isExistingClient ? 'rgba(16, 185, 129, 0.2)' : `${brandColor}22`,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexShrink: 0,
+                          marginTop: 2,
+                        }}
+                      >
+                        <Feather name={isExistingClient ? 'user-check' : 'zap'} size={16} color={isExistingClient ? '#10B981' : brandColor} />
                       </View>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: isMobile ? 14.5 : 14, lineHeight: 20 }}>
+                          {isExistingClient
+                            ? tr(`¡Hola de nuevo, ${clientName.split(' ')[0] || 'Cliente VIP'}!`, `Welcome back, ${clientName.split(' ')[0] || 'VIP Client'}!`)
+                            : tr('¿Ya estás registrado con nosotros?', 'Already registered with us?')}
+                        </Text>
+                        <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4, lineHeight: 17 }}>
+                          {isExistingClient
+                            ? tr(
+                                `Cliente verificado • ${bookingMatchedVisits} visita(s)${bookingClientCoupons > 0 ? ` • 🏆 ${bookingClientCoupons} cupón(es)` : ''}`,
+                                `Verified client • ${bookingMatchedVisits} visit(s)${bookingClientCoupons > 0 ? ` • 🏆 ${bookingClientCoupons} coupon(s)` : ''}`
+                              )
+                            : tr('Valida tu cuenta con iOS o Google, o completa tus datos como Usuario.', 'Verify with iOS or Google, or fill in your details as User.')}
+                        </Text>
+                      </View>
+                    </View>
 
+                    {isExistingClient ? (
                       <TouchableOpacity
                         activeOpacity={0.85}
                         onPress={() => {
-                          if (isExistingClient) {
-                            setIsExistingClient(false);
-                            setBookingMatchedVisits(0);
-                            setBookingClientCoupons(0);
-                            setClientName('');
-                            setClientEmail('');
-                            setClientPhone('');
-                            setBookingLookupQuery('');
-                            setBookingAuthMethod(null);
-                            setShowBookingQuickLookup(true);
-                          } else {
-                            setShowBookingQuickLookup(!showBookingQuickLookup);
-                          }
+                          setIsExistingClient(false);
+                          setBookingMatchedVisits(0);
+                          setBookingClientCoupons(0);
+                          setClientName('');
+                          setClientEmail('');
+                          setClientPhone('');
+                          setBookingLookupQuery('');
+                          setBookingAuthMethod(null);
+                          setAcceptedBookingTerms(false);
+                          setBookingEntryMode('existing');
                         }}
                         style={{
-                          paddingVertical: 8,
-                          paddingHorizontal: 12,
+                          marginTop: 12,
+                          height: 40,
+                          paddingHorizontal: 14,
                           borderRadius: 10,
                           borderWidth: 1,
-                          borderColor: isExistingClient ? tColor.border : brandColor,
-                          backgroundColor: isExistingClient ? tColor.input : brandColor,
+                          borderColor: tColor.border,
+                          backgroundColor: tColor.input,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 6,
                         }}
                       >
-                        <Text style={{ color: isExistingClient ? tColor.muted : '#FFFFFF', fontWeight: '900', fontSize: 12 }}>
-                          {isExistingClient ? 'Cambiar cliente' : (showBookingQuickLookup ? 'Cerrar ✕' : '⚡ Autocompletar')}
+                        <Text style={{ color: tColor.muted, fontWeight: '900', fontSize: 12.5 }}>
+                          {tr('Cambiar cliente', 'Switch client')}
                         </Text>
                       </TouchableOpacity>
-                    </View>
-
-                    {showBookingQuickLookup && !isExistingClient ? (
-                      <View style={{ marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: tColor.border, flexDirection: isMobile ? 'column' : 'row', gap: 10 }}>
-                        <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 11, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 46 }}>
-                          <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={100} />
-                          <TextInput
-                            style={{ flex: 1, color: tColor.text, paddingHorizontal: 12, fontSize: 14.5, fontWeight: '700', outlineStyle: 'none' } as any}
-                            placeholder="Tu teléfono o correo registrado..."
-                            placeholderTextColor={tColor.muted}
-                            value={bookingLookupQuery}
-                            onChangeText={setBookingLookupQuery}
-                            onSubmitEditing={handleQuickLookupInBooking}
-                          />
-                        </View>
+                    ) : (
+                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
                         <TouchableOpacity
                           activeOpacity={0.85}
                           onPress={() => {
-                            handleQuickLookupInBooking();
-                            setBookingAuthMethod('manual');
+                            if (bookingEntryMode === 'existing') {
+                              setBookingEntryMode(null);
+                            } else {
+                              setBookingAuthMethod(null);
+                              setBookingEntryMode('existing');
+                            }
                           }}
-                          disabled={isSearchingBookingClient}
                           style={{
-                            backgroundColor: '#10B981',
-                            paddingVertical: 12,
-                            paddingHorizontal: 18,
-                            borderRadius: 11,
+                            flex: 1,
+                            height: 42,
+                            paddingHorizontal: 10,
+                            borderRadius: 10,
+                            borderWidth: 1,
+                            borderColor: bookingEntryMode === 'existing' ? brandColor : (bookingEntryMode === null ? brandColor : tColor.border),
+                            backgroundColor: bookingEntryMode === 'existing' || bookingEntryMode === null ? brandColor : tColor.input,
+                            flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            flexDirection: 'row',
-                            gap: 6,
+                            gap: 5,
                           }}
                         >
-                          <Feather name="search" size={14} color="#FFFFFF" />
-                          <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13 }}>
-                            {isSearchingBookingClient ? 'Buscando...' : 'Cargar Mis Datos'}
+                          <Text numberOfLines={1} style={{ color: bookingEntryMode === 'existing' || bookingEntryMode === null ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                            {bookingEntryMode === 'existing'
+                              ? tr('Cerrar ✕', 'Close ✕')
+                              : tr('⚡ Autocompletar', '⚡ Autofill')}
                           </Text>
                         </TouchableOpacity>
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => {
+                            if (bookingEntryMode === 'new') {
+                              setBookingEntryMode(null);
+                            } else {
+                              setBookingAuthMethod(null);
+                              setBookingEntryMode('new');
+                            }
+                          }}
+                          style={{
+                            flex: 1,
+                            height: 42,
+                            paddingHorizontal: 10,
+                            borderRadius: 10,
+                            borderWidth: 1,
+                            borderColor: bookingEntryMode === 'new' ? brandColor : tColor.border,
+                            backgroundColor: bookingEntryMode === 'new' ? brandColor : tColor.input,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 5,
+                          }}
+                        >
+                          {bookingEntryMode !== 'new' ? <Feather name="user-plus" size={13} color={brandColor} /> : null}
+                          <Text numberOfLines={1} style={{ color: bookingEntryMode === 'new' ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                            {bookingEntryMode === 'new'
+                              ? tr('Cerrar ✕', 'Close ✕')
+                              : tr('Soy nuevo', 'I am new')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    )}
+
+                    {bookingEntryMode !== null && !isExistingClient ? (
+                      <View style={{ marginTop: 14, paddingTop: 14, borderTopWidth: 1, borderTopColor: tColor.border, gap: 10 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                          <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
+                            {bookingEntryMode === 'new'
+                              ? tr('Elige cómo deseas registrarte:', 'Choose how you want to sign up:')
+                              : tr('Elige cómo validar y cargar tus datos:', 'Choose how to verify and load your info:')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.35)', paddingHorizontal: 8, paddingVertical: 2.5, borderRadius: 8 }}>
+                            <Feather name="shield" size={11} color="#10B981" />
+                            <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>
+                              {tr('Protegido', 'Protected')}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            disabled={isAuthenticatingProvider}
+                            onPress={handleAppleProviderAuth}
+                            style={{
+                              flex: 1,
+                              height: 44,
+                              borderRadius: 11,
+                              backgroundColor: theme === 'dark' ? '#FFFFFF' : '#0F131A',
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 6,
+                              paddingHorizontal: 8,
+                            }}
+                          >
+                            <Ionicons name="logo-apple" size={16} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
+                            <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 12.5 }}>
+                              iOS
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            disabled={isAuthenticatingProvider}
+                            onPress={async () => {
+                              setIsAuthenticatingProvider(true);
+                              try {
+                                if (Platform.OS === 'web') {
+                                  await supabase.auth.signInWithOAuth({
+                                    provider: 'google',
+                                    options: { redirectTo: typeof window !== 'undefined' ? window.location.href : undefined }
+                                  });
+                                } else {
+                                  alert(tr('Completa tu correo y datos para validar tu cuenta con Google o continuar como Usuario.', 'Enter your email and info to link your Google account or continue as User.'));
+                                }
+                              } catch (_e) {}
+                              setIsExistingClient(false);
+                              setBookingMatchedVisits(0);
+                              setBookingClientCoupons(0);
+                              setClientName('');
+                              setClientEmail('');
+                              setClientPhone('');
+                              setBookingAuthMethod('google');
+                              setBookingEntryMode(null);
+                              setShowBookingQuickLookup(false);
+                              setIsAuthenticatingProvider(false);
+                            }}
+                            style={{
+                              flex: 1,
+                              height: 44,
+                              borderRadius: 11,
+                              backgroundColor: tColor.bg,
+                              borderWidth: 1,
+                              borderColor: tColor.border,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 6,
+                              paddingHorizontal: 8,
+                            }}
+                          >
+                            <Ionicons name="logo-google" size={15} color="#EA4335" />
+                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                              Google
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => {
+                              setBookingAuthMethod('manual');
+                              setBookingEntryMode(null);
+                              setShowBookingQuickLookup(false);
+                            }}
+                            style={{
+                              flex: 1,
+                              height: 44,
+                              borderRadius: 11,
+                              backgroundColor: `${brandColor}16`,
+                              borderWidth: 1,
+                              borderColor: brandColor,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 6,
+                              paddingHorizontal: 8,
+                            }}
+                          >
+                            <Feather name="user" size={15} color={brandColor} />
+                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '900', fontSize: 12.5 }}>
+                              {tr('Usuario', 'User')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <Text style={{ color: tColor.muted, fontSize: 10.5, lineHeight: 15 }}>
+                          {bookingEntryMode === 'new'
+                            ? tr('🔒 Regístrate rápido con iOS o Google, o toca Usuario para ingresar tu información.', '🔒 Sign up fast with iOS or Google, or tap User to enter your details.')
+                            : tr('🔒 Tus datos solo se utilizan para confirmar tu cita y proteger tu expediente.', '🔒 Your info is used solely to confirm your appointment and protect your record.')}
+                        </Text>
                       </View>
                     ) : null}
                   </View>
 
-                  {/* 🎯 EXPERIENCIA UI/UX PROFESIONAL: 3 OPCIONES INICIALES (APPLE / GOOGLE / MANUAL) */}
-                  {!bookingAuthMethod && !isExistingClient && !clientName.trim() ? (
-                    <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 18, marginBottom: 16, gap: 12 }}>
-                      <Text style={{ color: tColor.text, fontSize: 14.5, fontWeight: '900', textAlign: 'center', marginBottom: 2 }}>
-                        {tr('¿Cómo deseas completar tus datos para esta cita?', 'How would you like to complete your info for this booking?')}
-                      </Text>
-                      <Text style={{ color: tColor.muted, fontSize: 11.5, textAlign: 'center', marginBottom: 6, lineHeight: 16 }}>
-                        {tr('La información es necesaria para el funcionamiento de la app (gestión de tu turno, expediente VIP y recordatorios).', 'Information is required for app functionality (appointment management, VIP records, and reminders).')}
-                      </Text>
-
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => {
-                          setClientName('Cesar Gomez');
-                          setClientEmail('cesar.gomez@picktime.book');
-                          setBookingAuthMethod('apple');
-                        }}
-                        style={{
-                          height: 50,
-                          borderRadius: 12,
-                          backgroundColor: '#FFFFFF',
-                          flexDirection: 'row',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: 10,
-                        }}
-                      >
-                        <Ionicons name="logo-apple" size={20} color="#000000" />
-                        <Text style={{ color: '#000000', fontWeight: '900', fontSize: 14.5 }}>
-                          {tr('Continuar con Apple', 'Continue with Apple')}
+                  {/* ✅ FORMULARIO DE CONTACTO + CAMBIAR MÉTODO + TÉRMINOS (OCULTO HASTA ELEGIR MÉTODO O "NO ESTOY REGISTRADO") */}
+                  {(bookingAuthMethod !== null || isExistingClient) ? (
+                  <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 16, marginBottom: 16 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.03)', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: tColor.border }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                        <Ionicons
+                          name={bookingAuthMethod === 'apple' ? 'logo-apple' : bookingAuthMethod === 'google' ? 'logo-google' : 'person-outline'}
+                          size={16}
+                          color={bookingAuthMethod === 'apple' ? (theme === 'dark' ? '#FFFFFF' : tColor.text) : bookingAuthMethod === 'google' ? '#EA4335' : brandColor}
+                        />
+                        <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '900', flex: 1 }} numberOfLines={1}>
+                          {bookingAuthMethod === 'apple'
+                            ? 'iOS'
+                            : bookingAuthMethod === 'google'
+                            ? 'Google'
+                            : tr('Usuario', 'User')}
                         </Text>
-                      </TouchableOpacity>
-
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => {
-                          setClientName('Cesar Gomez');
-                          setClientEmail('cesar.gomez@picktime.book');
-                          setBookingAuthMethod('google');
-                        }}
-                        style={{
-                          height: 50,
-                          borderRadius: 12,
-                          backgroundColor: 'rgba(255,255,255,0.06)',
-                          borderWidth: 1,
-                          borderColor: tColor.border,
-                          flexDirection: 'row',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: 10,
-                        }}
-                      >
-                        <Ionicons name="logo-google" size={18} color="#EA4335" />
-                        <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 14.5 }}>
-                          {tr('Continuar con Google', 'Continue with Google')}
-                        </Text>
-                      </TouchableOpacity>
-
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 2 }}>
-                        <View style={{ flex: 1, height: 1, backgroundColor: tColor.border }} />
-                        <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase' }}>
-                          {tr('o', 'or')}
-                        </Text>
-                        <View style={{ flex: 1, height: 1, backgroundColor: tColor.border }} />
                       </View>
 
-                      <TouchableOpacity
-                        activeOpacity={0.85}
-                        onPress={() => setBookingAuthMethod('manual')}
-                        style={{
-                          height: 50,
-                          borderRadius: 12,
-                          backgroundColor: `${brandColor}16`,
-                          borderWidth: 1.5,
-                          borderColor: brandColor,
-                          flexDirection: 'row',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: 8,
-                        }}
-                      >
-                        <Feather name="edit-3" size={16} color={brandColor} />
-                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14.5 }}>
-                          {tr('Continuar con Nombre y Teléfono (Sin cuenta)', 'Continue with Name & Phone (Guest)')}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    /* ✅ CAMPOS HABILITADOS TRAS ELEGIR UNA DE LAS 3 OPCIONES + CAMBIAR MÉTODO + TÉRMINOS */
-                    <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 16, marginBottom: 16 }}>
-                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.03)', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: tColor.border }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                          <Ionicons
-                            name={bookingAuthMethod === 'apple' ? 'logo-apple' : bookingAuthMethod === 'google' ? 'logo-google' : 'person-outline'}
-                            size={16}
-                            color={bookingAuthMethod === 'apple' ? '#FFFFFF' : bookingAuthMethod === 'google' ? '#EA4335' : brandColor}
-                          />
-                          <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '900', flex: 1 }} numberOfLines={1}>
-                            {bookingAuthMethod === 'apple'
-                              ? tr('Apple', 'Apple')
-                              : bookingAuthMethod === 'google'
-                              ? tr('Google', 'Google')
-                              : tr('Tus Datos de Contacto', 'Your Contact Details')}
+                      {!isExistingClient ? (
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => {
+                            setBookingAuthMethod(null);
+                            setClientName('');
+                            setClientEmail('');
+                            setClientPhone('');
+                            setAcceptedBookingTerms(false);
+                            setBookingEntryMode('existing');
+                            setShowBookingQuickLookup(false);
+                          }}
+                          style={{ paddingLeft: 8 }}
+                        >
+                          <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textDecorationLine: 'underline' }}>
+                            {tr('Cambiar método', 'Change method')}
                           </Text>
-                        </View>
-
-                        {!isExistingClient ? (
-                          <TouchableOpacity
-                            activeOpacity={0.8}
-                            onPress={() => {
-                              setBookingAuthMethod(null);
-                              setClientName('');
-                              setClientEmail('');
-                              setAcceptedBookingTerms(false);
-                            }}
-                            style={{ paddingLeft: 8 }}
-                          >
-                            <Text style={{ color: brandColor, fontSize: 10, fontWeight: '900', textDecorationLine: 'underline' }}>
-                              {tr('Cambiar método', 'Change method')}
-                            </Text>
-                          </TouchableOpacity>
-                        ) : null}
-                      </View>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
 
                       <View style={{ marginBottom: 14 }}>
                         <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
@@ -8079,8 +8349,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </Text>
                         </View>
                       </View>
-                    </View>
-                  )}
+                  </View>
+                  ) : null}
 
                   {/* 📜 MODAL DEDICADO PARA LEER LOS TÉRMINOS Y CONDICIONES COMPLETOS */}
                   <Modal
@@ -8092,44 +8362,82 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     <View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.82)', justifyContent: 'center', padding: 20 }}>
                       <View style={{ backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF', borderRadius: 22, borderWidth: 1.5, borderColor: tColor.border, padding: 24, maxHeight: '80%', maxWidth: 540, width: '100%', alignSelf: 'center' }}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, paddingBottom: 12 }}>
-                          <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
-                            📜 {tr('Términos, Condiciones y Privacidad', 'Terms, Conditions & Privacy')}
-                          </Text>
+                          <View style={{ flex: 1, paddingRight: 8 }}>
+                            <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
+                              📜 {tr('Términos, Condiciones y Privacidad', 'Terms, Conditions & Privacy')}
+                            </Text>
+                            {legalDocVersion ? (
+                              <Text style={{ color: brandColor, fontSize: 11, fontWeight: '800', marginTop: 2 }}>
+                                {tr(`Versión vigente: ${legalDocVersion}`, `Active version: ${legalDocVersion}`)}
+                              </Text>
+                            ) : null}
+                          </View>
                           <TouchableOpacity onPress={() => setIsTermsModalOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                             <Feather name="x" size={20} color={tColor.muted} />
                           </TouchableOpacity>
                         </View>
 
                         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 10 }}>
-                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800' }}>
-                            1. Creación Automática de Expediente Digital
-                          </Text>
-                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                            {tr(
-                              'Al agendar tu cita con Apple ID, Google o con tu Nombre y Teléfono, PickTime Book crea o actualiza tu expediente digital de cliente sin requerir contraseñas, permitiéndote gestionar tus turnos, recibir recordatorios oportunos y acumular visitas en el plan de fidelización VIP y cupones de referido.',
-                              'By booking your appointment with Apple ID, Google, or your Name & Phone, PickTime Book creates or updates your digital client record without passwords, allowing you to manage appointments, receive timely reminders, and earn VIP rewards.'
-                            )}
-                          </Text>
+                          {isLoadingLegalDoc ? (
+                            <View style={{ paddingVertical: 28, alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                              <ActivityIndicator size="small" color={brandColor} />
+                              <Text style={{ color: tColor.muted, fontSize: 12.5 }}>
+                                {tr('Cargando documento legal...', 'Loading legal document...')}
+                              </Text>
+                            </View>
+                          ) : legalDocHtml ? (
+                            Platform.OS === 'web' ? (
+                              <div
+                                style={{ color: tColor.muted, fontSize: 13, lineHeight: '1.6' }}
+                                dangerouslySetInnerHTML={{ __html: legalDocHtml }}
+                              />
+                            ) : (
+                              parseHtmlBlocksForModal(legalDocHtml).map((blk, bIdx) => (
+                                <Text
+                                  key={`legal-blk-${bIdx}`}
+                                  style={
+                                    blk.isTitle
+                                      ? { color: tColor.text, fontSize: 14.5, fontWeight: '900', marginTop: bIdx > 0 ? 6 : 0 }
+                                      : { color: tColor.muted, fontSize: 12.5, lineHeight: 19 }
+                                  }
+                                >
+                                  {blk.text}
+                                </Text>
+                              ))
+                            )
+                          ) : (
+                            <>
+                              <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800' }}>
+                                1. Creación Automática de Expediente Digital
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                                {tr(
+                                  'Al agendar tu cita con Apple ID, Google o con tu Nombre y Teléfono, PickTime Book crea o actualiza tu expediente digital de cliente sin requerir contraseñas, permitiéndote gestionar tus turnos, recibir recordatorios oportunos y acumular visitas en el plan de fidelización VIP y cupones de referido.',
+                                  'By booking your appointment with Apple ID, Google, or your Name & Phone, PickTime Book creates or updates your digital client record without passwords, allowing you to manage appointments, receive timely reminders, and earn VIP rewards.'
+                                )}
+                              </Text>
 
-                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
-                            2. Puntualidad, Recordatorios (6h) y Cancelación (3h)
-                          </Text>
-                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                            {tr(
-                              'Recibirás un recordatorio 6 horas antes de tu turno para confirmar tu asistencia en un toque. En caso de no poder asistir, solicitamos cancelar con al menos 3 horas de anticipación para liberar el espacio al profesional.',
-                              'You will receive a reminder 6 hours prior to your slot. If you cannot attend, please cancel at least 3 hours in advance to free up the slot.'
-                            )}
-                          </Text>
+                              <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
+                                2. Puntualidad, Recordatorios (6h) y Cancelación (3h)
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                                {tr(
+                                  'Recibirás un recordatorio 6 horas antes de tu turno para confirmar tu asistencia en un toque. En caso de no poder asistir, solicitamos cancelar con al menos 3 horas de anticipación para liberar el espacio al profesional.',
+                                  'You will receive a reminder 6 hours prior to your slot. If you cannot attend, please cancel at least 3 hours in advance to free up the slot.'
+                                )}
+                              </Text>
 
-                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
-                            3. Privacidad y Seguridad de Datos (Apple Guideline 5.1.1)
-                          </Text>
-                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                            {tr(
-                              'Tus datos de contacto son estrictamente confidenciales y se utilizan de manera exclusiva para la coordinación de tus servicios en este negocio. Nunca comercializamos información personal con terceros.',
-                              'Your contact details are strictly confidential and used exclusively for coordinating services at this business. Never sell personal information to third parties.'
-                            )}
-                          </Text>
+                              <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
+                                3. Privacidad y Seguridad de Datos (Apple Guideline 5.1.1)
+                              </Text>
+                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                                {tr(
+                                  'Tus datos de contacto son estrictamente confidenciales y se utilizan de manera exclusiva para la coordinación de tus servicios en este negocio. Nunca comercializamos información personal con terceros.',
+                                  'Your contact details are strictly confidential and used exclusively for coordinating services at this business. Never sell personal information to third parties.'
+                                )}
+                              </Text>
+                            </>
+                          )}
                         </ScrollView>
 
                         <TouchableOpacity
@@ -8165,25 +8473,11 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </View>
                   ) : null}
 
-                  {tenantInfo?.loyaltyConfig?.referralActive ? (
-                    !isExistingClient ? (
-                      <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.05)', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#10B981', marginBottom: 32 }}>
-                        <Text style={[styles.inputLabel, { color: '#10B981', marginBottom: 4 }]}>🤝 ¿Te recomendó un amigo?</Text>
-                        <Text style={{ color: tColor.muted, fontSize: 12, marginBottom: 8 }}>
-                          Ingresa el número de teléfono de quien te refirió. ¡Al completar tu cita, él recibirá un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento y +1 punto en su plan de fidelidad!
-                        </Text>
-                        <View style={{ flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
-                          <CountryCodeSelector value={referredByCountryCode} onChange={setReferredByCountryCode} tColor={tColor} width={105} />
-                          <TextInput style={{ flex: 1, color: tColor.text, padding: 14, outlineStyle: 'none' } as any} placeholder="Teléfono de quien te recomendó (Opcional)" placeholderTextColor={tColor.muted} keyboardType="phone-pad" value={referredByPhone} onChangeText={text => setReferredByPhone(text.replace(/[^0-9\s-]/g, ''))} />
-                        </View>
-                      </View>
-                    ) : (
-                      <View style={{ backgroundColor: tColor.input, padding: 16, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, marginBottom: 32 }}>
-                        <Text style={{ color: tColor.muted, fontSize: 12, fontStyle: 'italic', textAlign: 'center' }}>
-                          ℹ️ Ya eres cliente registrado. ¡Recuerda que si tus amigos nuevos ponen tu número ({clientPhone}) en su primera cita, tú ganas un {tenantInfo.loyaltyConfig.referralDiscountPercent || 20}% de descuento!
-                        </Text>
-                      </View>
-                    )
+                  {isExistingClient && tenantInfo?.loyaltyConfig?.referralActive ? (
+                    <View style={{ backgroundColor: tColor.input, padding: 14, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, marginBottom: 16 }}>
+                      <Text style={{ color: '#10B981', fontWeight: 'bold', fontSize: 13 }}>🌟 Cliente Frecuente Verificado</Text>
+                      <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4 }}>El código de referido de amigo nuevo solo aplica en tu primera cita.</Text>
+                    </View>
                   ) : null}
 
                   {/* 🌟 AVISO DE POLÍTICA DE PROTECCIÓN AL NEGOCIO: 3H PARA AGENDAR Y RECORDATORIO 6H ANTES 🌟 */}

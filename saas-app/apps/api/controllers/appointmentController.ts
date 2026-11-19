@@ -276,19 +276,127 @@ export async function getVehicleByPlate(req: Request, res: Response) {
   }
 }
 
+const DEFAULT_TERMS_HTML = `<div class="terms-container"><h2>Términos, Condiciones y Privacidad — PickTime Book</h2><p><strong>1. Creación Automática de Expediente Digital:</strong> Al agendar tu cita con iOS, Google o con tu Nombre y Teléfono, PickTime Book crea o actualiza tu expediente digital sin requerir contraseñas.</p><p><strong>2. Puntualidad, Recordatorios (6h) y Cancelación (3h):</strong> Recibirás un recordatorio 6 horas antes de tu turno y solicitamos cancelar con al menos 3 horas de anticipación.</p><p><strong>3. Privacidad y Seguridad de Datos:</strong> Tus datos de contacto se utilizan exclusivamente para coordinar tus servicios.</p></div>`;
+
+// =========================================================================
+// ⚖️📱 REGISTRO EN LEGAL_DOCUMENTS + USER_LEGAL_ACCEPTANCES + USER_DEVICES
+// =========================================================================
+async function recordLegalAcceptanceAndDevice(params: {
+  req: Request;
+  userId: string;
+  tenantId: string;
+  acceptedTerms?: boolean;
+  deviceInfo?: {
+    pushToken?: string;
+    deviceModel?: string;
+    os?: string;
+    authProvider?: string;
+  };
+}) {
+  const { req, userId, tenantId, acceptedTerms = true, deviceInfo } = params;
+
+  // 1. Registrar aceptación legal en user_legal_acceptances tomando el documento activo de legal_documents
+  if (acceptedTerms !== false) {
+    try {
+      let activeDocId: string | null = null;
+
+      const docRowsRes = await db.execute(sql`
+        SELECT id
+        FROM public.legal_documents
+        WHERE (document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
+          AND is_active = true
+          AND (tenant_id = ${tenantId}::uuid OR tenant_id IS NULL)
+        ORDER BY CASE WHEN tenant_id = ${tenantId}::uuid THEN 0 ELSE 1 END, published_at DESC
+        LIMIT 1
+      `);
+      const docRows = Array.isArray(docRowsRes) ? docRowsRes : (docRowsRes as any).rows || [];
+      if (docRows.length > 0 && docRows[0]?.id) {
+        activeDocId = String(docRows[0].id);
+      } else {
+        // Si no existe ningún registro en legal_documents, creamos el documento activo inicial con content_html
+        const insertedDocRes = await db.execute(sql`
+          INSERT INTO public.legal_documents (tenant_id, document_type, version, content_html, content_url, is_active, published_at)
+          VALUES (${tenantId}::uuid, 'terms_and_conditions', '2026.1', ${DEFAULT_TERMS_HTML}, 'https://autoflow.app/legal/terms', true, NOW())
+          RETURNING id
+        `);
+        const insertedDocRows = Array.isArray(insertedDocRes) ? insertedDocRes : (insertedDocRes as any).rows || [];
+        if (insertedDocRows.length > 0 && insertedDocRows[0]?.id) {
+          activeDocId = String(insertedDocRows[0].id);
+        }
+      }
+
+      if (activeDocId) {
+        const forwardedFor = String(req.headers['x-forwarded-for'] || '');
+        const ipAddress = (forwardedFor.split(',')[0] || req.socket?.remoteAddress || '').trim().slice(0, 45) || null;
+        const userAgent = String(req.headers['user-agent'] || '').trim() || null;
+
+        await db.execute(sql`
+          INSERT INTO public.user_legal_acceptances (user_id, document_id, accepted_at, ip_address, user_agent)
+          VALUES (${userId}::uuid, ${activeDocId}::uuid, NOW(), ${ipAddress}, ${userAgent})
+        `);
+      }
+    } catch (legalErr) {
+      console.warn('⚠️ Aviso registrando aceptación legal (user_legal_acceptances):', legalErr);
+    }
+  }
+
+  // 2. Registrar / actualizar dispositivo en user_devices
+  try {
+    const rawToken = String(deviceInfo?.pushToken || '').trim();
+    const cleanPhoneForToken = extractCleanPhone(String(req.body?.clientPhone || ''));
+    const fallbackToken = `device-${userId.slice(0, 8)}-${cleanPhoneForToken || 'web'}`;
+    const finalPushToken = (rawToken || fallbackToken).slice(0, 255);
+
+    const providerSuffix = deviceInfo?.authProvider ? ` (${deviceInfo.authProvider})` : '';
+    const deviceModel = String(
+      deviceInfo?.deviceModel ||
+      req.body?.deviceModel ||
+      `Client Device${providerSuffix}`
+    ).slice(0, 100);
+
+    const osName = String(
+      deviceInfo?.os ||
+      req.body?.os ||
+      (String(req.headers['user-agent'] || '').toLowerCase().includes('iphone') || String(req.headers['user-agent'] || '').toLowerCase().includes('ios')
+        ? 'ios'
+        : String(req.headers['user-agent'] || '').toLowerCase().includes('android')
+          ? 'android'
+          : 'web')
+    ).slice(0, 50);
+
+    await db.execute(sql`
+      INSERT INTO public.user_devices (user_id, push_token, device_model, os, is_active, last_used_at, created_at)
+      VALUES (${userId}::uuid, ${finalPushToken}, ${deviceModel}, ${osName}, true, NOW(), NOW())
+      ON CONFLICT (push_token)
+      DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        device_model = EXCLUDED.device_model,
+        os = EXCLUDED.os,
+        is_active = true,
+        last_used_at = NOW()
+    `);
+  } catch (devErr) {
+    console.warn('⚠️ Aviso registrando dispositivo (user_devices):', devErr);
+  }
+}
+
 // 📝 CREAR CITA Y DISPARAR NOTIFICACIÓN A TELEGRAM
 export async function createAppointment(req: Request, res: Response) {
   try {
     const tenantId = req.headers['x-tenant-id'] as string;
     if (!tenantId) return res.status(400).json({ error: 'Falta identificador (x-tenant-id).' });
 
-    const { clientName, clientEmail, clientPhone, serviceId, staffId, appointmentDate, notes, metadata } = req.body;
+    const { clientName, clientEmail, clientPhone, serviceId, staffId, appointmentDate, notes, metadata, acceptedTerms, deviceInfo } = req.body;
     
     // Usamos appointmentDate (que viene del front) o scheduledAt por compatibilidad
     const finalDateStr = appointmentDate || req.body.scheduledAt;
 
-    if (!clientEmail || !clientName || !finalDateStr) {
-      return res.status(400).json({ error: 'Faltan campos obligatorios (Email, Nombre, Fecha).' });
+    const cleanPhoneDigitsForEmail = extractCleanPhone(clientPhone || '');
+    const normalizedEmail = String(clientEmail || '').trim().toLowerCase()
+      || (cleanPhoneDigitsForEmail ? `tel.${cleanPhoneDigitsForEmail}@autoflow.local` : '');
+
+    if (!normalizedEmail || !clientName || !finalDateStr) {
+      return res.status(400).json({ error: 'Faltan campos obligatorios (Nombre, Fecha y Correo o Teléfono).' });
     }
 
     let resolvedServiceId = serviceId;
@@ -313,22 +421,42 @@ export async function createAppointment(req: Request, res: Response) {
     const cleanMetadata = safeParseJSON(metadata);
 
     // 🌟 FIND OR CREATE USER 
-    let [user] = await db.select().from(users).where(and(eq(users.email, clientEmail.trim().toLowerCase()), eq(users.tenantId, tenantId)));
+    let [user] = await db.select().from(users).where(and(eq(users.email, normalizedEmail), eq(users.tenantId, tenantId)));
     
+    if (!user && cleanPhoneDigitsForEmail.length >= 7) {
+      const [userByPhone] = await db.select().from(users).where(
+        and(
+          eq(users.tenantId, tenantId),
+          sql`regexp_replace(${users.phone}, '[^0-9]', '', 'g') LIKE ${'%' + cleanPhoneDigitsForEmail + '%'}`
+        )
+      );
+      if (userByPhone) user = userByPhone;
+    }
+
     if (!user) {
       [user] = await db.insert(users).values({ 
         tenantId, 
         name: clientName.trim(), 
-        email: clientEmail.trim().toLowerCase(), 
+        email: normalizedEmail, 
         phone: clientPhone?.trim() || '', 
         role: 'client'
       }).returning();
     } else {
       [user] = await db.update(users).set({ 
         name: clientName.trim(), 
-        phone: clientPhone?.trim() || user.phone 
+        phone: clientPhone?.trim() || user.phone,
+        email: String(clientEmail || '').trim().includes('@') ? String(clientEmail).trim().toLowerCase() : user.email
       }).where(eq(users.id, user.id)).returning();
     }
+
+    // ⚖️📱 Registrar aceptación legal (desde legal_documents -> user_legal_acceptances) y dispositivo en user_devices
+    await recordLegalAcceptanceAndDevice({
+      req,
+      userId: user.id,
+      tenantId,
+      acceptedTerms: acceptedTerms !== false,
+      deviceInfo: deviceInfo || cleanMetadata?.deviceInfo
+    });
 
     // 🌟 VEHÍCULO
     let vehicleRecord: any = null;
@@ -2697,5 +2825,64 @@ ${diagnosticSummary ? `🔎 <b>Estado técnico:</b> ${diagnosticSummary}
   } catch (error: any) {
     console.error('Error en requestAutoFlowSupport:', error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+// =========================================================================
+// 📜 OBTENER DOCUMENTO LEGAL ACTIVO DESDE public.legal_documents (content_html)
+// =========================================================================
+export async function getActiveLegalDocument(req: Request, res: Response) {
+  try {
+    const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenantId as string) || '';
+    const docType = String(req.query.type || 'terms_and_conditions').trim();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
+
+    const rowsRes = isUuid
+      ? await db.execute(sql`
+          SELECT id, tenant_id, document_type, version, content_html, content_url, is_active, published_at
+          FROM public.legal_documents
+          WHERE (document_type ILIKE ${docType} OR document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
+            AND is_active = true
+            AND (tenant_id = ${tenantId}::uuid OR tenant_id IS NULL)
+          ORDER BY CASE WHEN tenant_id = ${tenantId}::uuid THEN 0 ELSE 1 END, published_at DESC
+          LIMIT 1
+        `)
+      : await db.execute(sql`
+          SELECT id, tenant_id, document_type, version, content_html, content_url, is_active, published_at
+          FROM public.legal_documents
+          WHERE (document_type ILIKE ${docType} OR document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
+            AND is_active = true
+            AND tenant_id IS NULL
+          ORDER BY published_at DESC
+          LIMIT 1
+        `);
+
+    const rows = Array.isArray(rowsRes) ? rowsRes : (rowsRes as any).rows || [];
+    if (rows.length > 0) {
+      return res.status(200).json({ success: true, document: rows[0] });
+    }
+
+    return res.status(200).json({
+      success: true,
+      document: {
+        id: null,
+        document_type: 'terms_and_conditions',
+        version: '2026.1',
+        content_html: DEFAULT_TERMS_HTML,
+        is_active: true
+      }
+    });
+  } catch (error: any) {
+    console.error('Error leyendo legal_documents:', error);
+    return res.status(200).json({
+      success: true,
+      document: {
+        id: null,
+        document_type: 'terms_and_conditions',
+        version: '2026.1',
+        content_html: DEFAULT_TERMS_HTML,
+        is_active: true
+      }
+    });
   }
 }

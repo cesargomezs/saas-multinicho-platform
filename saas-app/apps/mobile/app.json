@@ -15,14 +15,21 @@
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
+      "usesAppleSignIn": true,
+      "bundleIdentifier": "com.cesargomez853.saasapp",
+      "entitlements": {
+        "com.apple.developer.applesignin": [
+          "Default"
+        ]
+      },
       "splash": {
         "image": "./assets/images/logopick-time.jpg",
         "resizeMode": "contain",
         "backgroundColor": "#000000"
-      },
-      "bundleIdentifier": "com.cesargomez853.mobile"
+      }
     },
     "android": {
+      "package": "com.cesargomez853.saasapp",
       "adaptiveIcon": {
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/logopick-time.jpg"
@@ -32,7 +39,7 @@
     "web": {
       "bundler": "metro",
       "output": "server",
-      "favicon": "./assets/images/logopicktime.jpg"
+      "favicon": "./assets/images/logopick-time.jpg"
     },
     "plugins": [
       "expo-router",
@@ -45,6 +52,7 @@
           "backgroundColor": "#000000"
         }
       ],
+      "expo-apple-authentication",
       "expo-sharing",
       "expo-font",
       "expo-status-bar",
