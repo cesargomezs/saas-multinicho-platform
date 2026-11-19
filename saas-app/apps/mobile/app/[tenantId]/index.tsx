@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator, Share } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator, Share, Modal } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
@@ -668,8 +668,30 @@ export default function TenantDashboardScreen() {
   const { width } = useWindowDimensions();
   const isMobile = width <= 850;
 
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const gTheme = (globalThis as any).__autoflowTheme;
+    if (gTheme === 'light' || gTheme === 'dark') return gTheme;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        const saved = window.localStorage.getItem('autoflow_theme');
+        if (saved === 'light' || saved === 'dark') return saved;
+      } catch (e) {}
+    }
+    return 'dark';
+  });
+
+  const handleToggleTheme = () => {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    (globalThis as any).__autoflowTheme = nextTheme;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try { window.localStorage.setItem('autoflow_theme', nextTheme); } catch (e) {}
+    }
+  };
+
   const [lang, setLang] = useState<'es' | 'en'>(() => {
+    const gLang = (globalThis as any).__autoflowLang;
+    if (gLang === 'en' || gLang === 'es') return gLang;
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
       try {
         const saved = window.localStorage.getItem('autoflow_lang');
@@ -682,6 +704,7 @@ export default function TenantDashboardScreen() {
   const handleToggleLang = () => {
     const nextLang = lang === 'es' ? 'en' : 'es';
     setLang(nextLang);
+    (globalThis as any).__autoflowLang = nextLang;
     if (Platform.OS === 'web' && typeof window !== 'undefined') {
       try { window.localStorage.setItem('autoflow_lang', nextLang); } catch (e) {}
     }
@@ -962,6 +985,7 @@ export default function TenantDashboardScreen() {
   const [agendaFilter, setAgendaFilter] = useState<'today' | 'upcoming' | 'reports' | 'staff' | 'catalogo' | 'horarios' | 'portafolio' | 'fidelidad' | 'recepcion_ia'>('today');
   const [activeView, setActiveView] = useState<'servicios' | 'expediente' | 'mecanico'>('servicios');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const [todayOrders, setTodayOrders] = useState<any[]>([]);
   const [upcomingOrders, setUpcomingOrders] = useState<any[]>([]);
@@ -1099,6 +1123,9 @@ export default function TenantDashboardScreen() {
   const [availableTimes, setAvailableTimes] = useState<string[]>([]);
   const [referredByPhone, setReferredByPhone] = useState('');
   const [bookingClientCoupons, setBookingClientCoupons] = useState<number>(0);
+  const [bookingAuthMethod, setBookingAuthMethod] = useState<'apple' | 'google' | 'manual' | null>(null);
+  const [acceptedBookingTerms, setAcceptedBookingTerms] = useState<boolean>(false);
+  const [isTermsModalOpen, setIsTermsModalOpen] = useState<boolean>(false);
   const [isExistingClient, setIsExistingClient] = useState(false);
   const [showBookingQuickLookup, setShowBookingQuickLookup] = useState(false);
   const [bookingLookupQuery, setBookingLookupQuery] = useState('');
@@ -3098,6 +3125,18 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
   };
 
   const handleBookService = async () => {
+    if (!clientName.trim()) {
+      alert(tr('Por favor completa tu Nombre Completo.', 'Please enter your Full Name.'));
+      return;
+    }
+    if (!clientPhone.trim() || cleanPhoneDigits(clientPhone).length < 7) {
+      alert(tr('Por favor ingresa un número de Teléfono válido.', 'Please enter a valid Phone Number.'));
+      return;
+    }
+    if (!acceptedBookingTerms) {
+      alert(tr('Debes leer y aceptar los Términos y Condiciones para confirmar tu reserva.', 'You must read and accept the Terms & Conditions to confirm your booking.'));
+      return;
+    }
     setIsSubmitting(true);
     try {
       const combinedDateTime = appointmentDate && appointmentTime ? `${appointmentDate}T${appointmentTime}:00Z` : new Date().toISOString();
@@ -3527,38 +3566,50 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           </View>
         ) : null}
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 6 : 10, flexShrink: 0 }}>
-          {/* 🌐 Selector Bilingüe Profesional (ES | EN) */}
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 7 : 10, flexShrink: 0 }}>
+          {/* ⚙️ Botón Único de Configuración (Idioma ES/EN + Tema Light/Dark) — Idéntico al Directorio */}
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={handleToggleLang}
-            accessibilityLabel="Cambiar idioma / Switch language"
+            onPress={() => {
+              setIsMobileMenuOpen(false);
+              setIsSettingsOpen((prev) => !prev);
+            }}
+            accessibilityLabel={tr('Abrir preferencias de idioma y apariencia', 'Open language and appearance settings')}
             style={{
               height: isMobile ? 36 : 42,
-              paddingHorizontal: 4,
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: tColor.input,
-              borderWidth: 1,
-              borderColor: tColor.border,
+              paddingHorizontal: isMobile ? 9 : 12,
               borderRadius: isMobile ? 10 : 12,
+              backgroundColor: isSettingsOpen ? `${brandColor}22` : tColor.input,
+              borderWidth: 1.5,
+              borderColor: isSettingsOpen ? brandColor : tColor.border,
               flexDirection: 'row',
-              gap: 2
+              alignItems: 'center',
+              gap: 5,
             }}
           >
-            <View style={{ paddingHorizontal: isMobile ? 6 : 9, paddingVertical: isMobile ? 4 : 5, borderRadius: 7, backgroundColor: lang === 'es' ? brandColor : 'transparent' }}>
-              <Text style={{ color: lang === 'es' ? '#FFFFFF' : tColor.muted, fontWeight: '900', fontSize: isMobile ? 11 : 11.5 }}>ES</Text>
+            <Feather
+              name="settings"
+              size={15}
+              color={isSettingsOpen ? brandColor : tColor.text}
+            />
+            <View
+              style={{
+                paddingHorizontal: 5,
+                paddingVertical: 1.5,
+                borderRadius: 6,
+                backgroundColor: isSettingsOpen ? brandColor : tColor.border,
+              }}
+            >
+              <Text
+                style={{
+                  color: isSettingsOpen ? '#FFFFFF' : tColor.text,
+                  fontSize: 10,
+                  fontWeight: '900',
+                }}
+              >
+                {lang.toUpperCase()}
+              </Text>
             </View>
-            <View style={{ paddingHorizontal: isMobile ? 6 : 9, paddingVertical: isMobile ? 4 : 5, borderRadius: 7, backgroundColor: lang === 'en' ? brandColor : 'transparent' }}>
-              <Text style={{ color: lang === 'en' ? '#FFFFFF' : tColor.muted, fontWeight: '900', fontSize: isMobile ? 11 : 11.5 }}>EN</Text>
-            </View>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            style={{ width: isMobile ? 36 : 42, height: isMobile ? 36 : 42, alignItems: 'center', justifyContent: 'center', backgroundColor: tColor.border, borderRadius: isMobile ? 10 : 12 }}
-          >
-            <Feather name={theme === 'dark' ? 'sun' : 'moon'} size={isMobile ? 16 : 17} color={theme === 'dark' ? '#F59E0B' : '#475569'} />
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -3573,6 +3624,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
               borderRadius: isMobile ? 10 : 12
             }]}
             onPress={() => {
+              setIsSettingsOpen(false);
               if (router.canGoBack()) {
                 router.back();
               } else {
@@ -3587,13 +3639,214 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           {isMobile ? (
             <TouchableOpacity
               style={{ width: 36, height: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: isMobileMenuOpen ? brandColor : tColor.border, borderRadius: 10 }}
-              onPress={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              onPress={() => {
+                setIsSettingsOpen(false);
+                setIsMobileMenuOpen(!isMobileMenuOpen);
+              }}
             >
               <Feather name={isMobileMenuOpen ? 'x' : 'menu'} size={18} color={isMobileMenuOpen ? '#FFFFFF' : tColor.text} />
             </TouchableOpacity>
           ) : null}
         </View>
       </View>
+
+      {/* ⚙️ POPOVER FLOTANTE DE CONFIGURACIÓN (IDIOMA + TEMA CLARO / OSCURO) */}
+      {isSettingsOpen ? (
+        <>
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={() => setIsSettingsOpen(false)}
+            style={{
+              position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(2, 6, 23, 0.5)',
+              backdropFilter: Platform.OS === 'web' ? 'blur(4px)' : undefined,
+              zIndex: 240,
+            } as any}
+          />
+          <View
+            style={{
+              position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
+              top: Platform.OS === 'ios' ? 110 : Platform.OS === 'android' ? 96 : 74,
+              right: isMobile ? 14 : 40,
+              width: isMobile ? Math.min(width - 28, 330) : 320,
+              backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF',
+              borderRadius: 20,
+              borderWidth: 1.5,
+              borderColor: tColor.border,
+              padding: 18,
+              zIndex: 250,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: 16 },
+              shadowOpacity: 0.45,
+              shadowRadius: 28,
+              elevation: 16,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                paddingBottom: 12,
+                marginBottom: 14,
+                borderBottomWidth: 1,
+                borderBottomColor: tColor.border,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 8,
+                    backgroundColor: `${brandColor}20`,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Feather name="sliders" size={14} color={brandColor} />
+                </View>
+                <Text style={{ color: tColor.text, fontSize: 14.5, fontWeight: '900' }}>
+                  {tr('Preferencias', 'Preferences')}
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setIsSettingsOpen(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Feather name="x" size={18} color={tColor.muted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text
+              style={{
+                color: tColor.muted,
+                fontSize: 11,
+                fontWeight: '900',
+                textTransform: 'uppercase',
+                letterSpacing: 0.7,
+                marginBottom: 8,
+              }}
+            >
+              🌐 {tr('Idioma de la App', 'App Language')}
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                backgroundColor: tColor.input,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: tColor.border,
+                padding: 4,
+                gap: 6,
+                marginBottom: 16,
+              }}
+            >
+              {[
+                { key: 'es', flag: '🇪🇸', label: 'Español' },
+                { key: 'en', flag: '🇺🇸', label: 'English' },
+              ].map((item) => {
+                const active = lang === item.key;
+                return (
+                  <TouchableOpacity
+                    key={item.key}
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      if (lang !== item.key) handleToggleLang();
+                    }}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 10,
+                      borderRadius: 9,
+                      backgroundColor: active ? brandColor : 'transparent',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    <Text style={{ fontSize: 14 }}>{item.flag}</Text>
+                    <Text
+                      style={{
+                        color: active ? '#FFFFFF' : tColor.muted,
+                        fontWeight: '900',
+                        fontSize: 13,
+                      }}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text
+              style={{
+                color: tColor.muted,
+                fontSize: 11,
+                fontWeight: '900',
+                textTransform: 'uppercase',
+                letterSpacing: 0.7,
+                marginBottom: 8,
+              }}
+            >
+              🌓 {tr('Tema Visual', 'Appearance')}
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                backgroundColor: tColor.input,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: tColor.border,
+                padding: 4,
+                gap: 6,
+              }}
+            >
+              {[
+                { key: 'dark', icon: 'moon', iconColor: '#38BDF8', label: tr('Oscuro', 'Dark') },
+                { key: 'light', icon: 'sun', iconColor: '#F59E0B', label: tr('Claro', 'Light') },
+              ].map((tOpt) => {
+                const active = theme === tOpt.key;
+                return (
+                  <TouchableOpacity
+                    key={tOpt.key}
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      if (theme !== tOpt.key) handleToggleTheme();
+                    }}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 10,
+                      borderRadius: 9,
+                      backgroundColor: active ? brandColor : 'transparent',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    <Feather name={tOpt.icon as any} size={14} color={active ? '#FFFFFF' : tOpt.iconColor} />
+                    <Text
+                      style={{
+                        color: active ? '#FFFFFF' : tColor.muted,
+                        fontWeight: '900',
+                        fontSize: 13,
+                      }}
+                    >
+                      {tOpt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        </>
+      ) : null}
 
       {/* 📱 MENÚ DESPLEGABLE MÓVIL CON BACKDROP Y SAFE AREA PARA iOS / ANDROID 📱 */}
       {isMobile && isMobileMenuOpen ? (
@@ -7505,7 +7758,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       borderColor: isExistingClient ? '#10B981' : (showBookingQuickLookup ? brandColor : 'rgba(59, 130, 246, 0.35)'),
                       borderRadius: 14,
                       padding: 14,
-                      marginBottom: 8,
+                      marginBottom: 12,
                     }}
                   >
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -7547,6 +7800,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             setClientEmail('');
                             setClientPhone('');
                             setBookingLookupQuery('');
+                            setBookingAuthMethod(null);
                             setShowBookingQuickLookup(true);
                           } else {
                             setShowBookingQuickLookup(!showBookingQuickLookup);
@@ -7582,7 +7836,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
                         <TouchableOpacity
                           activeOpacity={0.85}
-                          onPress={handleQuickLookupInBooking}
+                          onPress={() => {
+                            handleQuickLookupInBooking();
+                            setBookingAuthMethod('manual');
+                          }}
                           disabled={isSearchingBookingClient}
                           style={{
                             backgroundColor: '#10B981',
@@ -7604,17 +7861,298 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     ) : null}
                   </View>
 
-                  <View style={{ marginBottom: 16 }}>
-                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Nombre Completo (Ej: Cesar Lopez)" placeholderTextColor={tColor.muted} value={clientName} onChangeText={text => setClientName(toTitleCase(text))} />
-                  </View>
-                  
-                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 16, marginBottom: 16 }}>
-                    <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1 }]} placeholder="Correo Electrónico" placeholderTextColor={tColor.muted} keyboardType="email-address" value={clientEmail} onChangeText={setClientEmail} />
-                    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
-                      <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
-                      <TextInput style={{ flex: 1, color: tColor.text, padding: 14, outlineStyle: 'none' } as any} placeholder="Teléfono" placeholderTextColor={tColor.muted} keyboardType="phone-pad" value={clientPhone} onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))} />
+                  {/* 🎯 EXPERIENCIA UI/UX PROFESIONAL: 3 OPCIONES INICIALES (APPLE / GOOGLE / MANUAL) */}
+                  {!bookingAuthMethod && !isExistingClient && !clientName.trim() ? (
+                    <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 18, marginBottom: 16, gap: 12 }}>
+                      <Text style={{ color: tColor.text, fontSize: 14.5, fontWeight: '900', textAlign: 'center', marginBottom: 2 }}>
+                        {tr('¿Cómo deseas completar tus datos para esta cita?', 'How would you like to complete your info for this booking?')}
+                      </Text>
+                      <Text style={{ color: tColor.muted, fontSize: 11.5, textAlign: 'center', marginBottom: 6, lineHeight: 16 }}>
+                        {tr('La información es necesaria para el funcionamiento de la app (gestión de tu turno, expediente VIP y recordatorios).', 'Information is required for app functionality (appointment management, VIP records, and reminders).')}
+                      </Text>
+
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          setClientName('Cesar Gomez');
+                          setClientEmail('cesar.gomez@picktime.book');
+                          setBookingAuthMethod('apple');
+                        }}
+                        style={{
+                          height: 50,
+                          borderRadius: 12,
+                          backgroundColor: '#FFFFFF',
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <Ionicons name="logo-apple" size={20} color="#000000" />
+                        <Text style={{ color: '#000000', fontWeight: '900', fontSize: 14.5 }}>
+                          {tr('Continuar con Apple', 'Continue with Apple')}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          setClientName('Cesar Gomez');
+                          setClientEmail('cesar.gomez@picktime.book');
+                          setBookingAuthMethod('google');
+                        }}
+                        style={{
+                          height: 50,
+                          borderRadius: 12,
+                          backgroundColor: 'rgba(255,255,255,0.06)',
+                          borderWidth: 1,
+                          borderColor: tColor.border,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <Ionicons name="logo-google" size={18} color="#EA4335" />
+                        <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 14.5 }}>
+                          {tr('Continuar con Google', 'Continue with Google')}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 2 }}>
+                        <View style={{ flex: 1, height: 1, backgroundColor: tColor.border }} />
+                        <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800', textTransform: 'uppercase' }}>
+                          {tr('o', 'or')}
+                        </Text>
+                        <View style={{ flex: 1, height: 1, backgroundColor: tColor.border }} />
+                      </View>
+
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setBookingAuthMethod('manual')}
+                        style={{
+                          height: 50,
+                          borderRadius: 12,
+                          backgroundColor: `${brandColor}16`,
+                          borderWidth: 1.5,
+                          borderColor: brandColor,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 8,
+                        }}
+                      >
+                        <Feather name="edit-3" size={16} color={brandColor} />
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14.5 }}>
+                          {tr('Continuar con Nombre y Teléfono (Sin cuenta)', 'Continue with Name & Phone (Guest)')}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
-                  </View>
+                  ) : (
+                    /* ✅ CAMPOS HABILITADOS TRAS ELEGIR UNA DE LAS 3 OPCIONES + CAMBIAR MÉTODO + TÉRMINOS */
+                    <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 16, marginBottom: 16 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.03)', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: tColor.border }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                          <Ionicons
+                            name={bookingAuthMethod === 'apple' ? 'logo-apple' : bookingAuthMethod === 'google' ? 'logo-google' : 'person-outline'}
+                            size={16}
+                            color={bookingAuthMethod === 'apple' ? '#FFFFFF' : bookingAuthMethod === 'google' ? '#EA4335' : brandColor}
+                          />
+                          <Text style={{ color: tColor.text, fontSize: 12.5, fontWeight: '900', flex: 1 }} numberOfLines={1}>
+                            {bookingAuthMethod === 'apple'
+                              ? tr('Apple', 'Apple')
+                              : bookingAuthMethod === 'google'
+                              ? tr('Google', 'Google')
+                              : tr('Tus Datos de Contacto', 'Your Contact Details')}
+                          </Text>
+                        </View>
+
+                        {!isExistingClient ? (
+                          <TouchableOpacity
+                            activeOpacity={0.8}
+                            onPress={() => {
+                              setBookingAuthMethod(null);
+                              setClientName('');
+                              setClientEmail('');
+                              setAcceptedBookingTerms(false);
+                            }}
+                            style={{ paddingLeft: 8 }}
+                          >
+                            <Text style={{ color: brandColor, fontSize: 10, fontWeight: '900', textDecorationLine: 'underline' }}>
+                              {tr('Cambiar método', 'Change method')}
+                            </Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                          {tr('NOMBRE COMPLETO *', 'FULL NAME *')}
+                        </Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
+                          placeholder={tr('Nombre Completo (Ej: Cesar Lopez)', 'Full Name (e.g., Cesar Lopez)')}
+                          placeholderTextColor={tColor.muted}
+                          value={clientName}
+                          onChangeText={text => setClientName(toTitleCase(text))}
+                        />
+                      </View>
+
+                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14, marginBottom: 16 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                            {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(clientPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                            <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
+                            <TextInput
+                              style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '700', outlineStyle: 'none' } as any}
+                              placeholder={tr('(909) 000-0000', '(909) 000-0000')}
+                              placeholderTextColor={tColor.muted}
+                              keyboardType="phone-pad"
+                              value={clientPhone}
+                              onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))}
+                            />
+                          </View>
+                        </View>
+
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                            {tr('CORREO ELECTRÓNICO (OPCIONAL)', 'EMAIL ADDRESS (OPTIONAL)')}
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
+                            placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                            placeholderTextColor={tColor.muted}
+                            keyboardType="email-address"
+                            autoCapitalize="none"
+                            value={clientEmail}
+                            onChangeText={setClientEmail}
+                          />
+                        </View>
+                      </View>
+
+                      {/* 📜 CHECKBOX DE TÉRMINOS Y CONDICIONES (OBLIGATORIO PARA AGENDAR) */}
+                      <View
+                        style={{
+                          backgroundColor: acceptedBookingTerms ? 'rgba(16, 185, 129, 0.1)' : tColor.bg,
+                          borderWidth: 1,
+                          borderColor: acceptedBookingTerms ? '#10B981' : tColor.border,
+                          borderRadius: 12,
+                          padding: 12,
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <TouchableOpacity
+                          activeOpacity={0.8}
+                          onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}
+                          style={{
+                            width: 22,
+                            height: 22,
+                            borderRadius: 6,
+                            borderWidth: 2,
+                            borderColor: acceptedBookingTerms ? brandColor : tColor.muted,
+                            backgroundColor: acceptedBookingTerms ? brandColor : 'transparent',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          {acceptedBookingTerms ? <Feather name="check" size={14} color="#FFFFFF" /> : null}
+                        </TouchableOpacity>
+
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 18 }}>
+                            <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
+                              {tr('He leído y acepto los ', 'I have read and accept the ')}
+                            </Text>
+                            <Text
+                              onPress={() => setIsTermsModalOpen(true)}
+                              style={{ color: brandColor, fontWeight: '900', textDecorationLine: 'underline' }}
+                            >
+                              {tr('Términos y Condiciones', 'Terms & Conditions')}
+                            </Text>
+                            <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
+                              {tr(' de PickTime Book.', ' of PickTime Book.')}
+                            </Text>
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  )}
+
+                  {/* 📜 MODAL DEDICADO PARA LEER LOS TÉRMINOS Y CONDICIONES COMPLETOS */}
+                  <Modal
+                    visible={isTermsModalOpen}
+                    transparent
+                    animationType="fade"
+                    onRequestClose={() => setIsTermsModalOpen(false)}
+                  >
+                    <View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.82)', justifyContent: 'center', padding: 20 }}>
+                      <View style={{ backgroundColor: theme === 'dark' ? '#0B0F17' : '#FFFFFF', borderRadius: 22, borderWidth: 1.5, borderColor: tColor.border, padding: 24, maxHeight: '80%', maxWidth: 540, width: '100%', alignSelf: 'center' }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottomWidth: 1, borderBottomColor: tColor.border, paddingBottom: 12 }}>
+                          <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
+                            📜 {tr('Términos, Condiciones y Privacidad', 'Terms, Conditions & Privacy')}
+                          </Text>
+                          <TouchableOpacity onPress={() => setIsTermsModalOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                            <Feather name="x" size={20} color={tColor.muted} />
+                          </TouchableOpacity>
+                        </View>
+
+                        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingBottom: 10 }}>
+                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800' }}>
+                            1. Creación Automática de Expediente Digital
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                            {tr(
+                              'Al agendar tu cita con Apple ID, Google o con tu Nombre y Teléfono, PickTime Book crea o actualiza tu expediente digital de cliente sin requerir contraseñas, permitiéndote gestionar tus turnos, recibir recordatorios oportunos y acumular visitas en el plan de fidelización VIP y cupones de referido.',
+                              'By booking your appointment with Apple ID, Google, or your Name & Phone, PickTime Book creates or updates your digital client record without passwords, allowing you to manage appointments, receive timely reminders, and earn VIP rewards.'
+                            )}
+                          </Text>
+
+                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
+                            2. Puntualidad, Recordatorios (6h) y Cancelación (3h)
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                            {tr(
+                              'Recibirás un recordatorio 6 horas antes de tu turno para confirmar tu asistencia en un toque. En caso de no poder asistir, solicitamos cancelar con al menos 3 horas de anticipación para liberar el espacio al profesional.',
+                              'You will receive a reminder 6 hours prior to your slot. If you cannot attend, please cancel at least 3 hours in advance to free up the slot.'
+                            )}
+                          </Text>
+
+                          <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
+                            3. Privacidad y Seguridad de Datos (Apple Guideline 5.1.1)
+                          </Text>
+                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                            {tr(
+                              'Tus datos de contacto son estrictamente confidenciales y se utilizan de manera exclusiva para la coordinación de tus servicios en este negocio. Nunca comercializamos información personal con terceros.',
+                              'Your contact details are strictly confidential and used exclusively for coordinating services at this business. Never sell personal information to third parties.'
+                            )}
+                          </Text>
+                        </ScrollView>
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => {
+                            setAcceptedBookingTerms(true);
+                            setIsTermsModalOpen(false);
+                          }}
+                          style={{
+                            marginTop: 16,
+                            backgroundColor: brandColor,
+                            paddingVertical: 14,
+                            borderRadius: 12,
+                            alignItems: 'center',
+                          }}
+                        >
+                          <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14.5 }}>
+                            {tr('✓ He leído y Acepto los Términos', '✓ I have read & Accept the Terms')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </Modal>
 
                   {(tenantInfo?.loyaltyConfig?.referralActive && bookingClientCoupons > 0) ? (
                     <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#3B82F6', marginBottom: 16 }}>
@@ -8661,9 +9199,16 @@ const styles = StyleSheet.create({
   glassCard: { borderWidth: 1, borderRadius: 22, padding: 22, width: '100%', maxWidth: '100%' },
   flexCard: { borderWidth: 1, borderRadius: 22, padding: 22, flexGrow: 1, minWidth: 260, maxWidth: '100%' },
   modalOverlay: { backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 1000 },
-  modalContentWrapper: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16 },
-  modalContent: { borderWidth: 1, borderRadius: 24, padding: 24, width: '100%', maxWidth: 750 },
-  closeBtn: { position: 'absolute', top: 20, right: 20, width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', zIndex: 10 },
+  modalContentWrapper: {
+    flexGrow: 1,
+    justifyContent: Platform.OS === 'web' ? 'center' : 'flex-start',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'ios' ? 62 : Platform.OS === 'android' ? 46 : 24,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 28,
+  },
+  modalContent: { borderWidth: 1, borderRadius: 24, padding: 24, width: '100%', maxWidth: 750, position: 'relative' },
+  closeBtn: { position: 'absolute', top: 20, right: 20, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', zIndex: 20 },
   chip: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 20, borderWidth: 1, marginRight: 8, marginBottom: 8 },
   chipText: { fontWeight: 'bold', fontSize: 13 },
   activeChipText: { color: '#FFFFFF' },

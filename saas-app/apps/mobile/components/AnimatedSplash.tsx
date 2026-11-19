@@ -164,36 +164,29 @@ export default function AnimatedSplash({ onAnimationFinish }: AnimatedSplashProp
       </View>
 
       {/* Fila de íconos de servicios */}
-      <View style={styles.servicesRow}>
+        <View style={styles.servicesRow}>
         {SERVICES.map((item, idx) => {
-          const translateY = serviceAnims[idx].interpolate({
+            const translateY = serviceAnims[idx].interpolate({
             inputRange: [0, 1],
             outputRange: [40, 0],
-          });
+            });
 
-          return (
+            return (
             <Animated.View
-              key={idx}
-              style={[
+                key={idx}
+                style={[
                 styles.serviceItem,
                 {
-                  opacity: serviceAnims[idx],
-                  transform: [{ scale: serviceAnims[idx] }, { translateY }],
+                    opacity: serviceAnims[idx],
+                    transform: [{ translateY }],
                 },
-              ]}
+                ]}
             >
-              <View style={[styles.iconCircle, { backgroundColor: item.color + '20' }]}>
-                {item.lib === 'MaterialCommunityIcons' ? (
-                  <MaterialCommunityIcons name={item.name as any} size={26} color={item.color} />
-                ) : (
-                  <Ionicons name={item.name as any} size={26} color={item.color} />
-                )}
-              </View>
-              <Text style={styles.serviceLabel}>{item.label}</Text>
+                {/* contenido del ítem */}
             </Animated.View>
-          );
+            );
         })}
-      </View>
+        </View>
     </Animated.View>
   );
 }

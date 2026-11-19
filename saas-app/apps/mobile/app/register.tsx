@@ -515,11 +515,11 @@ Confirma tu correo de ${provider === 'apple' ? 'Apple' : 'Google'} y el PIN de e
 
   // 📲 Compartir código promocional por WhatsApp / SMS / Share nativo (iOS, Android y Web)
   const handleSharePromoCode = async (codeStr: string) => {
-    const shareMessage = `🎁 ¡Hola! Te comparto un código promocional VIP de activación para registrar tu negocio en Pick-Time Book / AutoFlow:\n\n🎟️ Código: ${codeStr}\n\nIngresa a la app en "Soy un Negocio" ➔ Paso 4 (Plan) ➔ "Tengo un Cupón Promocional" y actívalo gratis.`;
+    const shareMessage = `🎁 ¡Hola! Te comparto un código promocional VIP de activación para registrar tu negocio en PickTime Book:\n\n🎟️ Código: ${codeStr}\n\nIngresa a la app en "Soy un Negocio" ➔ Paso 4 (Plan) ➔ "Tengo un Cupón Promocional" y actívalo gratis.`;
     try {
       if (Platform.OS === 'web') {
         if (typeof navigator !== 'undefined' && (navigator as any).share) {
-          await (navigator as any).share({ title: 'Cupón VIP AutoFlow', text: shareMessage });
+          await (navigator as any).share({ title: 'Cupón VIP PickTime Book', text: shareMessage });
           return;
         }
         if (typeof navigator !== 'undefined' && navigator.clipboard) {
@@ -788,14 +788,30 @@ Confirma tu correo de ${provider === 'apple' ? 'Apple' : 'Google'} y el PIN de e
       >
         <TouchableOpacity
           activeOpacity={0.7}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8 }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }}
           onPress={goToDirectory}
         >
-          <View style={{ backgroundColor: primaryColor, width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
-            <Text style={{ color: '#FFF', fontWeight: '900', fontSize: 18 }}>A</Text>
+            <View
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 11,
+              backgroundColor: '#000000',
+              borderWidth: 2.5,
+              borderColor: primaryColor,
+              overflow: 'hidden',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <Image
+              source={require('../assets/images/logopicktime.jpg')}
+              style={{ width: '90%', height: '90%', transform: [{ scale: 1.55 }] }}
+              resizeMode="contain"
+            />
           </View>
           <Text style={{ fontSize: 20, fontWeight: '900', color: '#FFF', letterSpacing: -0.5 }}>
-            AutoFlow <Text style={{ color: '#94A3B8', fontWeight: 'normal', fontSize: 16 }}>/ Partners</Text>
+            PickTime <Text style={{ color: primaryColor }}>Book</Text>
           </Text>
         </TouchableOpacity>
         
@@ -832,7 +848,7 @@ Confirma tu correo de ${provider === 'apple' ? 'Apple' : 'Google'} y el PIN de e
                 </View>
                 
                 <Text style={{ fontSize: isMobile ? 34 : 52, fontWeight: '900', color: '#FFF', textAlign: 'center', marginBottom: 18, lineHeight: isMobile ? 42 : 60, letterSpacing: -1 }}>
-                  Digitaliza tu Negocio, Clínica o Firma Legal con <Text style={{ color: primaryColor }}>AutoFlow</Text>
+                  Digitaliza tu Negocio, Clínica o Firma Legal con <Text style={{ color: primaryColor }}>PickTime Book</Text>
                 </Text>
                 
                 <Text style={{ fontSize: isMobile ? 16 : 18, color: '#94A3B8', textAlign: 'center', maxWidth: 650, lineHeight: isMobile ? 24 : 28, marginBottom: 36 }}>
