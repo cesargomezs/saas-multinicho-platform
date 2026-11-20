@@ -2,9 +2,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, Switch, ActivityIndicator, Share, Modal } from 'react-native';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import * as WebBrowser from 'expo-web-browser';
+
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
+
+try { WebBrowser.maybeCompleteAuthSession(); } catch (_e) {}
 
 // ==========================================
 // ⚙️ CONFIGURACIÓN DE SUPABASE & API
@@ -1173,7 +1177,48 @@ export default function TenantDashboardScreen() {
     return null;
   };
 
-  const handleAppleProviderAuth = async () => {
+  const [expedienteAuthMethod, setExpedienteAuthMethod] = useState<'apple' | 'google' | 'manual'>('manual');
+  const [expedienteEmailInput, setExpedienteEmailInput] = useState<string>('');
+  const [expedientePasswordInput, setExpedientePasswordInput] = useState<string>('');
+  const [showExpedientePassword, setShowExpedientePassword] = useState<boolean>(false);
+  const [expedienteSetPassFirstTime, setExpedienteSetPassFirstTime] = useState<boolean>(false);
+  const [bookingPassword, setBookingPassword] = useState<string>('');
+  const [showBookingPassword, setShowBookingPassword] = useState<boolean>(false);
+  const [lastAppleUserId, setLastAppleUserId] = useState<string>('');
+
+  // 🔐 Valida contra la tabla public.users en BD (iOS, Google o Correo + Contraseña)
+  const authenticateUserAgainstDb = async (payload: {
+    provider: 'apple' | 'google' | 'manual';
+    email?: string;
+    password?: string;
+    appleUserId?: string;
+    fullName?: string;
+    setPasswordIfEmpty?: boolean;
+  }) => {
+    try {
+      const res = await apiFetch('/api/clients/auth', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success && data.client) {
+        return { ok: true, data };
+      }
+      return {
+        ok: false,
+        notRegistered: Boolean(data?.notRegistered),
+        needsPasswordSetup: Boolean(data?.needsPasswordSetup),
+        error: data?.error || tr('No se pudo validar tu cuenta.', 'Could not verify your account.'),
+      };
+    } catch (_e) {
+      return {
+        ok: false,
+        error: tr('Error de conexión con el servidor al validar usuario.', 'Connection error verifying user.'),
+      };
+    }
+  };
+
+  const handleAppleProviderAuth = async (targetContext: 'booking' | 'expediente' = 'booking') => {
     if (Platform.OS !== 'ios') {
       alert(tr('La autenticación con iOS (Apple ID) está disponible en iPhone/iPad.', 'iOS (Apple ID) authentication is available on iOS devices.'));
       return;
@@ -1199,24 +1244,67 @@ export default function TenantDashboardScreen() {
         .filter(Boolean)
         .join(' ')
         .trim();
-      const appleEmail = credential?.email || '';
-      const appleUserId = credential?.user || '';
+      const appleEmail = (credential?.email || '').trim().toLowerCase();
+      const appleUserId = (credential?.user || '').trim();
+      if (appleUserId) setLastAppleUserId(appleUserId);
 
-      let matchedClient: any = null;
-      if (appleEmail) {
-        matchedClient = await lookupExistingClientByIdentifier(appleEmail);
-      }
-      if (!matchedClient && appleUserId) {
-        matchedClient = await lookupExistingClientByIdentifier(appleUserId);
+      // Validar directamente contra la tabla public.users en BD
+      const dbCheck = await authenticateUserAgainstDb({
+        provider: 'apple',
+        email: appleEmail,
+        appleUserId,
+        fullName: appleFullName,
+      });
+
+      if (targetContext === 'expediente') {
+        if (dbCheck.ok && dbCheck.data?.client) {
+          let safeClient = { ...dbCheck.data.client };
+          if (typeof safeClient.metadata === 'string') {
+            try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
+          }
+          setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+          setExpedienteAuthMethod('apple');
+          setIsExpedienteExpanded(false);
+        } else {
+          if (appleEmail) setExpedienteEmailInput(appleEmail);
+          setExpedienteAuthMethod('manual');
+          alert(
+            dbCheck.error ||
+            tr(
+              'Apple ID verificado, pero aún no estás registrado en la base de datos. Completa tu primera reserva o ingresa con tu correo y contraseña.',
+              'Apple ID verified, but you are not registered in the database yet. Complete your first booking or sign in with email & password.'
+            )
+          );
+        }
+        return;
       }
 
-      if (matchedClient) {
-        // Cuenta existente encontrada: autocompletar datos reales y beneficios
+      if (dbCheck.ok && dbCheck.data?.client) {
+        const c = dbCheck.data.client;
+        let meta = c.metadata;
+        if (typeof meta === 'string') {
+          try { meta = JSON.parse(meta); } catch (_e) { meta = {}; }
+        }
+        const dbEarned = Number(meta?.earnedReferralDiscounts || 0);
+        const cPhoneClean = cleanPhoneDigits(c.phone);
+        const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+        const visitsCount = Number(c.loyaltyVisits ?? (Array.isArray(dbCheck.data.serviceHistory) ? dbCheck.data.serviceHistory.length : 0));
+
+        if (c.name) setClientName(toTitleCase(c.name));
+        if (c.email) setClientEmail(c.email);
+        if (c.phone) {
+          const rawPhone = String(c.phone);
+          const matchedCode = COUNTRY_CODES.find((item) => rawPhone.startsWith(item.code));
+          if (matchedCode) setBookingCountryCode(matchedCode.code);
+          setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+        }
+        setBookingMatchedVisits(visitsCount);
+        setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
+        setIsExistingClient(visitsCount > 0 || (Array.isArray(dbCheck.data.serviceHistory) && dbCheck.data.serviceHistory.length > 0));
         setBookingAuthMethod('apple');
         setBookingEntryMode(null);
         setShowBookingQuickLookup(false);
       } else {
-        // Usuario nuevo con Apple ID: limpiar datos previos y dejar campos listos para completar
         setIsExistingClient(false);
         setBookingMatchedVisits(0);
         setBookingClientCoupons(0);
@@ -1236,6 +1324,141 @@ export default function TenantDashboardScreen() {
         tr(
           `No se pudo validar tu cuenta de iOS (Apple).${errDetail ? `\n\nDetalle: ${errDetail}` : ''}\n\nVerifica que el simulador tenga sesión de Apple ID en Ajustes y que el target de Xcode tenga "Sign in with Apple" firmado con una cuenta Apple Developer.`,
           `Could not verify your iOS (Apple) account.${errDetail ? `\n\nDetail: ${errDetail}` : ''}\n\nMake sure Simulator is signed into an Apple ID in Settings and Xcode has "Sign in with Apple" signed with an Apple Developer account.`
+        )
+      );
+    } finally {
+      setIsAuthenticatingProvider(false);
+    }
+  };
+
+  // 🌐 Autenticación con Google (Supabase OAuth + validación contra tabla public.users en BD)
+  const handleGoogleProviderAuth = async (targetContext: 'booking' | 'expediente' = 'booking') => {
+    setIsAuthenticatingProvider(true);
+    try {
+      const redirectUrl =
+        Platform.OS === 'web' && typeof window !== 'undefined'
+          ? window.location.href
+          : 'picktimebook://auth/callback';
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: redirectUrl,
+          skipBrowserRedirect: Platform.OS !== 'web',
+          queryParams: { prompt: 'select_account' },
+        },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (Platform.OS !== 'web' && data?.url) {
+        const authResult = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
+        if (authResult.type === 'success' && authResult.url) {
+          const parsedUrl = new URL(authResult.url);
+          const hashParams = new URLSearchParams(parsedUrl.hash ? parsedUrl.hash.replace(/^#/, '') : '');
+          const accessToken = parsedUrl.searchParams.get('access_token') || hashParams.get('access_token');
+          const refreshToken = parsedUrl.searchParams.get('refresh_token') || hashParams.get('refresh_token');
+          const authCode = parsedUrl.searchParams.get('code');
+
+          let googleUser: any = null;
+          if (accessToken && refreshToken) {
+            const { data: sessData } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            googleUser = sessData?.user || null;
+          } else if (authCode) {
+            const { data: exchData } = await supabase.auth.exchangeCodeForSession(authCode);
+            googleUser = exchData?.user || null;
+          }
+
+          if (!googleUser) {
+            const { data: userData } = await supabase.auth.getUser();
+            googleUser = userData?.user || null;
+          }
+
+          const gEmail = String(googleUser?.email || '').trim().toLowerCase();
+          const gFullName = String(
+            googleUser?.user_metadata?.full_name ||
+            googleUser?.user_metadata?.name ||
+            (gEmail ? gEmail.split('@')[0].replace(/[._-]+/g, ' ') : '')
+          ).trim();
+
+          const dbCheck = await authenticateUserAgainstDb({
+            provider: 'google',
+            email: gEmail,
+            fullName: gFullName,
+          });
+
+          if (targetContext === 'expediente') {
+            if (dbCheck.ok && dbCheck.data?.client) {
+              let safeClient = { ...dbCheck.data.client };
+              if (typeof safeClient.metadata === 'string') {
+                try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
+              }
+              setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+              setExpedienteAuthMethod('google');
+              setIsExpedienteExpanded(false);
+            } else {
+              if (gEmail) setExpedienteEmailInput(gEmail);
+              setExpedienteAuthMethod('manual');
+              alert(
+                dbCheck.error ||
+                tr(
+                  'Google verificado, pero aún no estás registrado en la base de datos. Completa tu primera reserva o ingresa con tu correo y contraseña.',
+                  'Google verified, but you are not registered in the database yet. Complete your first booking or sign in with email & password.'
+                )
+              );
+            }
+            return;
+          }
+
+          if (dbCheck.ok && dbCheck.data?.client) {
+            const c = dbCheck.data.client;
+            let meta = c.metadata;
+            if (typeof meta === 'string') {
+              try { meta = JSON.parse(meta); } catch (_e) { meta = {}; }
+            }
+            const dbEarned = Number(meta?.earnedReferralDiscounts || 0);
+            const cPhoneClean = cleanPhoneDigits(c.phone);
+            const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+            const visitsCount = Number(c.loyaltyVisits ?? (Array.isArray(dbCheck.data.serviceHistory) ? dbCheck.data.serviceHistory.length : 0));
+
+            if (c.name) setClientName(toTitleCase(c.name));
+            if (c.email) setClientEmail(c.email);
+            if (c.phone) {
+              const rawPhone = String(c.phone);
+              const matchedCode = COUNTRY_CODES.find((item) => rawPhone.startsWith(item.code));
+              if (matchedCode) setBookingCountryCode(matchedCode.code);
+              setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+            }
+            setBookingMatchedVisits(visitsCount);
+            setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
+            setIsExistingClient(visitsCount > 0 || (Array.isArray(dbCheck.data.serviceHistory) && dbCheck.data.serviceHistory.length > 0));
+            setBookingAuthMethod('google');
+            setBookingEntryMode(null);
+            setShowBookingQuickLookup(false);
+          } else {
+            setIsExistingClient(false);
+            setBookingMatchedVisits(0);
+            setBookingClientCoupons(0);
+            setClientName(gFullName ? toTitleCase(gFullName) : '');
+            setClientEmail(gEmail);
+            setClientPhone('');
+            setBookingAuthMethod('google');
+            setBookingEntryMode(null);
+            setShowBookingQuickLookup(false);
+          }
+        }
+      }
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      alert(
+        tr(
+          `No se pudo completar el inicio de sesión con Google.${msg ? `\n\nDetalle: ${msg}` : ''}\n\nAsegúrate de tener habilitado el proveedor Google en Supabase Authentication -> Providers.`,
+          `Could not complete Google sign-in.${msg ? `\n\nDetail: ${msg}` : ''}\n\nMake sure Google provider is enabled in Supabase Authentication -> Providers.`
         )
       );
     } finally {
@@ -2105,16 +2328,32 @@ export default function TenantDashboardScreen() {
     } catch (err) { return null; }
   };
 
-  // 📱 Selector universal de imágenes para iOS / Android (Antes, Después, Portafolio y Catálogo)
+  // 📱 Selector universal de imágenes para iOS / Android sin romper el bundler si expo-image-picker no está compilado en el dev client
   const handleNativeImagePick = async (target: 'old' | 'new' | 'portfolio' | 'catalog') => {
     if (Platform.OS === 'web') return;
     try {
-      const dynamicReq: any = typeof require !== 'undefined' ? require : null;
-      const ImagePicker = dynamicReq ? dynamicReq('expo-image-picker') : null;
-      if (!ImagePicker) return;
+      const modName = ['expo', 'image', 'picker'].join('-');
+      const dynamicReq: any = typeof require !== 'undefined' ? (globalThis as any).require || require : null;
+      let ImagePicker: any = null;
+      try {
+        ImagePicker = dynamicReq ? dynamicReq(modName) : null;
+      } catch (_modErr) {
+        ImagePicker = null;
+      }
+
+      if (!ImagePicker || typeof ImagePicker.launchImageLibraryAsync !== 'function') {
+        alert(
+          tr(
+            '📸 El módulo nativo de galería (expo-image-picker) no está compilado aún en este simulador iOS.\n\nEjecuta en apps/mobile:\nnpx expo install expo-image-picker && npx expo run:ios\n\n(En la versión Web ya funciona directamente).',
+            '📸 Native gallery picker (expo-image-picker) is not compiled in this iOS binary yet.\n\nRun in apps/mobile:\nnpx expo install expo-image-picker && npx expo run:ios'
+          )
+        );
+        return;
+      }
+
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        alert('Se requiere permiso para acceder a tus fotos.');
+        alert(tr('Se requiere permiso para acceder a tus fotos.', 'Photo library permission is required.'));
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -2140,7 +2379,7 @@ export default function TenantDashboardScreen() {
         }
       }
     } catch (_err) {
-      alert('No se pudo abrir la galería de fotos en este dispositivo.');
+      alert(tr('No se pudo abrir la galería de fotos en este dispositivo.', 'Could not open the photo gallery on this device.'));
     }
   };
 
@@ -3206,24 +3445,47 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
   };
 
   const handleSearchExpediente = async () => {
-    if (!expedienteQuery) return;
-    setIsSearchingExpediente(true); setClientExpedienteData(null); setIsEditingClientReview(false);
+    const cleanEmail = expedienteEmailInput.trim().toLowerCase();
+    const cleanPass = expedientePasswordInput.trim();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      alert(tr('Por seguridad, ingresa el correo electrónico con el que te registraste.', 'For security, enter your registered email address.'));
+      return;
+    }
+    if (!cleanPass) {
+      alert(tr('Ingresa tu contraseña para validar tu identidad y proteger tu expediente.', 'Enter your password to verify your identity and protect your records.'));
+      return;
+    }
+    setIsSearchingExpediente(true);
+    setClientExpedienteData(null);
+    setIsEditingClientReview(false);
     try {
-      const res = await apiFetch(`/api/clients/history/${expedienteQuery.trim()}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          let safeClient = { ...data.client };
-          if (typeof safeClient.metadata === 'string') {
-             try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch(e){}
-          }
-          setClientExpedienteData({ ...data, client: safeClient });
-          setIsExpedienteExpanded(false); 
-        } else { alert('No se encontró historial para esta búsqueda.'); }
+      const dbCheck = await authenticateUserAgainstDb({
+        provider: 'manual',
+        email: cleanEmail,
+        password: cleanPass,
+        setPasswordIfEmpty: expedienteSetPassFirstTime,
+      });
+
+      if (dbCheck.ok && dbCheck.data?.client) {
+        let safeClient = { ...dbCheck.data.client };
+        if (typeof safeClient.metadata === 'string') {
+          try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
+        }
+        setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+        setExpedienteAuthMethod('manual');
+        setExpedienteSetPassFirstTime(false);
+        setIsExpedienteExpanded(false);
       } else {
-        alert('No se encontró historial para esta búsqueda.');
+        if (dbCheck.needsPasswordSetup) {
+          setExpedienteSetPassFirstTime(true);
+        }
+        alert(dbCheck.error || tr('Credenciales inválidas o usuario no registrado.', 'Invalid credentials or unregistered user.'));
       }
-    } catch (err) { alert('Error de red.'); } finally { setIsSearchingExpediente(false); }
+    } catch (_err) {
+      alert(tr('Error de red al validar tus credenciales.', 'Network error validating your credentials.'));
+    } finally {
+      setIsSearchingExpediente(false);
+    }
   };
 
   // 🌟 Aplica la reacción pendiente (👍/👎) una vez el cliente fue verificado en Expediente 🌟
@@ -3353,6 +3615,16 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       alert(tr('Por favor ingresa un número de Teléfono válido.', 'Please enter a valid Phone Number.'));
       return;
     }
+    if (bookingAuthMethod === 'manual') {
+      if (!clientEmail.trim() || !clientEmail.includes('@')) {
+        alert(tr('Por favor ingresa un Correo Electrónico válido para proteger tu cuenta.', 'Please enter a valid Email Address to protect your account.'));
+        return;
+      }
+      if (!bookingPassword.trim() || bookingPassword.trim().length < 4) {
+        alert(tr('Crea una Contraseña de al menos 4 caracteres para proteger tu expediente.', 'Create a Password of at least 4 characters to protect your records.'));
+        return;
+      }
+    }
     if (!acceptedBookingTerms) {
       alert(tr('Debes leer y aceptar los Términos y Condiciones para confirmar tu reserva.', 'You must read and accept the Terms & Conditions to confirm your booking.'));
       return;
@@ -3397,6 +3669,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           clientName: toTitleCase(clientName), 
           clientEmail, 
           clientPhone: formattedPhone, 
+          clientPassword: bookingAuthMethod === 'manual' ? bookingPassword.trim() : undefined,
+          authProvider: bookingAuthMethod || 'manual',
           serviceId: selectedServiceType, 
           staffId: finalAssignedStaffId, 
           appointmentDate: combinedDateTime, 
@@ -4687,48 +4961,182 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       ) : null}
                     </View>
                     
-                    <Text style={{ color: tColor.muted, marginBottom: 20 }}>
-                      {isAutomotive ? 'Ingresa la placa para consultar el historial.' : 'Ingresa el Teléfono o ID para consultar historial.'}
+                    <Text style={{ color: tColor.muted, marginBottom: 16, fontSize: 13.5, lineHeight: 19 }}>
+                      {tr(
+                        'Por tu seguridad, valida tu identidad con iOS o Google en 1 toque, o ingresa con tu Correo y Contraseña:',
+                        'For your security, verify with iOS or Google in 1 tap, or sign in with your Email and Password:'
+                      )}
                     </Text>
+
+                    {/* 🔐 3 OPCIONES SEGURAS DE ACCESO AL EXPEDIENTE (iOS, Google, Usuario con Correo + Password) */}
+                    <View style={{ backgroundColor: tColor.input, borderRadius: 16, borderWidth: 1, borderColor: tColor.border, padding: 14, marginBottom: 18, gap: 10 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                        <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
+                          {tr('Elige cómo validar y cargar tu expediente:', 'Choose how to verify and load your records:')}
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.35)', paddingHorizontal: 8, paddingVertical: 2.5, borderRadius: 8 }}>
+                          <Feather name="shield" size={11} color="#10B981" />
+                          <Text style={{ color: '#10B981', fontSize: 10, fontWeight: '900' }}>
+                            {tr('Protegido', 'Protected')}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          disabled={isAuthenticatingProvider || isSearchingExpediente}
+                          onPress={() => handleAppleProviderAuth('expediente')}
+                          style={{
+                            flex: 1,
+                            height: 44,
+                            borderRadius: 11,
+                            backgroundColor: theme === 'dark' ? '#FFFFFF' : '#0F131A',
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                            paddingHorizontal: 8,
+                          }}
+                        >
+                          <Ionicons name="logo-apple" size={16} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
+                          <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 12.5 }}>
+                            iOS
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          disabled={isAuthenticatingProvider || isSearchingExpediente}
+                          onPress={() => handleGoogleProviderAuth('expediente')}
+                          style={{
+                            flex: 1,
+                            height: 44,
+                            borderRadius: 11,
+                            backgroundColor: tColor.bg,
+                            borderWidth: 1,
+                            borderColor: tColor.border,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                            paddingHorizontal: 8,
+                          }}
+                        >
+                          <Ionicons name="logo-google" size={15} color="#EA4335" />
+                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                            Google
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => setExpedienteAuthMethod('manual')}
+                          style={{
+                            flex: 1,
+                            height: 44,
+                            borderRadius: 11,
+                            backgroundColor: expedienteAuthMethod === 'manual' ? `${brandColor}22` : tColor.bg,
+                            borderWidth: 1.5,
+                            borderColor: expedienteAuthMethod === 'manual' ? brandColor : tColor.border,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                            paddingHorizontal: 8,
+                          }}
+                        >
+                          <Feather name="user" size={14} color={brandColor} />
+                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                            {tr('Usuario', 'User')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <Text style={{ color: tColor.muted, fontSize: 11, lineHeight: 15 }}>
+                        🔒 {tr('No exponemos tu historial por número telefónico. Solo tú puedes acceder con tu cuenta verificada.', 'We never expose your history by phone number. Only you can access it with your verified account.')}
+                      </Text>
+                    </View>
 
                     {pendingReaction ? (
                       <View style={{ backgroundColor: pendingReaction === 'like' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: pendingReaction === 'like' ? '#10B981' : '#EF4444', borderRadius: 12, padding: 14, marginBottom: 20, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                         <Text style={{ fontSize: 22 }}>{pendingReaction === 'like' ? '👍' : '👎'}</Text>
                         <View style={{ flex: 1 }}>
-                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13 }}>Casi listo: verifica que eres cliente</Text>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13 }}>{tr('Casi listo: valida tu usuario', 'Almost done: verify your account')}</Text>
                           <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 2, lineHeight: 17 }}>
-                            {isAutomotive ? 'Ingresa tu placa' : 'Ingresa tu teléfono o ID'} y registraremos tu {pendingReaction === 'like' ? 'Me gustó' : 'No me gustó'} automáticamente.
+                            {tr('Inicia sesión con iOS, Google o tu Correo y Contraseña para registrar tu calificación.', 'Sign in with iOS, Google, or Email & Password to record your rating.')}
                           </Text>
                         </View>
                         <TouchableOpacity onPress={() => setPendingReaction(null)}>
-                          <Text style={{ color: tColor.muted, fontWeight: 'bold', fontSize: 12 }}>Cancelar</Text>
+                          <Text style={{ color: tColor.muted, fontWeight: 'bold', fontSize: 12 }}>{tr('Cancelar', 'Cancel')}</Text>
                         </TouchableOpacity>
                       </View>
                     ) : null}
-                    
-                    <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12, width: '100%' }}>
-                      {isAutomotive ? (
-                        <TextInput 
-                          style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, flex: 1, textAlign: 'center', fontSize: 18, fontWeight: 'bold' }]} 
-                          placeholder="Placa (Ej: JNT776)" 
-                          placeholderTextColor={tColor.muted} 
-                          value={expedienteQuery} 
-                          onChangeText={text => setExpedienteQuery(text.toUpperCase())} 
-                        />
-                      ) : (
-                        <View style={{ flex: 1, flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, overflow: 'hidden', minHeight: 48 }}>
-                          <CountryCodeSelector value={expedienteCountryCode} onChange={setExpedienteCountryCode} tColor={tColor} width={115} />
-                          <TextInput 
-                            style={{ flex: 1, color: tColor.text, paddingHorizontal: 16, fontSize: 18, fontWeight: 'bold', textAlign: 'center', outlineStyle: 'none' } as any} 
-                            placeholder="Teléfono o ID" 
-                            placeholderTextColor={tColor.muted} 
-                            value={expedienteQuery} 
-                            onChangeText={text => setExpedienteQuery(text.toUpperCase())} 
+
+                    {/* Formulario seguro de Correo + Contraseña (para quienes no usan iOS ni Google) */}
+                    <View style={{ gap: 12, width: '100%' }}>
+                      <View>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                          {tr('CORREO ELECTRÓNICO REGISTRADO *', 'REGISTERED EMAIL *')}
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                          <Feather name="mail" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                          <TextInput
+                            style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                            placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                            placeholderTextColor={tColor.muted}
+                            keyboardType="email-address"
+                            autoCapitalize="none"
+                            value={expedienteEmailInput}
+                            onChangeText={setExpedienteEmailInput}
                           />
                         </View>
-                      )}
-                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor }, isMobile ? { height: 48 } : {}]} onPress={handleSearchExpediente as any} disabled={isSearchingExpediente}>
-                        <Text style={styles.primaryButtonText}>{isSearchingExpediente ? 'Buscando...' : '🔍 Consultar'}</Text>
+                      </View>
+
+                      <View>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                          {tr('CONTRASEÑA *', 'PASSWORD *')}
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                          <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                          <TextInput
+                            style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                            placeholder="••••••••"
+                            placeholderTextColor={tColor.muted}
+                            secureTextEntry={!showExpedientePassword}
+                            autoCapitalize="none"
+                            value={expedientePasswordInput}
+                            onChangeText={setExpedientePasswordInput}
+                          />
+                          <TouchableOpacity onPress={() => setShowExpedientePassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                            <Feather name={showExpedientePassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+
+                      {expedienteSetPassFirstTime ? (
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => setExpedienteSetPassFirstTime((prev) => !prev)}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderWidth: 1, borderColor: '#F59E0B', padding: 10, borderRadius: 10 }}
+                        >
+                          <Feather name="check-square" size={16} color="#F59E0B" />
+                          <Text style={{ color: tColor.text, fontSize: 12, flex: 1 }}>
+                            {tr('Activar esta contraseña para mi cuenta existente en este negocio.', 'Set this password for my existing account at this business.')}
+                          </Text>
+                        </TouchableOpacity>
+                      ) : null}
+
+                      <TouchableOpacity
+                        style={[styles.primaryButton, { backgroundColor: brandColor, height: 50, marginTop: 4 }]}
+                        onPress={handleSearchExpediente as any}
+                        disabled={isSearchingExpediente || isAuthenticatingProvider}
+                      >
+                        <Text style={styles.primaryButtonText}>
+                          {isSearchingExpediente
+                            ? tr('Validando en Base de Datos...', 'Verifying in Database...')
+                            : tr('🔐 Validar y Abrir Expediente', '🔐 Verify & Open Records')}
+                        </Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -8138,7 +8546,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <TouchableOpacity
                             activeOpacity={0.85}
                             disabled={isAuthenticatingProvider}
-                            onPress={handleAppleProviderAuth}
+                            onPress={() => handleAppleProviderAuth('booking')}
                             style={{
                               flex: 1,
                               height: 44,
@@ -8160,29 +8568,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <TouchableOpacity
                             activeOpacity={0.85}
                             disabled={isAuthenticatingProvider}
-                            onPress={async () => {
-                              setIsAuthenticatingProvider(true);
-                              try {
-                                if (Platform.OS === 'web') {
-                                  await supabase.auth.signInWithOAuth({
-                                    provider: 'google',
-                                    options: { redirectTo: typeof window !== 'undefined' ? window.location.href : undefined }
-                                  });
-                                } else {
-                                  alert(tr('Completa tu correo y datos para validar tu cuenta con Google o continuar como Usuario.', 'Enter your email and info to link your Google account or continue as User.'));
-                                }
-                              } catch (_e) {}
-                              setIsExistingClient(false);
-                              setBookingMatchedVisits(0);
-                              setBookingClientCoupons(0);
-                              setClientName('');
-                              setClientEmail('');
-                              setClientPhone('');
-                              setBookingAuthMethod('google');
-                              setBookingEntryMode(null);
-                              setShowBookingQuickLookup(false);
-                              setIsAuthenticatingProvider(false);
-                            }}
+                            onPress={() => handleGoogleProviderAuth('booking')}
                             style={{
                               flex: 1,
                               height: 44,
@@ -8313,7 +8699,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                         <View style={{ flex: 1 }}>
                           <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
-                            {tr('CORREO ELECTRÓNICO (OPCIONAL)', 'EMAIL ADDRESS (OPTIONAL)')}
+                            {bookingAuthMethod === 'manual'
+                              ? tr('CORREO ELECTRÓNICO *', 'EMAIL ADDRESS *')
+                              : tr('CORREO ELECTRÓNICO (OPCIONAL)', 'EMAIL ADDRESS (OPTIONAL)')}
                           </Text>
                           <TextInput
                             style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
@@ -8326,6 +8714,29 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           />
                         </View>
                       </View>
+
+                      {bookingAuthMethod === 'manual' ? (
+                        <View style={{ marginBottom: 16 }}>
+                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                            {tr('CONTRASEÑA PARA PROTEGER TU EXPEDIENTE *', 'PASSWORD TO PROTECT YOUR RECORDS *')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                            <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                            <TextInput
+                              style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                              placeholder={tr('Mínimo 4 caracteres', 'Minimum 4 characters')}
+                              placeholderTextColor={tColor.muted}
+                              secureTextEntry={!showBookingPassword}
+                              autoCapitalize="none"
+                              value={bookingPassword}
+                              onChangeText={setBookingPassword}
+                            />
+                            <TouchableOpacity onPress={() => setShowBookingPassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                              <Feather name={showBookingPassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      ) : null}
 
                       {/* 📜 CHECKBOX DE TÉRMINOS Y CONDICIONES (OBLIGATORIO PARA AGENDAR) */}
                       <View

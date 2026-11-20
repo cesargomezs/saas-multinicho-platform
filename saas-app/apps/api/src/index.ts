@@ -11,8 +11,57 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 // 2. INICIALIZAR EXPRESS PRIMERO (Obligatorio para que 'app' exista)
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+// 🛡️ Seguridad: CORS Estricto + Rate Limiting por IP
+const allowedOrigins = [
+  'https://picktimebook.com',
+  'https://www.picktimebook.com',
+  'https://autoflow.app',
+  'https://saas-multinicho-platform.onrender.com',
+  'http://localhost:8081',
+  'http://localhost:3000',
+  'http://127.0.0.1:8081',
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Permitir subdominios web/preview sin bloquear apps móviles
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+  credentials: true,
+}));
+
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  next();
+});
+
+const apiRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+app.use('/api/', (req, res, next) => {
+  if (req.path === '/vapi/webhook') return next(); // No limitar webhooks entrantes de Vapi
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+  const now = Date.now();
+  const record = apiRateLimitMap.get(ip);
+  if (!record || now > record.resetAt) {
+    apiRateLimitMap.set(ip, { count: 1, resetAt: now + 60_000 });
+    return next();
+  }
+  record.count += 1;
+  if (record.count > 90) {
+    return res.status(429).json({
+      success: false,
+      error: 'Demasiadas solicitudes desde esta IP. Por favor espera 1 minuto.'
+    });
+  }
+  return next();
+});
+
+app.use(express.json({ limit: '5mb' }));
 
 // 3. Importar Rutas y Controladores
 import tenantRoutes from '../routes/tenantRoutes';
@@ -36,7 +85,8 @@ import {
   getPushCampaigns,             // 👈 Obtener campañas push
   createPushCampaign,           // 👈 Crear campaña push
   saveClientReview,              // 👈 Guardar reseña / reacción única por cliente
-  getActiveLegalDocument
+  getActiveLegalDocument,
+  authenticateClientUser
 } from '../controllers/appointmentController';
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
@@ -214,6 +264,7 @@ app.post('/api/promo-codes/validate', validatePromoCode);
 // Rutas directas para Expediente, Cierre de Orden, Cancelación y Confirmación 6h/3h
 app.get('/api/clients/vehicle/:plate', getVehicleByPlate);
 app.get('/api/clients/history/:identifier', getClientVehicleHistory);
+app.post('/api/clients/auth', authenticateClientUser);
 app.put('/api/appointments/:appointmentId/cancel', cancelAppointment);
 app.put('/api/appointments/:appointmentId/complete', completeWorkOrder);
 app.put('/api/appointments/:appointmentId/confirm', confirmAppointment);

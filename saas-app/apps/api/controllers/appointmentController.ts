@@ -1,4 +1,28 @@
 import { Request, Response } from 'express';
+import crypto from 'crypto';
+
+// 🔐 Hash seguro de contraseña para usuarios que eligen acceso tradicional (Correo + Password)
+const hashClientPassword = (plainPassword: string): string => {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(plainPassword), salt, 64).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+};
+
+const verifyClientPassword = (plainPassword: string, storedHash?: string | null): boolean => {
+  if (!plainPassword || !storedHash) return false;
+  if (storedHash.startsWith('scrypt:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const salt = parts[1];
+    const keyHex = parts[2];
+    const derived = crypto.scryptSync(String(plainPassword), salt, 64);
+    const keyBuf = Buffer.from(keyHex, 'hex');
+    if (derived.length !== keyBuf.length) return false;
+    return crypto.timingSafeEqual(derived, keyBuf);
+  }
+  return String(plainPassword) === String(storedHash);
+};
+
 import { db, users, appointments, services, vehicles, workOrders, tenants } from '@taller/database';
 import { eq, and, gte, lt, ne, inArray, ilike, sql } from 'drizzle-orm'; 
 
@@ -385,7 +409,7 @@ export async function createAppointment(req: Request, res: Response) {
     const tenantId = req.headers['x-tenant-id'] as string;
     if (!tenantId) return res.status(400).json({ error: 'Falta identificador (x-tenant-id).' });
 
-    const { clientName, clientEmail, clientPhone, serviceId, staffId, appointmentDate, notes, metadata, acceptedTerms, deviceInfo } = req.body;
+    const { clientName, clientEmail, clientPhone, clientPassword, authProvider, serviceId, staffId, appointmentDate, notes, metadata, acceptedTerms, deviceInfo } = req.body;
     
     // Usamos appointmentDate (que viene del front) o scheduledAt por compatibilidad
     const finalDateStr = appointmentDate || req.body.scheduledAt;
@@ -432,20 +456,39 @@ export async function createAppointment(req: Request, res: Response) {
       if (userByPhone) user = userByPhone;
     }
 
+    const resolvedProvider = String(authProvider || deviceInfo?.authProvider || cleanMetadata?.authProvider || 'manual').toLowerCase();
+    const hashedPwd = clientPassword && String(clientPassword).trim().length >= 4
+      ? hashClientPassword(String(clientPassword).trim())
+      : null;
+
     if (!user) {
+      const initialUserMeta: any = {
+        authProvider: resolvedProvider,
+        ...(hashedPwd ? { passwordHash: hashedPwd } : {}),
+        ...(cleanMetadata?.appleUserId ? { appleUserId: cleanMetadata.appleUserId } : {}),
+      };
       [user] = await db.insert(users).values({ 
         tenantId, 
         name: clientName.trim(), 
         email: normalizedEmail, 
         phone: clientPhone?.trim() || '', 
-        role: 'client'
-      }).returning();
+        role: 'client',
+        metadata: initialUserMeta
+      } as any).returning();
     } else {
+      const existingUserMeta = safeParseJSON(user.metadata);
+      const mergedUserMeta: any = {
+        ...existingUserMeta,
+        authProvider: resolvedProvider !== 'manual' ? resolvedProvider : (existingUserMeta.authProvider || 'manual'),
+        ...(hashedPwd ? { passwordHash: hashedPwd } : {}),
+        ...(cleanMetadata?.appleUserId ? { appleUserId: cleanMetadata.appleUserId } : {}),
+      };
       [user] = await db.update(users).set({ 
         name: clientName.trim(), 
         phone: clientPhone?.trim() || user.phone,
-        email: String(clientEmail || '').trim().includes('@') ? String(clientEmail).trim().toLowerCase() : user.email
-      }).where(eq(users.id, user.id)).returning();
+        email: String(clientEmail || '').trim().includes('@') ? String(clientEmail).trim().toLowerCase() : user.email,
+        metadata: mergedUserMeta
+      } as any).where(eq(users.id, user.id)).returning();
     }
 
     // ⚖️📱 Registrar aceptación legal (desde legal_documents -> user_legal_acceptances) y dispositivo en user_devices
@@ -2870,5 +2913,163 @@ export async function getActiveLegalDocument(req: Request, res: Response) {
         is_active: true
       }
     });
+  }
+}
+
+// =========================================================================
+// 🔐 VALIDACIÓN DE USUARIO CONTRA TABLA public.users (iOS, Google o Correo + Password)
+// - Para iOS / Google: valida que el correo o appleUserId exista en public.users (o users global)
+//   y devuelve sus datos + historial sin exponer expedientes por teléfono público.
+// - Para Usuario (Correo + Contraseña): verifica email + passwordHash en users.metadata
+//   (o permite establecer contraseña la primera vez si el usuario ya existía sin clave).
+// =========================================================================
+export async function authenticateClientUser(req: Request, res: Response) {
+  try {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    const { provider, email, password, appleUserId, fullName, setPasswordIfEmpty } = req.body || {};
+
+    if (!tenantId) {
+      return res.status(400).json({ success: false, error: 'Falta identificador del negocio (x-tenant-id).' });
+    }
+
+    const cleanProvider = String(provider || 'manual').toLowerCase();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const cleanAppleId = String(appleUserId || '').trim();
+
+    let matchedUser: any = null;
+
+    // 1. Buscar usuario en este negocio (tenantId)
+    const tenantUsers = await db.select().from(users).where(eq(users.tenantId, tenantId));
+
+    if (cleanEmail) {
+      matchedUser = tenantUsers.find((u) => String(u.email || '').trim().toLowerCase() === cleanEmail) || null;
+    }
+    if (!matchedUser && cleanAppleId) {
+      matchedUser = tenantUsers.find((u) => {
+        const m = safeParseJSON(u.metadata);
+        return m?.appleUserId === cleanAppleId;
+      }) || null;
+    }
+
+    // 2. Si es OAuth (iOS o Google) y no estaba aún en este tenant, buscamos si ya existe en otro negocio de la plataforma
+    if (!matchedUser && (cleanProvider === 'apple' || cleanProvider === 'google')) {
+      const allUsers = await db.select().from(users);
+      let globalUser: any = null;
+      if (cleanEmail) {
+        globalUser = allUsers.find((u) => String(u.email || '').trim().toLowerCase() === cleanEmail) || null;
+      }
+      if (!globalUser && cleanAppleId) {
+        globalUser = allUsers.find((u) => safeParseJSON(u.metadata)?.appleUserId === cleanAppleId) || null;
+      }
+
+      if (globalUser) {
+        // Sincronizar perfil verificado en este negocio automáticamente
+        const [createdLocal] = await db.insert(users).values({
+          tenantId,
+          name: fullName?.trim() || globalUser.name || 'Cliente Verificado',
+          email: cleanEmail || globalUser.email,
+          phone: globalUser.phone || '',
+          role: 'client',
+          metadata: {
+            authProvider: cleanProvider,
+            ...(cleanAppleId ? { appleUserId: cleanAppleId } : {}),
+          }
+        } as any).returning();
+        matchedUser = createdLocal;
+      }
+    }
+
+    if (!matchedUser) {
+      return res.status(404).json({
+        success: false,
+        notRegistered: true,
+        error: cleanProvider === 'manual'
+          ? 'No encontramos una cuenta con ese correo electrónico. Verifica tu correo o regístrate al reservar tu primera cita.'
+          : 'Tu cuenta aún no está registrada en la base de datos. Completa tu primera reserva para activar tu expediente.'
+      });
+    }
+
+    const userMeta = safeParseJSON(matchedUser.metadata);
+
+    // 3. Si es acceso tradicional ("manual" = Correo + Contraseña), validar contraseña
+    if (cleanProvider === 'manual') {
+      const cleanPass = String(password || '').trim();
+      if (!cleanPass) {
+        return res.status(400).json({ success: false, error: 'Ingresa tu contraseña para acceder al expediente.' });
+      }
+
+      if (userMeta?.passwordHash) {
+        const isValid = verifyClientPassword(cleanPass, userMeta.passwordHash);
+        if (!isValid) {
+          return res.status(401).json({ success: false, error: 'Contraseña incorrecta. Intenta nuevamente.' });
+        }
+      } else if (setPasswordIfEmpty) {
+        // Si el cliente había sido creado antes (ej. por llamada IA o recepción) sin contraseña, la protegemos ahora
+        const newHash = hashClientPassword(cleanPass);
+        const [updatedWithPass] = await db.update(users)
+          .set({ metadata: { ...userMeta, authProvider: 'manual', passwordHash: newHash } } as any)
+          .where(eq(users.id, matchedUser.id))
+          .returning();
+        matchedUser = updatedWithPass;
+      } else {
+        return res.status(401).json({
+          success: false,
+          needsPasswordSetup: true,
+          error: 'Tu cuenta aún no tiene contraseña asignada. Activa "Crear contraseña ahora" o ingresa con iOS / Google.'
+        });
+      }
+    } else {
+      // Actualizar proveedor OAuth en metadata si cambió
+      if (userMeta?.authProvider !== cleanProvider || (cleanAppleId && !userMeta?.appleUserId)) {
+        const [updatedOauth] = await db.update(users)
+          .set({
+            metadata: {
+              ...userMeta,
+              authProvider: cleanProvider,
+              ...(cleanAppleId ? { appleUserId: cleanAppleId } : {}),
+            }
+          } as any)
+          .where(eq(users.id, matchedUser.id))
+          .returning();
+        matchedUser = updatedOauth;
+      }
+    }
+
+    // 4. Cargar historial de citas y servicios completados del usuario autenticado
+    const apts = await db.select().from(appointments).where(eq(appointments.clientId, matchedUser.id));
+    let rawOrders: any[] = [];
+    if (apts.length > 0) {
+      rawOrders = await db.select({
+        wo: workOrders,
+        svc: services
+      })
+      .from(workOrders)
+      .innerJoin(appointments, eq(workOrders.appointmentId, appointments.id))
+      .leftJoin(services, eq(appointments.serviceId, services.id))
+      .where(inArray(workOrders.appointmentId, apts.map((a) => a.id)))
+      .orderBy(workOrders.createdAt);
+    }
+
+    const [vehicleRecord] = await db.select().from(vehicles)
+      .where(and(eq(vehicles.tenantId, tenantId), eq(vehicles.clientId, matchedUser.id)));
+
+    const safeClientOut = {
+      ...matchedUser,
+      metadata: (() => {
+        const m = safeParseJSON(matchedUser.metadata);
+        delete m.passwordHash; // Nunca enviar el hash de contraseña al frontend
+        return m;
+      })()
+    };
+
+    return res.status(200).json({
+      success: true,
+      client: safeClientOut,
+      vehicle: vehicleRecord || null,
+      serviceHistory: rawOrders.map((row) => ({ ...row.wo, service: row.svc }))
+    });
+  } catch (error: any) {
+    console.error('Error en authenticateClientUser:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 }
