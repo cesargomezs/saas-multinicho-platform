@@ -211,6 +211,14 @@ async function ensureMultinicheDatabaseReady() {
         ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN DEFAULT true;
     `);
 
+    // 5. Asegurar columnas de proveedor validado (iOS / Google / Usuario) en public.users
+    await db.execute(sql`
+      ALTER TABLE public.users
+        ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(30) DEFAULT 'manual',
+        ADD COLUMN IF NOT EXISTS is_verified_provider BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS apple_user_id VARCHAR(255);
+    `);
+
     console.log('✅ Base de datos sincronizada con los nichos (automotive, spa, barbershop, legal, dental) y Canal Interno de Telegram por negocio.');
   } catch (err) {
     console.warn('⚠️ Aviso verificando esquema multi-nicho en BD:', err);

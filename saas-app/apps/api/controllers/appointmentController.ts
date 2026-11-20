@@ -467,6 +467,16 @@ export async function createAppointment(req: Request, res: Response) {
         ...(hashedPwd ? { passwordHash: hashedPwd } : {}),
         ...(cleanMetadata?.appleUserId ? { appleUserId: cleanMetadata.appleUserId } : {}),
       };
+      const isOauthProvider = resolvedProvider === 'apple' || resolvedProvider === 'google';
+      try {
+        await db.execute(sql`
+          ALTER TABLE public.users
+            ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(30) DEFAULT 'manual',
+            ADD COLUMN IF NOT EXISTS is_verified_provider BOOLEAN DEFAULT false,
+            ADD COLUMN IF NOT EXISTS apple_user_id VARCHAR(255)
+        `);
+      } catch (_colErr) {}
+
       [user] = await db.insert(users).values({ 
         tenantId, 
         name: clientName.trim(), 
@@ -475,6 +485,16 @@ export async function createAppointment(req: Request, res: Response) {
         role: 'client',
         metadata: initialUserMeta
       } as any).returning();
+
+      try {
+        await db.execute(sql`
+          UPDATE public.users
+          SET auth_provider = ${resolvedProvider},
+              is_verified_provider = ${isOauthProvider},
+              apple_user_id = ${cleanMetadata?.appleUserId ? String(cleanMetadata.appleUserId) : null}
+          WHERE id = ${user.id}::uuid
+        `);
+      } catch (_updColErr) {}
     } else {
       const existingUserMeta = safeParseJSON(user.metadata);
       const mergedUserMeta: any = {
@@ -483,12 +503,23 @@ export async function createAppointment(req: Request, res: Response) {
         ...(hashedPwd ? { passwordHash: hashedPwd } : {}),
         ...(cleanMetadata?.appleUserId ? { appleUserId: cleanMetadata.appleUserId } : {}),
       };
+      const isOauthUpdate = resolvedProvider === 'apple' || resolvedProvider === 'google';
       [user] = await db.update(users).set({ 
         name: clientName.trim(), 
         phone: clientPhone?.trim() || user.phone,
         email: String(clientEmail || '').trim().includes('@') ? String(clientEmail).trim().toLowerCase() : user.email,
         metadata: mergedUserMeta
       } as any).where(eq(users.id, user.id)).returning();
+
+      try {
+        await db.execute(sql`
+          UPDATE public.users
+          SET auth_provider = CASE WHEN ${isOauthUpdate} THEN ${resolvedProvider} ELSE COALESCE(auth_provider, 'manual') END,
+              is_verified_provider = COALESCE(is_verified_provider, false) OR ${isOauthUpdate},
+              apple_user_id = COALESCE(${cleanMetadata?.appleUserId ? String(cleanMetadata.appleUserId) : null}, apple_user_id)
+          WHERE id = ${user.id}::uuid
+        `);
+      } catch (_updColErr2) {}
     }
 
     // ⚖️📱 Registrar aceptación legal (desde legal_documents -> user_legal_acceptances) y dispositivo en user_devices
@@ -2938,6 +2969,15 @@ export async function authenticateClientUser(req: Request, res: Response) {
 
     let matchedUser: any = null;
 
+    try {
+      await db.execute(sql`
+        ALTER TABLE public.users
+          ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(30) DEFAULT 'manual',
+          ADD COLUMN IF NOT EXISTS is_verified_provider BOOLEAN DEFAULT false,
+          ADD COLUMN IF NOT EXISTS apple_user_id VARCHAR(255)
+      `);
+    } catch (_colErr3) {}
+
     // 1. Buscar usuario en este negocio (tenantId)
     const tenantUsers = await db.select().from(users).where(eq(users.tenantId, tenantId));
 
@@ -2947,7 +2987,7 @@ export async function authenticateClientUser(req: Request, res: Response) {
     if (!matchedUser && cleanAppleId) {
       matchedUser = tenantUsers.find((u) => {
         const m = safeParseJSON(u.metadata);
-        return m?.appleUserId === cleanAppleId;
+        return m?.appleUserId === cleanAppleId || (u as any)?.appleUserId === cleanAppleId;
       }) || null;
     }
 

@@ -103,7 +103,10 @@ export const users = pgTable('users', {
   email: varchar('email', { length: 255 }).notNull(), 
   phone: varchar('phone', { length: 50 }), 
 
-  // 🔐 SEGURIDAD Y AUTENTICACIÓN (Hash de contraseña nunca en texto plano, control de intentos y bloqueo)
+  // 🔐 PROVEEDOR VALIDADO (iOS / Google / Usuario) Y SEGURIDAD DE CONTRASEÑA
+  authProvider: varchar('auth_provider', { length: 30 }).default('manual').notNull(),
+  isVerifiedProvider: boolean('is_verified_provider').default(false).notNull(),
+  appleUserId: varchar('apple_user_id', { length: 255 }),
   passwordHash: text('password_hash'),
   passwordUpdatedAt: timestamp('password_updated_at'),
   failedLoginAttempts: integer('failed_login_attempts').default(0).notNull(),

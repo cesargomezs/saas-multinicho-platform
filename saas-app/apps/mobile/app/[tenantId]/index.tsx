@@ -1177,7 +1177,7 @@ export default function TenantDashboardScreen() {
     return null;
   };
 
-  const [expedienteAuthMethod, setExpedienteAuthMethod] = useState<'apple' | 'google' | 'manual'>('manual');
+  const [expedienteAuthMethod, setExpedienteAuthMethod] = useState<'apple' | 'google' | 'manual' | null>(null);
   const [expedienteEmailInput, setExpedienteEmailInput] = useState<string>('');
   const [expedientePasswordInput, setExpedientePasswordInput] = useState<string>('');
   const [showExpedientePassword, setShowExpedientePassword] = useState<boolean>(false);
@@ -4982,25 +4982,25 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
                       </View>
 
-                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                      <View style={{ flexDirection: 'column', gap: 10 }}>
                         <TouchableOpacity
                           activeOpacity={0.85}
                           disabled={isAuthenticatingProvider || isSearchingExpediente}
                           onPress={() => handleAppleProviderAuth('expediente')}
                           style={{
-                            flex: 1,
-                            height: 44,
-                            borderRadius: 11,
+                            width: '100%',
+                            height: 46,
+                            borderRadius: 12,
                             backgroundColor: theme === 'dark' ? '#FFFFFF' : '#0F131A',
                             flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            gap: 6,
-                            paddingHorizontal: 8,
+                            gap: 8,
+                            paddingHorizontal: 14,
                           }}
                         >
-                          <Ionicons name="logo-apple" size={16} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
-                          <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 12.5 }}>
+                          <Ionicons name="logo-apple" size={17} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
+                          <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 13.5 }}>
                             iOS
                           </Text>
                         </TouchableOpacity>
@@ -5010,21 +5010,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           disabled={isAuthenticatingProvider || isSearchingExpediente}
                           onPress={() => handleGoogleProviderAuth('expediente')}
                           style={{
-                            flex: 1,
-                            height: 44,
-                            borderRadius: 11,
+                            width: '100%',
+                            height: 46,
+                            borderRadius: 12,
                             backgroundColor: tColor.bg,
                             borderWidth: 1,
                             borderColor: tColor.border,
                             flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            gap: 6,
-                            paddingHorizontal: 8,
+                            gap: 8,
+                            paddingHorizontal: 14,
                           }}
                         >
-                          <Ionicons name="logo-google" size={15} color="#EA4335" />
-                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                          <Ionicons name="logo-google" size={16} color="#EA4335" />
+                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 13.5 }}>
                             Google
                           </Text>
                         </TouchableOpacity>
@@ -5033,21 +5033,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           activeOpacity={0.85}
                           onPress={() => setExpedienteAuthMethod('manual')}
                           style={{
-                            flex: 1,
-                            height: 44,
-                            borderRadius: 11,
+                            width: '100%',
+                            height: 46,
+                            borderRadius: 12,
                             backgroundColor: expedienteAuthMethod === 'manual' ? `${brandColor}22` : tColor.bg,
                             borderWidth: 1.5,
                             borderColor: expedienteAuthMethod === 'manual' ? brandColor : tColor.border,
                             flexDirection: 'row',
                             alignItems: 'center',
                             justifyContent: 'center',
-                            gap: 6,
-                            paddingHorizontal: 8,
+                            gap: 8,
+                            paddingHorizontal: 14,
                           }}
                         >
-                          <Feather name="user" size={14} color={brandColor} />
-                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                          <Feather name="user" size={15} color={brandColor} />
+                          <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 13.5 }}>
                             {tr('Usuario', 'User')}
                           </Text>
                         </TouchableOpacity>
@@ -5073,72 +5073,74 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </View>
                     ) : null}
 
-                    {/* Formulario seguro de Correo + Contraseña (para quienes no usan iOS ni Google) */}
-                    <View style={{ gap: 12, width: '100%' }}>
-                      <View>
-                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
-                          {tr('CORREO ELECTRÓNICO REGISTRADO *', 'REGISTERED EMAIL *')}
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
-                          <Feather name="mail" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
-                          <TextInput
-                            style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
-                            placeholder={tr('ejemplo@correo.com', 'example@email.com')}
-                            placeholderTextColor={tColor.muted}
-                            keyboardType="email-address"
-                            autoCapitalize="none"
-                            value={expedienteEmailInput}
-                            onChangeText={setExpedienteEmailInput}
-                          />
+                    {/* Formulario seguro de Correo + Contraseña: VISIBLE SOLO SI EL USUARIO PULSA "Usuario" */}
+                    {expedienteAuthMethod === 'manual' ? (
+                      <View style={{ gap: 12, width: '100%' }}>
+                        <View>
+                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                            {tr('CORREO ELECTRÓNICO REGISTRADO *', 'REGISTERED EMAIL *')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                            <Feather name="mail" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                            <TextInput
+                              style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                              placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                              placeholderTextColor={tColor.muted}
+                              keyboardType="email-address"
+                              autoCapitalize="none"
+                              value={expedienteEmailInput}
+                              onChangeText={setExpedienteEmailInput}
+                            />
+                          </View>
                         </View>
-                      </View>
 
-                      <View>
-                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
-                          {tr('CONTRASEÑA *', 'PASSWORD *')}
-                        </Text>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
-                          <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
-                          <TextInput
-                            style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
-                            placeholder="••••••••"
-                            placeholderTextColor={tColor.muted}
-                            secureTextEntry={!showExpedientePassword}
-                            autoCapitalize="none"
-                            value={expedientePasswordInput}
-                            onChangeText={setExpedientePasswordInput}
-                          />
-                          <TouchableOpacity onPress={() => setShowExpedientePassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                            <Feather name={showExpedientePassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                        <View>
+                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                            {tr('CONTRASEÑA *', 'PASSWORD *')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                            <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                            <TextInput
+                              style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                              placeholder="••••••••"
+                              placeholderTextColor={tColor.muted}
+                              secureTextEntry={!showExpedientePassword}
+                              autoCapitalize="none"
+                              value={expedientePasswordInput}
+                              onChangeText={setExpedientePasswordInput}
+                            />
+                            <TouchableOpacity onPress={() => setShowExpedientePassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                              <Feather name={showExpedientePassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+
+                        {expedienteSetPassFirstTime ? (
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => setExpedienteSetPassFirstTime((prev) => !prev)}
+                            style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderWidth: 1, borderColor: '#F59E0B', padding: 10, borderRadius: 10 }}
+                          >
+                            <Feather name="check-square" size={16} color="#F59E0B" />
+                            <Text style={{ color: tColor.text, fontSize: 12, flex: 1 }}>
+                              {tr('Activar esta contraseña para mi cuenta existente en este negocio.', 'Set this password for my existing account at this business.')}
+                            </Text>
                           </TouchableOpacity>
-                        </View>
-                      </View>
+                        ) : null}
 
-                      {expedienteSetPassFirstTime ? (
                         <TouchableOpacity
-                          activeOpacity={0.85}
-                          onPress={() => setExpedienteSetPassFirstTime((prev) => !prev)}
-                          style={{ flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderWidth: 1, borderColor: '#F59E0B', padding: 10, borderRadius: 10 }}
+                          style={[styles.primaryButton, { backgroundColor: brandColor, height: 50, marginTop: 4 }]}
+                          onPress={handleSearchExpediente as any}
+                          disabled={isSearchingExpediente || isAuthenticatingProvider}
                         >
-                          <Feather name="check-square" size={16} color="#F59E0B" />
-                          <Text style={{ color: tColor.text, fontSize: 12, flex: 1 }}>
-                            {tr('Activar esta contraseña para mi cuenta existente en este negocio.', 'Set this password for my existing account at this business.')}
+                          <Text style={styles.primaryButtonText}>
+                            {isSearchingExpediente
+                              ? tr('Validando en Base de Datos...', 'Verifying in Database...')
+                              : tr('🔐 Validar y Abrir Expediente', '🔐 Verify & Open Records')}
                           </Text>
                         </TouchableOpacity>
-                      ) : null}
-
-                      <TouchableOpacity
-                        style={[styles.primaryButton, { backgroundColor: brandColor, height: 50, marginTop: 4 }]}
-                        onPress={handleSearchExpediente as any}
-                        disabled={isSearchingExpediente || isAuthenticatingProvider}
-                      >
-                        <Text style={styles.primaryButtonText}>
-                          {isSearchingExpediente
-                            ? tr('Validando en Base de Datos...', 'Verifying in Database...')
-                            : tr('🔐 Validar y Abrir Expediente', '🔐 Verify & Open Records')}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
+                      </View>
+                    ) : null}
                   </View>
                 ) : null}
 
