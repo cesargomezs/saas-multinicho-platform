@@ -86,7 +86,8 @@ import {
   createPushCampaign,           // 👈 Crear campaña push
   saveClientReview,              // 👈 Guardar reseña / reacción única por cliente
   getActiveLegalDocument,
-  authenticateClientUser
+  authenticateClientUser,
+  updateClientProfile           // 👈 Actualizar nombre y teléfono en BD
 } from '../controllers/appointmentController';
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
@@ -269,10 +270,11 @@ app.get('/api/promo-codes', getPromoCodes);
 app.post('/api/promo-codes/generate', generatePromoCode);
 app.post('/api/promo-codes/validate', validatePromoCode);
 
-// Rutas directas para Expediente, Cierre de Orden, Cancelación y Confirmación 6h/3h
+// Rutas directas para Expediente, Perfil, Cierre de Orden, Cancelación y Confirmación 6h/3h
 app.get('/api/clients/vehicle/:plate', getVehicleByPlate);
 app.get('/api/clients/history/:identifier', getClientVehicleHistory);
 app.post('/api/clients/auth', authenticateClientUser);
+app.put('/api/clients/profile', updateClientProfile);
 app.put('/api/appointments/:appointmentId/cancel', cancelAppointment);
 app.put('/api/appointments/:appointmentId/complete', completeWorkOrder);
 app.put('/api/appointments/:appointmentId/confirm', confirmAppointment);
