@@ -10,8 +10,9 @@ const hashClientPassword = (plainPassword: string): string => {
 
 const verifyClientPassword = (plainPassword: string, storedHash?: string | null): boolean => {
   if (!plainPassword || !storedHash) return false;
-  if (storedHash.startsWith('scrypt:')) {
-    const parts = storedHash.split(':');
+  if (storedHash.startsWith('scrypt:') || storedHash.startsWith('scrypt$')) {
+    const sep = storedHash.startsWith('scrypt$') ? '$' : ':';
+    const parts = storedHash.split(sep);
     if (parts.length !== 3) return false;
     const salt = parts[1];
     const keyHex = parts[2];
