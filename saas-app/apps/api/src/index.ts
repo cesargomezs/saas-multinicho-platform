@@ -35,7 +35,8 @@ import {
   requestAutoFlowSupport,           // 👈 Soporte técnico y acompañamiento (solo a AutoFlow Telegram)
   getPushCampaigns,             // 👈 Obtener campañas push
   createPushCampaign,           // 👈 Crear campaña push
-  saveClientReview              // 👈 Guardar reseña / reacción única por cliente
+  saveClientReview,              // 👈 Guardar reseña / reacción única por cliente
+  getActiveLegalDocument
 } from '../controllers/appointmentController';
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
@@ -217,6 +218,7 @@ app.put('/api/appointments/:appointmentId/cancel', cancelAppointment);
 app.put('/api/appointments/:appointmentId/complete', completeWorkOrder);
 app.put('/api/appointments/:appointmentId/confirm', confirmAppointment);
 app.post('/api/appointments/:appointmentId/remind', sendAppointmentReminder);
+app.get('/api/legal-documents/active', getActiveLegalDocument);
 
 // Rutas de Recepción Telefónica IA (Vapi.ai 1-Clic BYOK + Webhook Bilingüe ES/EN)
 app.post('/api/tenants/vapi-setup', configureTenantVapiAssistant);

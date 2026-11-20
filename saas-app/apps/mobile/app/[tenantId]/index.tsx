@@ -1248,21 +1248,41 @@ export default function TenantDashboardScreen() {
   const [legalDocVersion, setLegalDocVersion] = useState<string>('');
   const [isLoadingLegalDoc, setIsLoadingLegalDoc] = useState<boolean>(false);
 
+  const [legalDocErrorDetail, setLegalDocErrorDetail] = useState<string>('');
+
   const loadActiveTermsFromDb = async () => {
     setIsLoadingLegalDoc(true);
-    try {
-      // Consultar únicamente mediante el endpoint del backend (/api/legal-documents/active)
-      const res = await apiFetch('/api/legal-documents/active?type=terms_and_conditions');
-      if (res.ok) {
-        const data = await res.json();
-        const doc = data?.document;
-        const htmlVal = doc?.content_html || doc?.contentHtml;
-        if (htmlVal) {
-          setLegalDocHtml(String(htmlVal));
-          setLegalDocVersion(String(doc?.version || ''));
+    setLegalDocErrorDetail('');
+    const candidateEndpoints = [
+      '/api/legal-documents/active?type=terms_and_conditions',
+      '/api/appointments/legal-documents/active?type=terms_and_conditions',
+      '/api/tenants/legal-documents/active?type=terms_and_conditions',
+    ];
+    let lastDebug = '';
+
+    for (const ep of candidateEndpoints) {
+      try {
+        const res = await apiFetch(ep);
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          const doc = data?.document || (Array.isArray(data) ? data[0] : data);
+          const htmlVal = doc?.content_html || doc?.contentHtml || data?.content_html || data?.contentHtml;
+          if (htmlVal) {
+            setLegalDocHtml(String(htmlVal));
+            setLegalDocVersion(String(doc?.version || data?.version || ''));
+            setIsLoadingLegalDoc(false);
+            return;
+          }
+          lastDebug = `HTTP ${res.status} en ${ep} (sin content_html)`;
+        } else {
+          lastDebug = `HTTP ${res.status} en ${ep}`;
         }
+      } catch (err: any) {
+        lastDebug = `Error red en ${ep}: ${err?.message || String(err)}`;
       }
-    } catch (_e) {}
+    }
+
+    setLegalDocErrorDetail(lastDebug);
     setIsLoadingLegalDoc(false);
   };
 
@@ -1427,10 +1447,34 @@ export default function TenantDashboardScreen() {
           : ['Masaje Relajante', 'Corte Clásico', 'Facial', 'Coloración'];
 
   const apiFetch = async (url: string, options: RequestInit = {}) => {
-    const API_URL = process.env.EXPO_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
+    const baseUrls = [
+      process.env.EXPO_PUBLIC_API_URL,
+      process.env.NEXT_PUBLIC_API_URL,
+      'https://saas-multinicho-platform.onrender.com',
+      'http://127.0.0.1:4000'
+    ].filter((u, idx, arr): u is string => Boolean(u && String(u).trim() && arr.indexOf(u) === idx));
+
     const headerTenantId = Array.isArray(tenantId) ? tenantId[0] : (tenantId || '123e4567-e89b-12d3-a456-426614174000');
     const headers = { 'Content-Type': 'application/json', 'x-tenant-id': headerTenantId, ...(options.headers || {}) };
-    return fetch(`${API_URL}${url}`, { ...options, headers });
+
+    let lastRes: Response | null = null;
+    let lastErr: any = null;
+
+    for (const baseUrl of baseUrls) {
+      const cleanBase = String(baseUrl).replace(/\/+$/, '');
+      try {
+        const res = await fetch(`${cleanBase}${url}`, { ...options, headers });
+        lastRes = res;
+        if (res.ok || res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
+          return res;
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    if (lastRes) return lastRes;
+    throw lastErr || new Error('No se pudo conectar con la API');
   };
 
   const normalizeOrders = (orders: any[]) => {
@@ -8400,6 +8444,11 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                   'Verify there is an active record (is_active = true) in public.legal_documents and that the API/server is reachable.'
                                 )}
                               </Text>
+                              {legalDocErrorDetail ? (
+                                <Text style={{ color: '#F59E0B', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
+                                  Detalle API: {legalDocErrorDetail}
+                                </Text>
+                              ) : null}
                               <TouchableOpacity
                                 onPress={() => loadActiveTermsFromDb()}
                                 style={{ alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: brandColor }}
