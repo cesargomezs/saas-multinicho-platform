@@ -2956,7 +2956,9 @@ export async function getActiveLegalDocument(req: Request, res: Response) {
 // =========================================================================
 export async function authenticateClientUser(req: Request, res: Response) {
   try {
-    const tenantId = req.headers['x-tenant-id'] as string;
+    const headerTenant = (req.headers['x-tenant-id'] as string) || '';
+    const bodyTenant = (req.body?.tenantId as string) || '';
+    const tenantId = headerTenant || bodyTenant;
     const { provider, email, password, appleUserId, fullName, setPasswordIfEmpty } = req.body || {};
 
     if (!tenantId) {
@@ -3019,13 +3021,37 @@ export async function authenticateClientUser(req: Request, res: Response) {
       }
     }
 
+    if (!matchedUser && cleanEmail) {
+      const allUsers = await db.select().from(users);
+      const anyTenantUser = allUsers.find((u) => String(u.email || '').trim().toLowerCase() === cleanEmail) || null;
+      if (anyTenantUser) {
+        if (cleanProvider === 'apple' || cleanProvider === 'google') {
+          const [syncedUser] = await db.insert(users).values({
+            tenantId,
+            name: fullName?.trim() || anyTenantUser.name || 'Cliente Verificado',
+            email: cleanEmail,
+            phone: anyTenantUser.phone || '',
+            role: 'client',
+            metadata: {
+              ...(safeParseJSON(anyTenantUser.metadata)),
+              authProvider: cleanProvider,
+              ...(cleanAppleId ? { appleUserId: cleanAppleId } : {}),
+            }
+          } as any).returning();
+          matchedUser = syncedUser;
+        } else {
+          matchedUser = anyTenantUser;
+        }
+      }
+    }
+
     if (!matchedUser) {
       return res.status(404).json({
         success: false,
         notRegistered: true,
         error: cleanProvider === 'manual'
           ? 'No encontramos una cuenta con ese correo electrónico. Verifica tu correo o regístrate al reservar tu primera cita.'
-          : 'Tu cuenta aún no está registrada en la base de datos. Completa tu primera reserva para activar tu expediente.'
+          : `Cuenta ${cleanProvider === 'apple' ? 'iOS (Apple)' : 'Google'} verificada${cleanEmail ? ` (${cleanEmail})` : ''}, pero aún no está vinculada a un expediente en la base de datos. Reserva tu primera cita o ingresa con tu Usuario (Correo y Contraseña).`
       });
     }
 

@@ -1196,9 +1196,11 @@ export default function TenantDashboardScreen() {
     setPasswordIfEmpty?: boolean;
   }) => {
     try {
+      const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
       const res = await apiFetch('/api/clients/auth', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        headers: activeTenantUuid ? { 'x-tenant-id': activeTenantUuid } : {},
+        body: JSON.stringify({ ...payload, tenantId: activeTenantUuid }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success && data.client) {
@@ -1269,10 +1271,9 @@ export default function TenantDashboardScreen() {
           if (appleEmail) setExpedienteEmailInput(appleEmail);
           setExpedienteAuthMethod('manual');
           alert(
-            dbCheck.error ||
             tr(
-              'Apple ID verificado, pero aún no estás registrado en la base de datos. Completa tu primera reserva o ingresa con tu correo y contraseña.',
-              'Apple ID verified, but you are not registered in the database yet. Complete your first booking or sign in with email & password.'
+              `Apple ID verificado${appleEmail ? ` (${appleEmail})` : ''}. Si ya reservaste antes con otro correo, escríbelo abajo junto con tu contraseña (o completa tu primera reserva).`,
+              `Apple ID verified${appleEmail ? ` (${appleEmail})` : ''}. If you booked before with another email, enter it below with your password (or complete your first booking).`
             )
           );
         }
