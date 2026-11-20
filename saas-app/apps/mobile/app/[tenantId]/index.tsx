@@ -1251,40 +1251,18 @@ export default function TenantDashboardScreen() {
   const loadActiveTermsFromDb = async () => {
     setIsLoadingLegalDoc(true);
     try {
-      // 1) Intentar endpoint del backend (/api/legal-documents/active)
+      // Consultar únicamente mediante el endpoint del backend (/api/legal-documents/active)
       const res = await apiFetch('/api/legal-documents/active?type=terms_and_conditions');
       if (res.ok) {
         const data = await res.json();
-        if (data?.document?.content_html || data?.document?.contentHtml) {
-          setLegalDocHtml(String(data.document.content_html || data.document.contentHtml));
-          setLegalDocVersion(String(data.document.version || ''));
-          setIsLoadingLegalDoc(false);
-          return;
+        const doc = data?.document;
+        const htmlVal = doc?.content_html || doc?.contentHtml;
+        if (htmlVal) {
+          setLegalDocHtml(String(htmlVal));
+          setLegalDocVersion(String(doc?.version || ''));
         }
       }
     } catch (_e) {}
-
-    try {
-      // 2) Fallback directo a Supabase REST (public.legal_documents)
-      const activeTid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
-      const { data: rows } = await supabase
-        .from('legal_documents')
-        .select('id, tenant_id, document_type, version, content_html, is_active, published_at')
-        .eq('is_active', true)
-        .order('published_at', { ascending: false })
-        .limit(10);
-
-      if (Array.isArray(rows) && rows.length > 0) {
-        const matched =
-          rows.find((r: any) => String(r.tenant_id || '') === activeTid && /term/i.test(String(r.document_type || ''))) ||
-          rows.find((r: any) => !r.tenant_id && /term/i.test(String(r.document_type || ''))) ||
-          rows[0];
-        if (matched?.content_html) {
-          setLegalDocHtml(String(matched.content_html));
-          setLegalDocVersion(String(matched.version || ''));
-        }
-      }
-    } catch (_e2) {}
     setIsLoadingLegalDoc(false);
   };
 
@@ -1298,8 +1276,8 @@ export default function TenantDashboardScreen() {
     const clean = String(htmlStr || '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<br\s*\/?>/gi, '')
-      .replace(/<\/(p|div|h1|h2|h3|h4|li|section|article)>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|h1|h2|h3|h4|li|section|article)>/gi, '\n\n')
       .replace(/<(h1|h2|h3|h4)[^>]*>/gi, '###TITLE###')
       .replace(/<li[^>]*>/gi, '• ')
       .replace(/<[^>]+>/g, '')
@@ -1311,7 +1289,7 @@ export default function TenantDashboardScreen() {
       .replace(/&gt;/gi, '>');
 
     return clean
-      .split(/{2,}/)
+      .split(/\n{1,}/)
       .map((b) => b.trim())
       .filter(Boolean)
       .map((block) => {
@@ -1888,7 +1866,10 @@ export default function TenantDashboardScreen() {
   };
 
   useEffect(() => {
-    if (safeTenantId) fetchTenantData();
+    if (safeTenantId) {
+      fetchTenantData();
+      loadActiveTermsFromDb();
+    }
   }, [safeTenantId]);
 
   // 📍 CÁLCULO AUTOMÁTICO DE DISTANCIA EN MILLAS ENTRE EL CLIENTE Y EL NEGOCIO (HAVERSINE)
@@ -8406,37 +8387,28 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               ))
                             )
                           ) : (
-                            <>
+                            <View style={{ paddingVertical: 16, gap: 10 }}>
                               <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800' }}>
-                                1. Creación Automática de Expediente Digital
-                              </Text>
-                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
                                 {tr(
-                                  'Al agendar tu cita con Apple ID, Google o con tu Nombre y Teléfono, PickTime Book crea o actualiza tu expediente digital de cliente sin requerir contraseñas, permitiéndote gestionar tus turnos, recibir recordatorios oportunos y acumular visitas en el plan de fidelización VIP y cupones de referido.',
-                                  'By booking your appointment with Apple ID, Google, or your Name & Phone, PickTime Book creates or updates your digital client record without passwords, allowing you to manage appointments, receive timely reminders, and earn VIP rewards.'
+                                  'No se pudo obtener el documento legal activo desde la base de datos.',
+                                  'Could not retrieve the active legal document from the database.'
                                 )}
                               </Text>
-
-                              <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
-                                2. Puntualidad, Recordatorios (6h) y Cancelación (3h)
-                              </Text>
-                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
+                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 18 }}>
                                 {tr(
-                                  'Recibirás un recordatorio 6 horas antes de tu turno para confirmar tu asistencia en un toque. En caso de no poder asistir, solicitamos cancelar con al menos 3 horas de anticipación para liberar el espacio al profesional.',
-                                  'You will receive a reminder 6 hours prior to your slot. If you cannot attend, please cancel at least 3 hours in advance to free up the slot.'
+                                  'Verifica que exista un registro activo (is_active = true) en public.legal_documents y que el servidor/API esté accesible.',
+                                  'Verify there is an active record (is_active = true) in public.legal_documents and that the API/server is reachable.'
                                 )}
                               </Text>
-
-                              <Text style={{ color: tColor.text, fontSize: 13.5, fontWeight: '800', marginTop: 4 }}>
-                                3. Privacidad y Seguridad de Datos (Apple Guideline 5.1.1)
-                              </Text>
-                              <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 19 }}>
-                                {tr(
-                                  'Tus datos de contacto son estrictamente confidenciales y se utilizan de manera exclusiva para la coordinación de tus servicios en este negocio. Nunca comercializamos información personal con terceros.',
-                                  'Your contact details are strictly confidential and used exclusively for coordinating services at this business. Never sell personal information to third parties.'
-                                )}
-                              </Text>
-                            </>
+                              <TouchableOpacity
+                                onPress={() => loadActiveTermsFromDb()}
+                                style={{ alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: brandColor }}
+                              >
+                                <Text style={{ color: '#FFFFFF', fontWeight: '800', fontSize: 12 }}>
+                                  {tr('Reintentar consulta a BD', 'Retry DB lookup')}
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
                           )}
                         </ScrollView>
 

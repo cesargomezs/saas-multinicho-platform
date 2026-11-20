@@ -305,8 +305,7 @@ async function recordLegalAcceptanceAndDevice(params: {
         FROM public.legal_documents
         WHERE (document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
           AND is_active = true
-          AND (tenant_id = ${tenantId}::uuid OR tenant_id IS NULL)
-        ORDER BY CASE WHEN tenant_id = ${tenantId}::uuid THEN 0 ELSE 1 END, published_at DESC
+        ORDER BY CASE WHEN tenant_id IS NULL THEN 0 ELSE 1 END, published_at DESC
         LIMIT 1
       `);
       const docRows = Array.isArray(docRowsRes) ? docRowsRes : (docRowsRes as any).rows || [];
@@ -2833,29 +2832,16 @@ ${diagnosticSummary ? `🔎 <b>Estado técnico:</b> ${diagnosticSummary}
 // =========================================================================
 export async function getActiveLegalDocument(req: Request, res: Response) {
   try {
-    const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenantId as string) || '';
     const docType = String(req.query.type || 'terms_and_conditions').trim();
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId);
 
-    const rowsRes = isUuid
-      ? await db.execute(sql`
-          SELECT id, tenant_id, document_type, version, content_html, content_url, is_active, published_at
-          FROM public.legal_documents
-          WHERE (document_type ILIKE ${docType} OR document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
-            AND is_active = true
-            AND (tenant_id = ${tenantId}::uuid OR tenant_id IS NULL)
-          ORDER BY CASE WHEN tenant_id = ${tenantId}::uuid THEN 0 ELSE 1 END, published_at DESC
-          LIMIT 1
-        `)
-      : await db.execute(sql`
-          SELECT id, tenant_id, document_type, version, content_html, content_url, is_active, published_at
-          FROM public.legal_documents
-          WHERE (document_type ILIKE ${docType} OR document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
-            AND is_active = true
-            AND tenant_id IS NULL
-          ORDER BY published_at DESC
-          LIMIT 1
-        `);
+    const rowsRes = await db.execute(sql`
+      SELECT id, tenant_id, document_type, version, content_html, content_url, is_active, published_at
+      FROM public.legal_documents
+      WHERE (document_type ILIKE ${docType} OR document_type ILIKE 'terms%' OR document_type ILIKE 'term&conditions%')
+        AND is_active = true
+      ORDER BY CASE WHEN tenant_id IS NULL THEN 0 ELSE 1 END, published_at DESC
+      LIMIT 1
+    `);
 
     const rows = Array.isArray(rowsRes) ? rowsRes : (rowsRes as any).rows || [];
     if (rows.length > 0) {
