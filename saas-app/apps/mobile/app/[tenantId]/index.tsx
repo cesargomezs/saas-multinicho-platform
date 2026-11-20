@@ -1299,7 +1299,9 @@ export default function TenantDashboardScreen() {
       }
       setBookingMatchedVisits(visitsCount);
       setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
-      setIsExistingClient(Boolean(safeClient.id) || visitsCount > 0 || (Array.isArray(authData.serviceHistory) && authData.serviceHistory.length > 0));
+      setIsExistingClient(true);
+      setAcceptedBookingTerms(true);
+      setBookingAuthMethod(null);
       setBookingEntryMode(null);
       setShowBookingQuickLookup(false);
     }
@@ -1588,9 +1590,13 @@ export default function TenantDashboardScreen() {
               if (typeof safeClient.metadata === 'string') {
                 try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
               }
-              setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+              applyAuthenticatedClientToState({ ...dbCheck.data, client: safeClient }, { openExpediente: true, applyToBooking: true });
               setExpedienteAuthMethod('google');
-              setIsExpedienteExpanded(false);
+              await persistAuthenticatedClientSession({
+                provider: 'google',
+                email: gEmail || safeClient?.email || '',
+                fullName: gFullName || safeClient?.name || '',
+              });
             } else {
               if (gEmail) setExpedienteEmailInput(gEmail);
               setExpedienteAuthMethod('manual');
@@ -1627,9 +1633,12 @@ export default function TenantDashboardScreen() {
             setBookingMatchedVisits(visitsCount);
             setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
             setIsExistingClient(visitsCount > 0 || (Array.isArray(dbCheck.data.serviceHistory) && dbCheck.data.serviceHistory.length > 0));
-            setBookingAuthMethod('google');
-            setBookingEntryMode(null);
-            setShowBookingQuickLookup(false);
+            applyAuthenticatedClientToState(dbCheck.data, { openExpediente: false, applyToBooking: true });
+            await persistAuthenticatedClientSession({
+              provider: 'google',
+              email: gEmail || dbCheck.data?.client?.email || '',
+              fullName: gFullName || dbCheck.data?.client?.name || '',
+            });
           } else {
             setIsExistingClient(false);
             setBookingMatchedVisits(0);
@@ -2818,6 +2827,15 @@ export default function TenantDashboardScreen() {
   // 🗓️ Al abrir el modal de reserva, asegurar servicio seleccionado y preseleccionar el primer día abierto según los Horarios del Portal Interno
   useEffect(() => {
     if (!isBookingModalOpen) return;
+    if (clientExpedienteData?.client) {
+      applyAuthenticatedClientToState(clientExpedienteData, { openExpediente: false, applyToBooking: true });
+    } else if (savedClientSession?.email) {
+      if (!clientEmail) setClientEmail(savedClientSession.email);
+      if (!clientName && savedClientSession.fullName) setClientName(toTitleCase(savedClientSession.fullName));
+      setIsExistingClient(true);
+      setAcceptedBookingTerms(true);
+      lookupExistingClientByIdentifier(savedClientSession.email);
+    }
     if (!selectedServiceType && servicesList.length > 0) {
       const firstActive = servicesList.find(s => s.isActive !== false) || servicesList[0];
       if (firstActive) setSelectedServiceType(firstActive.id);
@@ -2979,6 +2997,8 @@ export default function TenantDashboardScreen() {
     }
 
     const timer = setTimeout(async () => {
+      const activeSessionEmail = String(clientExpedienteData?.client?.email || savedClientSession?.email || '').trim().toLowerCase();
+      const isAuthenticatedMatch = Boolean(activeSessionEmail && cleanEmail === activeSessionEmail);
       try {
         const res = await apiFetch(`/api/clients/history/${query}`);
         if (res.ok) {
@@ -2995,7 +3015,7 @@ export default function TenantDashboardScreen() {
 
             const visitsCount = Number(data.client.loyaltyVisits ?? (Array.isArray(data.serviceHistory) ? data.serviceHistory.length : 0));
             setBookingMatchedVisits(visitsCount);
-            const hasHistory = Boolean(data.client.id) || (data.serviceHistory && data.serviceHistory.length > 0) || visitsCount > 0;
+            const hasHistory = isAuthenticatedMatch || Boolean(data.client.id) || (data.serviceHistory && data.serviceHistory.length > 0) || visitsCount > 0;
             if (!clientName.trim() && data.client.name) setClientName(toTitleCase(data.client.name));
             if (!clientEmail.trim() && data.client.email) setClientEmail(data.client.email);
             setIsExistingClient(hasHistory);
@@ -3003,12 +3023,12 @@ export default function TenantDashboardScreen() {
           } else {
             const livePending = cleanPhone && pendingReferralsByPhone[cleanPhone] ? pendingReferralsByPhone[cleanPhone].length : 0;
             setBookingClientCoupons(livePending);
-            setIsExistingClient(false);
+            if (!isAuthenticatedMatch) setIsExistingClient(false);
           }
         } else {
           const livePending = cleanPhone && pendingReferralsByPhone[cleanPhone] ? pendingReferralsByPhone[cleanPhone].length : 0;
           setBookingClientCoupons(livePending);
-          setIsExistingClient(false);
+          if (!isAuthenticatedMatch) setIsExistingClient(false);
         }
       } catch (e) {}
     }, 500);
@@ -5147,6 +5167,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   if (clientExpedienteData?.client) {
                     applyAuthenticatedClientToState(clientExpedienteData, { openExpediente: false, applyToBooking: true });
                   } else if (savedClientSession?.email) {
+                    setClientEmail(savedClientSession.email);
+                    if (savedClientSession.fullName) setClientName(toTitleCase(savedClientSession.fullName));
+                    setIsExistingClient(true);
+                    setAcceptedBookingTerms(true);
                     lookupExistingClientByIdentifier(savedClientSession.email);
                   }
                   setIsEditingBookingPhone(false);
@@ -5182,6 +5206,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         if (clientExpedienteData?.client) {
                           applyAuthenticatedClientToState(clientExpedienteData, { openExpediente: false, applyToBooking: true });
                         } else if (savedClientSession?.email) {
+                          setClientEmail(savedClientSession.email);
+                          if (savedClientSession.fullName) setClientName(toTitleCase(savedClientSession.fullName));
+                          setIsExistingClient(true);
+                          setAcceptedBookingTerms(true);
                           lookupExistingClientByIdentifier(savedClientSession.email);
                         }
                         setIsEditingBookingPhone(false);

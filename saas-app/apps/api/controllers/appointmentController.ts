@@ -2960,7 +2960,7 @@ export async function authenticateClientUser(req: Request, res: Response) {
     const headerTenant = (req.headers['x-tenant-id'] as string) || '';
     const bodyTenant = (req.body?.tenantId as string) || '';
     const tenantId = headerTenant || bodyTenant;
-    const { provider, email, password, appleUserId, fullName, setPasswordIfEmpty } = req.body || {};
+    const { provider, email, password, appleUserId, fullName, phone, setPasswordIfEmpty, updateProfile } = req.body || {};
 
     if (!tenantId) {
       return res.status(400).json({ success: false, error: 'Falta identificador del negocio (x-tenant-id).' });
@@ -3054,6 +3054,20 @@ export async function authenticateClientUser(req: Request, res: Response) {
           ? 'No encontramos una cuenta con ese correo electrónico. Verifica tu correo o regístrate al reservar tu primera cita.'
           : `Cuenta ${cleanProvider === 'apple' ? 'iOS (Apple)' : 'Google'} verificada${cleanEmail ? ` (${cleanEmail})` : ''}, pero aún no está vinculada a un expediente en la base de datos. Reserva tu primera cita o ingresa con tu Usuario (Correo y Contraseña).`
       });
+    }
+
+    if (updateProfile && matchedUser) {
+      const updFields: any = {};
+      if (fullName && String(fullName).trim()) updFields.name = String(fullName).trim();
+      if (phone && String(phone).trim()) updFields.phone = String(phone).trim();
+      if (Object.keys(updFields).length > 0) {
+        const [updatedProfileUser] = await db
+          .update(users)
+          .set(updFields)
+          .where(eq(users.id, matchedUser.id))
+          .returning();
+        if (updatedProfileUser) matchedUser = updatedProfileUser;
+      }
     }
 
     const userMeta = safeParseJSON(matchedUser.metadata);
