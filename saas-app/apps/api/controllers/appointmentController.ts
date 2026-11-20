@@ -3065,8 +3065,9 @@ export async function authenticateClientUser(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: 'Ingresa tu contraseña para acceder al expediente.' });
       }
 
-      if (userMeta?.passwordHash) {
-        const isValid = verifyClientPassword(cleanPass, userMeta.passwordHash);
+      const existingHash = matchedUser.passwordHash || (matchedUser as any).password_hash || userMeta?.passwordHash;
+      if (existingHash) {
+        const isValid = verifyClientPassword(cleanPass, existingHash);
         if (!isValid) {
           return res.status(401).json({ success: false, error: 'Contraseña incorrecta. Intenta nuevamente.' });
         }
