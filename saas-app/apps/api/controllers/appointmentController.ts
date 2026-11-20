@@ -3141,3 +3141,79 @@ export async function authenticateClientUser(req: Request, res: Response) {
     return res.status(500).json({ success: false, error: error.message });
   }
 }
+
+
+// =========================================================================
+// ✏️ ACTUALIZAR NOMBRE Y TELÉFONO DEL CLIENTE EN BASE DE DATOS (PUT /api/clients/profile)
+// =========================================================================
+export async function updateClientProfile(req: Request, res: Response) {
+  try {
+    const headerTenant = (req.headers['x-tenant-id'] as string) || '';
+    const { id, clientId, tenantId: bodyTenant, name, fullName, phone, clientPhone, email, appleUserId } = req.body || {};
+    const resolvedTenantId = headerTenant || bodyTenant || '';
+    const cleanName = String(name || fullName || '').trim();
+    const cleanPhone = String(phone || clientPhone || '').trim();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const targetId = String(id || clientId || '').trim();
+
+    if (!cleanName && !cleanPhone) {
+      return res.status(400).json({ success: false, error: 'Debes enviar nombre o teléfono para actualizar.' });
+    }
+
+    const allUsers = await db.select().from(users);
+    let targetUser: any = null;
+
+    if (targetId) {
+      targetUser = allUsers.find((u: any) => String(u.id) === targetId) || null;
+    }
+    if (!targetUser && cleanEmail) {
+      targetUser =
+        allUsers.find(
+          (u: any) =>
+            String(u.email || '').trim().toLowerCase() === cleanEmail &&
+            (!resolvedTenantId || String(u.tenantId || (u as any).tenant_id || '') === resolvedTenantId)
+        ) ||
+        allUsers.find((u: any) => String(u.email || '').trim().toLowerCase() === cleanEmail) ||
+        null;
+    }
+    if (!targetUser && appleUserId) {
+      targetUser =
+        allUsers.find((u: any) => {
+          const m = safeParseJSON(u.metadata);
+          return m?.appleUserId === String(appleUserId).trim() || (u as any)?.appleUserId === String(appleUserId).trim();
+        }) || null;
+    }
+
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado en la base de datos.' });
+    }
+
+    const updateValues: any = {};
+    if (cleanName) updateValues.name = cleanName;
+    if (cleanPhone) updateValues.phone = cleanPhone;
+
+    const [updatedUser] = await db
+      .update(users)
+      .set(updateValues)
+      .where(eq(users.id, targetUser.id))
+      .returning();
+
+    const safeClientOut = {
+      ...updatedUser,
+      metadata: (() => {
+        const m = safeParseJSON(updatedUser.metadata);
+        delete m.passwordHash;
+        return m;
+      })(),
+    };
+
+    return res.status(200).json({
+      success: true,
+      message: 'Perfil actualizado en PostgreSQL.',
+      client: safeClientOut,
+    });
+  } catch (error: any) {
+    console.error('Error en updateClientProfile:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+}

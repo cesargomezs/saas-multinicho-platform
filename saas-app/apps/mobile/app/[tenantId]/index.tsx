@@ -17,11 +17,59 @@ const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || process.env.NEXT_PUB
 const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'tu-anon-key';
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: { persistSession: false },
+  auth: { persistSession: true },
   realtime: { params: { eventsPerSecond: 0 } }
 });
 
 
+
+
+// ==========================================
+// 💾 PERSISTENCIA DE SESIÓN DE LARGA DURACIÓN (iOS, ANDROID Y WEB — 6 MESES / 180 DÍAS)
+// ==========================================
+const CLIENT_SESSION_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 6 meses (180 días)
+const getClientSessionStorageKey = (tUuid: string) => `picktimebook_client_session_${tUuid || 'default'}`;
+
+const readRawPersistentSession = async (key: string): Promise<string | null> => {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const fromLocal = window.localStorage?.getItem(key);
+      if (fromLocal) return fromLocal;
+      const fromSession = window.sessionStorage?.getItem(key);
+      if (fromSession) return fromSession;
+    }
+  } catch (_e) {}
+
+  const memMap: Record<string, string> = (globalThis as any).__picktimeClientSessions || {};
+  return memMap[key] || null;
+};
+
+const writeRawPersistentSession = async (key: string, value: string): Promise<void> => {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.localStorage?.setItem(key, value);
+      window.sessionStorage?.setItem(key, value);
+    }
+  } catch (_e) {}
+
+  if (!(globalThis as any).__picktimeClientSessions) {
+    (globalThis as any).__picktimeClientSessions = {};
+  }
+  (globalThis as any).__picktimeClientSessions[key] = value;
+};
+
+const removeRawPersistentSession = async (key: string): Promise<void> => {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.localStorage?.removeItem(key);
+      window.sessionStorage?.removeItem(key);
+    }
+  } catch (_e) {}
+
+  if ((globalThis as any).__picktimeClientSessions) {
+    delete (globalThis as any).__picktimeClientSessions[key];
+  }
+};
 
 // ==========================================
 // 🌎 LISTA PARAMETRIZADA DE INDICATIVOS DE PAÍS
@@ -1185,6 +1233,127 @@ export default function TenantDashboardScreen() {
   const [bookingPassword, setBookingPassword] = useState<string>('');
   const [showBookingPassword, setShowBookingPassword] = useState<boolean>(false);
   const [lastAppleUserId, setLastAppleUserId] = useState<string>('');
+  const [savedClientSession, setSavedClientSession] = useState<{
+    provider: 'apple' | 'google' | 'manual';
+    email?: string;
+    appleUserId?: string;
+    fullName?: string;
+    savedAt: number;
+  } | null>(null);
+  const [isRestoringSession, setIsRestoringSession] = useState<boolean>(false);
+
+  const persistAuthenticatedClientSession = async (sessionPayload: {
+    provider: 'apple' | 'google' | 'manual';
+    email?: string;
+    appleUserId?: string;
+    fullName?: string;
+  }) => {
+    const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+    const record = {
+      ...sessionPayload,
+      savedAt: Date.now(),
+    };
+    setSavedClientSession(record);
+    await writeRawPersistentSession(getClientSessionStorageKey(activeTenantUuid), JSON.stringify(record));
+    await writeRawPersistentSession(getClientSessionStorageKey('global'), JSON.stringify(record));
+  };
+
+  const clearPersistentClientSession = async () => {
+    const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+    setSavedClientSession(null);
+    setClientExpedienteData(null);
+    setIsExpedienteExpanded(true);
+    await removeRawPersistentSession(getClientSessionStorageKey(activeTenantUuid));
+    await removeRawPersistentSession(getClientSessionStorageKey('global'));
+  };
+
+  const applyAuthenticatedClientToState = (
+    authData: any,
+    options?: { openExpediente?: boolean; applyToBooking?: boolean }
+  ) => {
+    if (!authData?.client) return;
+    let safeClient = { ...authData.client };
+    if (typeof safeClient.metadata === 'string') {
+      try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
+    }
+    const fullData = { ...authData, client: safeClient };
+    setClientExpedienteData(fullData);
+
+    if (options?.openExpediente) {
+      setIsExpedienteExpanded(false);
+    }
+
+    if (options?.applyToBooking) {
+      const dbEarned = Number(safeClient.metadata?.earnedReferralDiscounts || 0);
+      const cPhoneClean = cleanPhoneDigits(safeClient.phone);
+      const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
+      const visitsCount = Number(safeClient.loyaltyVisits ?? (Array.isArray(authData.serviceHistory) ? authData.serviceHistory.length : 0));
+
+      if (safeClient.name) setClientName(toTitleCase(safeClient.name));
+      if (safeClient.email) setClientEmail(safeClient.email);
+      if (safeClient.phone) {
+        const rawPhone = String(safeClient.phone);
+        const matchedCode = COUNTRY_CODES.find((item) => rawPhone.startsWith(item.code));
+        if (matchedCode) setBookingCountryCode(matchedCode.code);
+        setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+      }
+      setBookingMatchedVisits(visitsCount);
+      setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
+      setIsExistingClient(Boolean(safeClient.id) || visitsCount > 0 || (Array.isArray(authData.serviceHistory) && authData.serviceHistory.length > 0));
+      setBookingEntryMode(null);
+      setShowBookingQuickLookup(false);
+    }
+  };
+
+  // Auto-restaurar sesión guardada al cargar o entrar a Expediente sin volver a pedir clave de Apple/Password
+  useEffect(() => {
+    let cancelled = false;
+    const restoreSession = async () => {
+      const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+      if (!activeTenantUuid) return;
+      const raw =
+        (await readRawPersistentSession(getClientSessionStorageKey(activeTenantUuid))) ||
+        (await readRawPersistentSession(getClientSessionStorageKey('global')));
+      if (!raw || cancelled) return;
+
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed?.savedAt || Date.now() - Number(parsed.savedAt) > CLIENT_SESSION_TTL_MS) {
+          await removeRawPersistentSession(getClientSessionStorageKey(activeTenantUuid));
+          return;
+        }
+        setSavedClientSession(parsed);
+        if (parsed.email) setExpedienteEmailInput(parsed.email);
+        if (parsed.appleUserId) setLastAppleUserId(parsed.appleUserId);
+
+        setIsRestoringSession(true);
+        const res = await apiFetch('/api/clients/auth', {
+          method: 'POST',
+          headers: { 'x-tenant-id': activeTenantUuid },
+          body: JSON.stringify({
+            provider: parsed.provider || 'apple',
+            email: parsed.email || '',
+            appleUserId: parsed.appleUserId || '',
+            fullName: parsed.fullName || '',
+            tenantId: activeTenantUuid,
+            resumeSession: true,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok && data.success && data.client) {
+          applyAuthenticatedClientToState(data, { openExpediente: true, applyToBooking: true });
+          setExpedienteAuthMethod(parsed.provider || 'apple');
+        }
+      } catch (_e) {
+      } finally {
+        if (!cancelled) setIsRestoringSession(false);
+      }
+    };
+    restoreSession();
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantInfo?.id, tenantId]);
 
   // 🔐 Valida contra la tabla public.users en BD (iOS, Google o Correo + Contraseña)
   const authenticateUserAgainstDb = async (payload: {
@@ -1264,9 +1433,14 @@ export default function TenantDashboardScreen() {
           if (typeof safeClient.metadata === 'string') {
             try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
           }
-          setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+          applyAuthenticatedClientToState(dbCheck.data, { openExpediente: true, applyToBooking: true });
           setExpedienteAuthMethod('apple');
-          setIsExpedienteExpanded(false);
+          await persistAuthenticatedClientSession({
+            provider: 'apple',
+            email: appleEmail || safeClient?.email || '',
+            appleUserId,
+            fullName: appleFullName || safeClient?.name || '',
+          });
         } else {
           if (appleEmail) setExpedienteEmailInput(appleEmail);
           setExpedienteAuthMethod('manual');
@@ -1302,6 +1476,13 @@ export default function TenantDashboardScreen() {
         setBookingMatchedVisits(visitsCount);
         setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
         setIsExistingClient(visitsCount > 0 || (Array.isArray(dbCheck.data.serviceHistory) && dbCheck.data.serviceHistory.length > 0));
+        applyAuthenticatedClientToState(dbCheck.data, { openExpediente: false, applyToBooking: false });
+        await persistAuthenticatedClientSession({
+          provider: 'apple',
+          email: appleEmail || dbCheck.data?.client?.email || '',
+          appleUserId,
+          fullName: appleFullName || dbCheck.data?.client?.name || '',
+        });
         setBookingAuthMethod('apple');
         setBookingEntryMode(null);
         setShowBookingQuickLookup(false);
@@ -1312,6 +1493,7 @@ export default function TenantDashboardScreen() {
         setClientName(appleFullName ? toTitleCase(appleFullName) : '');
         setClientEmail(appleEmail || '');
         setClientPhone('');
+                          setIsEditingBookingPhone(false);
         setBookingAuthMethod('apple');
         setBookingEntryMode(null);
         setShowBookingQuickLookup(false);
@@ -1320,11 +1502,18 @@ export default function TenantDashboardScreen() {
       if (err?.code === 'ERR_REQUEST_CANCELED') {
         return;
       }
+      if (savedClientSession && clientExpedienteData?.client) {
+        setIsExpedienteExpanded(false);
+        return;
+      }
       const errDetail = [err?.code, err?.message].filter(Boolean).join(' - ');
+      if (targetContext === 'expediente') {
+        setExpedienteAuthMethod('manual');
+      }
       alert(
         tr(
-          `No se pudo validar tu cuenta de iOS (Apple).${errDetail ? `\n\nDetalle: ${errDetail}` : ''}\n\nVerifica que el simulador tenga sesión de Apple ID en Ajustes y que el target de Xcode tenga "Sign in with Apple" firmado con una cuenta Apple Developer.`,
-          `Could not verify your iOS (Apple) account.${errDetail ? `\n\nDetail: ${errDetail}` : ''}\n\nMake sure Simulator is signed into an Apple ID in Settings and Xcode has "Sign in with Apple" signed with an Apple Developer account.`
+          `El servicio de Apple ID en el simulador no respondió en este intento${errDetail ? ` (${errDetail})` : ''}.\n\nPuedes continuar con Google o con Usuario (Correo y Contraseña) y tu sesión quedará guardada por 6 meses en iOS y Android.`,
+          `Apple ID service on the simulator did not respond on this attempt${errDetail ? ` (${errDetail})` : ''}.\n\nYou can continue with Google or User (Email & Password) and your session will stay saved for 6 months on iOS and Android.`
         )
       );
     } finally {
@@ -1544,6 +1733,7 @@ export default function TenantDashboardScreen() {
       });
   };
   const [isExistingClient, setIsExistingClient] = useState(false);
+  const [isEditingBookingPhone, setIsEditingBookingPhone] = useState(false);
   const [showBookingQuickLookup, setShowBookingQuickLookup] = useState(false);
   const [bookingLookupQuery, setBookingLookupQuery] = useState('');
   const [isSearchingBookingClient, setIsSearchingBookingClient] = useState(false);
@@ -1599,6 +1789,11 @@ export default function TenantDashboardScreen() {
   const [isSearchingExpediente, setIsSearchingExpediente] = useState(false);
   const [clientExpedienteData, setClientExpedienteData] = useState<any | null>(null);
   const [isExpedienteExpanded, setIsExpedienteExpanded] = useState(true);
+  const [isEditingExpedienteProfile, setIsEditingExpedienteProfile] = useState(false);
+  const [expEditName, setExpEditName] = useState('');
+  const [expEditCountryCode, setExpEditCountryCode] = useState('+1');
+  const [expEditPhone, setExpEditPhone] = useState('');
+  const [isSavingExpedienteProfile, setIsSavingExpedienteProfile] = useState(false);
   const [expandedImage, setExpandedImage] = useState<{ path: string, alt: string } | null>(null);
 
   const defaultHoursConfig = {
@@ -2800,7 +2995,7 @@ export default function TenantDashboardScreen() {
 
             const visitsCount = Number(data.client.loyaltyVisits ?? (Array.isArray(data.serviceHistory) ? data.serviceHistory.length : 0));
             setBookingMatchedVisits(visitsCount);
-            const hasHistory = (data.serviceHistory && data.serviceHistory.length > 0) || visitsCount > 0;
+            const hasHistory = Boolean(data.client.id) || (data.serviceHistory && data.serviceHistory.length > 0) || visitsCount > 0;
             if (!clientName.trim() && data.client.name) setClientName(toTitleCase(data.client.name));
             if (!clientEmail.trim() && data.client.email) setClientEmail(data.client.email);
             setIsExistingClient(hasHistory);
@@ -3472,10 +3667,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         if (typeof safeClient.metadata === 'string') {
           try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
         }
-        setClientExpedienteData({ ...dbCheck.data, client: safeClient });
+        applyAuthenticatedClientToState(dbCheck.data, { openExpediente: true, applyToBooking: true });
         setExpedienteAuthMethod('manual');
         setExpedienteSetPassFirstTime(false);
-        setIsExpedienteExpanded(false);
+        await persistAuthenticatedClientSession({
+          provider: 'manual',
+          email: cleanEmail,
+          fullName: safeClient?.name || '',
+        });
       } else {
         if (dbCheck.needsPasswordSetup) {
           setExpedienteSetPassFirstTime(true);
@@ -3522,6 +3721,171 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         } else { setIsPlateSearched(true); }
       }
     } catch (error) { setIsPlateSearched(true); } finally { setIsSearchingPlate(false); }
+  };
+
+  const persistUpdatedClientNameAndPhoneToDb = async (params: {
+    newName: string;
+    newFormattedPhone: string;
+    countryCode: string;
+    rawDigitsPhone: string;
+  }) => {
+    const cleanName = toTitleCase(params.newName.trim());
+    const formattedPhone = params.newFormattedPhone.trim();
+    const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+    const cId = clientExpedienteData?.client?.id || '';
+    const cEmail = String(clientExpedienteData?.client?.email || clientEmail || savedClientSession?.email || '').trim().toLowerCase();
+    const cAppleId = lastAppleUserId || savedClientSession?.appleUserId || '';
+
+    let updated = false;
+    let backendMsg = '';
+
+    // 1. Intentar actualizar por REST (/api/clients/profile) enviando tanto `phone` como `clientPhone` y `fullName`
+    try {
+      const resProfile = await apiFetch('/api/clients/profile', {
+        method: 'PUT',
+        headers: activeTenantUuid ? { 'x-tenant-id': activeTenantUuid } : {},
+        body: JSON.stringify({
+          id: cId || undefined,
+          clientId: cId || undefined,
+          tenantId: activeTenantUuid || undefined,
+          name: cleanName,
+          fullName: cleanName,
+          phone: formattedPhone,
+          clientPhone: formattedPhone,
+          email: cEmail || undefined,
+          appleUserId: cAppleId || undefined,
+        }),
+      });
+      if (resProfile && resProfile.ok) {
+        const profJson = await resProfile.json().catch(() => ({}));
+        updated = true;
+        if (profJson?.client) {
+          clientExpedienteData.client = { ...clientExpedienteData.client, ...profJson.client };
+        }
+      } else if (resProfile) {
+        const errJson = await resProfile.json().catch(() => ({}));
+        backendMsg = errJson?.error || errJson?.message || '';
+      }
+    } catch (_e) {}
+
+    // 2. Fallback por `/api/clients/auth` con `updateProfile: true` si `/api/clients/profile` no existe o falló
+    if (!updated && cEmail) {
+      try {
+        const resAuthUpd = await apiFetch('/api/clients/auth', {
+          method: 'POST',
+          headers: activeTenantUuid ? { 'x-tenant-id': activeTenantUuid } : {},
+          body: JSON.stringify({
+            provider: savedClientSession?.provider || 'manual',
+            email: cEmail,
+            fullName: cleanName,
+            phone: formattedPhone,
+            appleUserId: cAppleId || undefined,
+            tenantId: activeTenantUuid || undefined,
+            updateProfile: true,
+          }),
+        });
+        if (resAuthUpd && resAuthUpd.ok) {
+          const authJson = await resAuthUpd.json().catch(() => ({}));
+          if (authJson?.success && authJson?.client) {
+            updated = true;
+          }
+        }
+      } catch (_e) {}
+    }
+
+    // 3. Fallback directo en Supabase (`users` / `clients`) si está configurado
+    if (!updated && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
+      for (const tbl of ['users', 'clients']) {
+        try {
+          if (cId) {
+            const { data: dById, error: errById } = await supabase
+              .from(tbl)
+              .update({ name: cleanName, phone: formattedPhone })
+              .eq('id', cId)
+              .select();
+            if (!errById && Array.isArray(dById) && dById.length > 0) updated = true;
+          }
+          if (!updated && cEmail) {
+            let q = supabase.from(tbl).update({ name: cleanName, phone: formattedPhone }).eq('email', cEmail);
+            if (activeTenantUuid) q = q.eq('tenant_id', activeTenantUuid);
+            const { data: dByEmail, error: errByEmail } = await q.select();
+            if (!errByEmail && Array.isArray(dByEmail) && dByEmail.length > 0) updated = true;
+          }
+        } catch (_e) {}
+      }
+    }
+
+    // 4. Sincronizar estado local de Expediente, Reserva y Sesión persistente
+    const cleanLocalDigits = params.rawDigitsPhone.replace(/^\+\d+\s*/, '');
+    setClientName(cleanName);
+    setBookingCountryCode(params.countryCode);
+    setClientPhone(cleanLocalDigits);
+    setExpedienteCountryCode(params.countryCode);
+
+    setClientExpedienteData((prev: any) =>
+      prev
+        ? {
+            ...prev,
+            client: {
+              ...(prev.client || {}),
+              name: cleanName,
+              phone: formattedPhone,
+            },
+          }
+        : prev
+    );
+
+    if (savedClientSession) {
+      await persistAuthenticatedClientSession({
+        provider: savedClientSession.provider,
+        email: savedClientSession.email,
+        appleUserId: savedClientSession.appleUserId,
+        fullName: cleanName,
+      });
+    }
+
+    return { updated, backendMsg };
+  };
+
+  const handleSaveExpedienteProfile = async () => {
+    const cleanName = toTitleCase(expEditName.trim());
+    const cleanDigits = cleanPhoneDigits(expEditPhone);
+    if (!cleanName) {
+      alert(tr('Por favor ingresa tu Nombre Completo.', 'Please enter your Full Name.'));
+      return;
+    }
+    if (cleanDigits.length < 7) {
+      alert(tr('Por favor ingresa un número de Teléfono válido.', 'Please enter a valid Phone Number.'));
+      return;
+    }
+    const formattedPhone = expEditPhone.trim().startsWith('+')
+      ? expEditPhone.trim()
+      : `${expEditCountryCode} ${expEditPhone.trim()}`;
+
+    setIsSavingExpedienteProfile(true);
+    try {
+      const resUpd = await persistUpdatedClientNameAndPhoneToDb({
+        newName: cleanName,
+        newFormattedPhone: formattedPhone,
+        countryCode: expEditCountryCode,
+        rawDigitsPhone: expEditPhone.trim(),
+      });
+      setIsEditingExpedienteProfile(false);
+      if (resUpd?.updated) {
+        alert(tr('✅ ¡Nombre y teléfono actualizados en la base de datos!', '✅ Name and phone updated in the database!'));
+      } else {
+        alert(
+          tr(
+            `⚠️ Se actualizó en tu sesión actual, pero el servidor aún no expone PUT /api/clients/profile${resUpd?.backendMsg ? ` (${resUpd.backendMsg})` : ''}. Agrega la ruta PUT /api/clients/profile en tu backend para persistir en Render/PostgreSQL.`,
+            '⚠️ Updated in your current session, but the backend does not expose PUT /api/clients/profile yet.'
+          )
+        );
+      }
+    } catch (_e) {
+      alert(tr('Error al guardar los cambios.', 'Error saving changes.'));
+    } finally {
+      setIsSavingExpedienteProfile(false);
+    }
   };
 
   const handleBookFromExpediente = () => {
@@ -3626,7 +3990,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         return;
       }
     }
-    if (!acceptedBookingTerms) {
+    const effectiveTermsAccepted = acceptedBookingTerms || isExistingClient || Boolean(savedClientSession);
+    if (!effectiveTermsAccepted) {
       alert(tr('Debes leer y aceptar los Términos y Condiciones para confirmar tu reserva.', 'You must read and accept the Terms & Conditions to confirm your booking.'));
       return;
     }
@@ -3664,6 +4029,15 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       }
         
       const formattedPhone = clientPhone.startsWith('+') ? clientPhone : `${bookingCountryCode} ${clientPhone.trim()}`;
+      if (isExistingClient || savedClientSession) {
+        await persistUpdatedClientNameAndPhoneToDb({
+          newName: toTitleCase(clientName),
+          newFormattedPhone: formattedPhone,
+          countryCode: bookingCountryCode,
+          rawDigitsPhone: clientPhone.trim(),
+        });
+      }
+
       const response = await apiFetch('/api/appointments', {
         method: 'POST', 
         body: JSON.stringify({ 
@@ -3676,7 +4050,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           staffId: finalAssignedStaffId, 
           appointmentDate: combinedDateTime, 
           notes: toTitleCase(quickNotes), 
-          acceptedTerms: acceptedBookingTerms,
+          acceptedTerms: effectiveTermsAccepted,
           deviceInfo: {
             os: Platform.OS,
             authProvider: bookingAuthMethod || 'manual'
@@ -3684,7 +4058,24 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           metadata: JSON.stringify(metadataObj)
         })
       });
-      if (response.ok) { alert(`¡Cita confirmada!`); setIsBookingModalOpen(false); setIsPlateSearched(false); setReferredByPhone(''); fetchAgendaData(); }
+      if (response.ok) {
+        await persistAuthenticatedClientSession({
+          provider: bookingAuthMethod || 'manual',
+          email: clientEmail.trim().toLowerCase(),
+          appleUserId: lastAppleUserId || undefined,
+          fullName: toTitleCase(clientName),
+        });
+        alert(
+          tr(
+            '¡Cita confirmada! Tu cuenta quedará activa para las próximas citas sin tener que registrarte o iniciar sesión de nuevo.',
+            'Appointment confirmed! Your account will stay active for upcoming appointments without signing up or logging in again.'
+          )
+        );
+        setIsBookingModalOpen(false);
+        setIsPlateSearched(false);
+        setReferredByPhone('');
+        fetchAgendaData();
+      }
       else { alert('Error del servidor al confirmar cita.'); }
     } catch (error) { alert('Error agendando cita.'); } finally { setIsSubmitting(false); }
   };
@@ -4752,7 +5143,16 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 17 }}>{toTitleCase(activeCamp.message)}</Text>
                 </View>
                 {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
-                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 9, paddingHorizontal: 15, borderRadius: 10 }]} onPress={() => { setIsBookingModalOpen(true); setIsPlateSearched(false); }}>
+                <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 9, paddingHorizontal: 15, borderRadius: 10 }]} onPress={() => {
+                  if (clientExpedienteData?.client) {
+                    applyAuthenticatedClientToState(clientExpedienteData, { openExpediente: false, applyToBooking: true });
+                  } else if (savedClientSession?.email) {
+                    lookupExistingClientByIdentifier(savedClientSession.email);
+                  }
+                  setIsEditingBookingPhone(false);
+                  setIsBookingModalOpen(true);
+                  setIsPlateSearched(false);
+                }}>
                   <Text style={[styles.primaryButtonText, { fontSize: 12.5 }]}>{t.promoClaim}</Text>
                 </TouchableOpacity>
               </View>
@@ -4777,7 +5177,17 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     )}
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: tColor.border, paddingTop: 16, gap: 12 }}>
                       <Text style={{ fontSize: isMobile ? 22 : 24, fontWeight: '900', color: brandColor }}>${srv.price}</Text>
-                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: isMobile ? 12 : 14, paddingHorizontal: isMobile ? 18 : 24 }]} onPress={() => { setSelectedServiceType(srv.id); setIsBookingModalOpen(true); setIsPlateSearched(false); }}><Text style={styles.primaryButtonText}>{t.bookNow}</Text></TouchableOpacity>
+                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: isMobile ? 12 : 14, paddingHorizontal: isMobile ? 18 : 24 }]} onPress={() => {
+                        setSelectedServiceType(srv.id);
+                        if (clientExpedienteData?.client) {
+                          applyAuthenticatedClientToState(clientExpedienteData, { openExpediente: false, applyToBooking: true });
+                        } else if (savedClientSession?.email) {
+                          lookupExistingClientByIdentifier(savedClientSession.email);
+                        }
+                        setIsEditingBookingPhone(false);
+                        setIsBookingModalOpen(true);
+                        setIsPlateSearched(false);
+                      }}><Text style={styles.primaryButtonText}>{t.bookNow}</Text></TouchableOpacity>
                     </View>
                   </View>
                 </View>
@@ -4951,7 +5361,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
               <View style={{ width: '100%', maxWidth: 800 }}>
                 {(!clientExpedienteData || isExpedienteExpanded) ? (
                   <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, width: '100%', padding: isMobile ? 20 : 32 }]}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                       <Text style={{ fontSize: isMobile ? 20 : 26, fontWeight: '900', color: tColor.text }}>
                         <Text style={{ fontSize: isMobile ? 24 : 32 }}>📋 </Text> Expediente
                       </Text>
@@ -4962,14 +5372,40 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       ) : null}
                     </View>
                     
-                    <Text style={{ color: tColor.muted, marginBottom: 16, fontSize: 13.5, lineHeight: 19 }}>
+                    <Text style={{ color: tColor.muted, marginBottom: 12, fontSize: 13.5, lineHeight: 19 }}>
                       {tr(
                         'Por tu seguridad, valida tu identidad con iOS o Google en 1 toque, o ingresa con tu Correo y Contraseña:',
                         'For your security, verify with iOS or Google in 1 tap, or sign in with your Email and Password:'
                       )}
                     </Text>
 
-                    {/* 🔐 3 OPCIONES SEGURAS DE ACCESO AL EXPEDIENTE (iOS, Google, Usuario con Correo + Password) */}
+                    {savedClientSession ? (
+                      <View style={{ backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: '#10B981', borderRadius: 12, padding: 12, marginBottom: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: '#10B981', fontWeight: '900', fontSize: 12.5 }}>
+                            {tr(
+                              `✅ Cuenta activa (${savedClientSession.email || savedClientSession.fullName || 'Verificada'})`,
+                              `✅ Active account (${savedClientSession.email || savedClientSession.fullName || 'Verified'})`
+                            )}
+                          </Text>
+                          <Text style={{ color: tColor.text, fontSize: 11.5, marginTop: 2, lineHeight: 16 }}>
+                            {tr(
+                              'Tu cuenta quedará activa para las próximas citas sin tener que repetir el acceso cada vez.',
+                              'Your account will stay active for upcoming appointments without repeating sign-in every time.'
+                            )}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={clearPersistentClientSession}
+                          style={{ paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: 'rgba(239, 68, 68, 0.5)', backgroundColor: 'rgba(239, 68, 68, 0.12)' }}
+                        >
+                          <Text style={{ color: '#EF4444', fontWeight: '800', fontSize: 11 }}>{tr('Salir', 'Log Out')}</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+
+                    {/* 🔐 3 OPCIONES SEGURAS DE ACCESO AL EXPEDIENTE: SE MUESTRAN SI NO HAY SESIÓN ACTIVA (O TRAS CERRAR SESIÓN) */}
+                    {!savedClientSession ? (
                     <View style={{ backgroundColor: tColor.input, borderRadius: 16, borderWidth: 1, borderColor: tColor.border, padding: 14, marginBottom: 18, gap: 10 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
@@ -5058,6 +5494,32 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         🔒 {tr('No exponemos tu historial por número telefónico. Solo tú puedes acceder con tu cuenta verificada.', 'We never expose your history by phone number. Only you can access it with your verified account.')}
                       </Text>
                     </View>
+                    ) : (
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          if (clientExpedienteData) {
+                            setIsExpedienteExpanded(false);
+                          } else {
+                            setExpedienteAuthMethod(savedClientSession.provider || 'manual');
+                          }
+                        }}
+                        style={{
+                          width: '100%',
+                          height: 46,
+                          borderRadius: 12,
+                          backgroundColor: brandColor,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          marginBottom: 16,
+                          paddingHorizontal: 14,
+                        }}
+                      >
+                        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13.5 }} numberOfLines={1}>
+                          {tr('📋 Ver mi Expediente Activo', '📋 View Active Records')}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
 
                     {pendingReaction ? (
                       <View style={{ backgroundColor: pendingReaction === 'like' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: pendingReaction === 'like' ? '#10B981' : '#EF4444', borderRadius: 12, padding: 14, marginBottom: 20, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
@@ -5146,25 +5608,135 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 ) : null}
 
                 {(clientExpedienteData && !isExpedienteExpanded) ? (
-                  <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', padding: 16, borderLeftWidth: 4, borderLeftColor: brandColor, gap: 16 }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                      <View style={[styles.plateBadge, { backgroundColor: brandColor }]}>
-                        <Text style={styles.plateText}>{isAutomotive ? clientExpedienteData.vehicle?.plate : 'VIP'}</Text>
+                  <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, padding: 16, borderLeftWidth: 4, borderLeftColor: brandColor, gap: 14 }]}>
+                    <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: 14 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 12, flex: 1 }}>
+                        <View style={[styles.plateBadge, { backgroundColor: brandColor, marginTop: 2 }]}>
+                          <Text style={styles.plateText}>{isAutomotive ? clientExpedienteData.vehicle?.plate : 'VIP'}</Text>
+                        </View>
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                            <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 15.5, flex: 1 }} numberOfLines={1}>
+                              {toTitleCase(clientExpedienteData.client?.name || 'General')}
+                            </Text>
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={() => {
+                                if (!isEditingExpedienteProfile) {
+                                  const rawPhone = String(clientExpedienteData.client?.phone || '');
+                                  const matchedCode = COUNTRY_CODES.find((c) => rawPhone.startsWith(c.code));
+                                  setExpEditCountryCode(matchedCode ? matchedCode.code : expedienteCountryCode);
+                                  setExpEditPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+                                  setExpEditName(toTitleCase(clientExpedienteData.client?.name || ''));
+                                }
+                                setIsEditingExpedienteProfile((prev) => !prev);
+                              }}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 4,
+                                paddingVertical: 4,
+                                paddingHorizontal: 10,
+                                borderRadius: 8,
+                                backgroundColor: isEditingExpedienteProfile ? 'rgba(239, 68, 68, 0.14)' : `${brandColor}22`,
+                                borderWidth: 1,
+                                borderColor: isEditingExpedienteProfile ? '#EF4444' : brandColor,
+                              }}
+                            >
+                              <Feather name={isEditingExpedienteProfile ? 'x' : 'edit-2'} size={11} color={isEditingExpedienteProfile ? '#EF4444' : brandColor} />
+                              <Text style={{ color: isEditingExpedienteProfile ? '#EF4444' : brandColor, fontSize: 11.5, fontWeight: '900' }}>
+                                {isEditingExpedienteProfile ? tr('Cerrar', 'Close') : tr('Actualizar', 'Update')}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+
+                          <Text style={{ color: '#10B981', fontSize: 11, fontWeight: '800', marginTop: 2 }}>
+                            {tr('✓ Cuenta activa para tus próximas citas', '✓ Account active for upcoming appointments')}
+                          </Text>
+
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                            <Feather name="phone" size={12} color="#10B981" />
+                            <Text style={{ color: '#10B981', fontSize: 12.5, fontWeight: '800' }}>
+                              {(() => {
+                                const rawP = String(clientExpedienteData.client?.phone || '');
+                                if (!rawP) return tr('Sin teléfono registrado', 'No phone registered');
+                                return rawP.startsWith('+') ? rawP : `${expedienteCountryCode} ${rawP}`;
+                              })()}
+                            </Text>
+                            {clientExpedienteData.client?.email ? (
+                              <Text style={{ color: tColor.muted, fontSize: 11.5 }} numberOfLines={1}>
+                                • {clientExpedienteData.client.email}
+                              </Text>
+                            ) : null}
+                          </View>
+                        </View>
                       </View>
-                      <View>
-                        <Text style={{ color: tColor.text, fontWeight: 'bold', fontSize: 15 }}>{toTitleCase(clientExpedienteData.client?.name || 'General')}</Text>
-                        <Text style={{ color: tColor.muted, fontSize: 13 }}>📞 {expedienteCountryCode} {clientExpedienteData.client?.phone?.replace(/^\+\d+\s*/, '') || 'N/A'}</Text>
+
+                      <View style={{ flexDirection: 'row', gap: 12, width: isMobile ? '100%' : 'auto' }}>
+                        <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={() => { setIsEditingExpedienteProfile(false); clearPersistentClientSession(); }}>
+                          <Text style={[styles.secondaryButtonText, { color: '#EF4444' }]}>{tr('Salir', 'Log Out')}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingHorizontal: 16, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={handleBookFromExpediente}>
+                          <Text style={styles.primaryButtonText}>📅 Agendar Cita</Text>
+                        </TouchableOpacity>
                       </View>
                     </View>
 
-                    <View style={{ flexDirection: 'row', gap: 12, width: isMobile ? '100%' : 'auto' }}>
-                      <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={() => setIsExpedienteExpanded(true)}>
-                        <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>🔍 Otra Búsqueda</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingHorizontal: 16, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={handleBookFromExpediente}>
-                        <Text style={styles.primaryButtonText}>📅 Agendar Cita</Text>
-                      </TouchableOpacity>
-                    </View>
+                    {isEditingExpedienteProfile ? (
+                      <View style={{ backgroundColor: tColor.input, borderWidth: 1.5, borderColor: brandColor, borderRadius: 14, padding: 14, gap: 12 }}>
+                        <View>
+                          <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 6 }]}>
+                            {tr('NOMBRE COMPLETO *', 'FULL NAME *')}
+                          </Text>
+                          <TextInput
+                            style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text, fontWeight: '800' }]}
+                            placeholder={tr('Nombre Completo', 'Full Name')}
+                            placeholderTextColor={tColor.muted}
+                            value={expEditName}
+                            onChangeText={(txt) => setExpEditName(toTitleCase(txt))}
+                          />
+                        </View>
+
+                        <View>
+                          <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 6 }]}>
+                            {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
+                          </Text>
+                          <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(expEditPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                            <CountryCodeSelector value={expEditCountryCode} onChange={setExpEditCountryCode} tColor={tColor} width={105} />
+                            <TextInput
+                              style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '800', outlineStyle: 'none' } as any}
+                              placeholder={tr('(909) 000-0000', '(909) 000-0000')}
+                              placeholderTextColor={tColor.muted}
+                              keyboardType="phone-pad"
+                              value={expEditPhone}
+                              onChangeText={(txt) => setExpEditPhone(txt.replace(/[^0-9\s-]/g, ''))}
+                            />
+                          </View>
+                        </View>
+
+                        {clientExpedienteData.client?.email ? (
+                          <View style={{ backgroundColor: tColor.bg, borderRadius: 10, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Feather name="lock" size={13} color={tColor.muted} />
+                            <Text style={{ color: tColor.muted, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                              {tr('Correo vinculado (sin cambios):', 'Linked email (unchanged):')} <Text style={{ color: tColor.text, fontWeight: '700' }}>{clientExpedienteData.client.email}</Text>
+                            </Text>
+                          </View>
+                        ) : null}
+
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          disabled={isSavingExpedienteProfile}
+                          onPress={handleSaveExpedienteProfile}
+                          style={[styles.primaryButton, { backgroundColor: brandColor, height: 46 }]}
+                        >
+                          <Text style={styles.primaryButtonText}>
+                            {isSavingExpedienteProfile
+                              ? tr('Guardando...', 'Saving...')
+                              : tr('💾 Guardar Nombre y Teléfono', '💾 Save Name & Phone')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
                   </View>
                 ) : null}
               </View>
@@ -5386,8 +5958,13 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   const expEmailClean = String(clientExpedienteData.client?.email || '').trim().toLowerCase();
                   const expPlateUpper = String(clientExpedienteData.vehicle?.plate || expedienteQuery || '').trim().toUpperCase();
 
+                  const nowLocalExp = new Date();
+                  const todayLocalExpStr = `${nowLocalExp.getFullYear()}-${String(nowLocalExp.getMonth() + 1).padStart(2, '0')}-${String(nowLocalExp.getDate()).padStart(2, '0')}`;
+
                   const clientActiveAppointments = getMergedUniqueAppointments(todayOrders, upcomingOrders).filter((ord) => {
                     if (ord.status === 'cancelled' || ord.status === 'completed') return false;
+                    const ordDateStr = ord.metadata?.localDate || (ord.appointmentDate ? String(ord.appointmentDate).split('T')[0] : '');
+                    if (ordDateStr && ordDateStr < todayLocalExpStr) return false;
                     const ordPhone = cleanPhoneDigits(ord.clientPhone);
                     const ordEmail = String(ord.clientEmail || '').trim().toLowerCase();
                     const ordPlate = String(ord.plate || ord.metadata?.carPlate || '').trim().toUpperCase();
@@ -5550,15 +6127,15 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         ) : null}
                         
                         {(wo.oldPartImageUrl || wo.newPartImageUrl) ? (
-                          <View style={{ flexDirection: 'row', gap: 16, marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderColor: tColor.border }}>
+                          <View style={{ flexDirection: 'row', gap: 10, marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderColor: tColor.border }}>
                             {wo.oldPartImageUrl ? (
-                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }} onPress={() => setExpandedImage({ path: wo.oldPartImageUrl, alt: 'Evidencia (Antes)' })}>
-                                <Text style={{ color: brandColor, fontWeight: 'bold', fontSize: 13 }}>📸 Ver Foto (Antes)</Text>
+                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, paddingHorizontal: 8, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }} onPress={() => setExpandedImage({ path: wo.oldPartImageUrl, alt: 'Evidencia (Antes)' })}>
+                                <Text numberOfLines={1} style={{ color: brandColor, fontWeight: 'bold', fontSize: 12.5 }}>📸 Ver Foto (Antes)</Text>
                               </TouchableOpacity>
                             ) : null}
                             {wo.newPartImageUrl ? (
-                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }} onPress={() => setExpandedImage({ path: wo.newPartImageUrl, alt: 'Evidencia (Después)' })}>
-                                <Text style={{ color: brandColor, fontWeight: 'bold', fontSize: 13 }}>📸 Ver Foto (Después)</Text>
+                              <TouchableOpacity style={{ flex: 1, backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, paddingVertical: 12, paddingHorizontal: 8, borderRadius: 8, alignItems: 'center', justifyContent: 'center' }} onPress={() => setExpandedImage({ path: wo.newPartImageUrl, alt: 'Evidencia (Después)' })}>
+                                <Text numberOfLines={1} style={{ color: brandColor, fontWeight: 'bold', fontSize: 12.5 }}>📸 Ver Foto (Después)</Text>
                               </TouchableOpacity>
                             ) : null}
                           </View>
@@ -8413,11 +8990,35 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         <Feather name={isExistingClient ? 'user-check' : 'zap'} size={16} color={isExistingClient ? '#10B981' : brandColor} />
                       </View>
                       <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: isMobile ? 14.5 : 14, lineHeight: 20 }}>
-                          {isExistingClient
-                            ? tr(`¡Hola de nuevo, ${clientName.split(' ')[0] || 'Cliente VIP'}!`, `Welcome back, ${clientName.split(' ')[0] || 'VIP Client'}!`)
-                            : tr('¿Ya estás registrado con nosotros?', 'Already registered with us?')}
-                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                          <Text style={{ color: tColor.text, fontWeight: '900', fontSize: isMobile ? 14.5 : 14, lineHeight: 20, flex: 1 }} numberOfLines={1}>
+                            {isExistingClient
+                              ? tr(`¡Hola de nuevo, ${clientName.split(' ')[0] || 'Cliente VIP'}!`, `Welcome back, ${clientName.split(' ')[0] || 'VIP Client'}!`)
+                              : tr('¿Ya estás registrado con nosotros?', 'Already registered with us?')}
+                          </Text>
+                          {isExistingClient ? (
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={() => setIsEditingBookingPhone((prev) => !prev)}
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 4,
+                                paddingVertical: 4,
+                                paddingHorizontal: 10,
+                                borderRadius: 8,
+                                backgroundColor: isEditingBookingPhone ? 'rgba(239, 68, 68, 0.14)' : `${brandColor}22`,
+                                borderWidth: 1,
+                                borderColor: isEditingBookingPhone ? '#EF4444' : brandColor,
+                              }}
+                            >
+                              <Feather name={isEditingBookingPhone ? 'x' : 'edit-2'} size={11} color={isEditingBookingPhone ? '#EF4444' : brandColor} />
+                              <Text style={{ color: isEditingBookingPhone ? '#EF4444' : brandColor, fontSize: 11.5, fontWeight: '900' }}>
+                                {isEditingBookingPhone ? tr('Cerrar', 'Close') : tr('Actualizar', 'Update')}
+                              </Text>
+                            </TouchableOpacity>
+                          ) : null}
+                        </View>
                         <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 4, lineHeight: 17 }}>
                           {isExistingClient
                             ? tr(
@@ -8426,6 +9027,19 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               )
                             : tr('Valida tu cuenta con iOS o Google, o completa tus datos como Usuario.', 'Verify with iOS or Google, or fill in your details as User.')}
                         </Text>
+                        {isExistingClient ? (
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                            <Feather name="phone" size={12} color="#10B981" />
+                            <Text style={{ color: '#10B981', fontSize: 12.5, fontWeight: '800' }}>
+                              {bookingCountryCode} {clientPhone || tr('Sin teléfono registrado', 'No phone registered')}
+                            </Text>
+                            {clientEmail ? (
+                              <Text style={{ color: tColor.muted, fontSize: 11.5 }} numberOfLines={1}>
+                                • {clientEmail}
+                              </Text>
+                            ) : null}
+                          </View>
+                        ) : null}
                       </View>
                     </View>
 
@@ -8434,6 +9048,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         activeOpacity={0.85}
                         onPress={() => {
                           setIsExistingClient(false);
+                          setIsEditingBookingPhone(false);
                           setBookingMatchedVisits(0);
                           setBookingClientCoupons(0);
                           setClientName('');
@@ -8545,25 +9160,25 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </View>
                         </View>
 
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <View style={{ flexDirection: 'column', gap: 10 }}>
                           <TouchableOpacity
                             activeOpacity={0.85}
                             disabled={isAuthenticatingProvider}
                             onPress={() => handleAppleProviderAuth('booking')}
                             style={{
-                              flex: 1,
-                              height: 44,
-                              borderRadius: 11,
+                              width: '100%',
+                              height: 46,
+                              borderRadius: 12,
                               backgroundColor: theme === 'dark' ? '#FFFFFF' : '#0F131A',
                               flexDirection: 'row',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              gap: 6,
-                              paddingHorizontal: 8,
+                              gap: 8,
+                              paddingHorizontal: 14,
                             }}
                           >
-                            <Ionicons name="logo-apple" size={16} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
-                            <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 12.5 }}>
+                            <Ionicons name="logo-apple" size={17} color={theme === 'dark' ? '#000000' : '#FFFFFF'} />
+                            <Text numberOfLines={1} style={{ color: theme === 'dark' ? '#000000' : '#FFFFFF', fontWeight: '900', fontSize: 13.5 }}>
                               iOS
                             </Text>
                           </TouchableOpacity>
@@ -8573,21 +9188,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             disabled={isAuthenticatingProvider}
                             onPress={() => handleGoogleProviderAuth('booking')}
                             style={{
-                              flex: 1,
-                              height: 44,
-                              borderRadius: 11,
+                              width: '100%',
+                              height: 46,
+                              borderRadius: 12,
                               backgroundColor: tColor.bg,
                               borderWidth: 1,
                               borderColor: tColor.border,
                               flexDirection: 'row',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              gap: 6,
-                              paddingHorizontal: 8,
+                              gap: 8,
+                              paddingHorizontal: 14,
                             }}
                           >
-                            <Ionicons name="logo-google" size={15} color="#EA4335" />
-                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 12.5 }}>
+                            <Ionicons name="logo-google" size={16} color="#EA4335" />
+                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '800', fontSize: 13.5 }}>
                               Google
                             </Text>
                           </TouchableOpacity>
@@ -8600,21 +9215,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               setShowBookingQuickLookup(false);
                             }}
                             style={{
-                              flex: 1,
-                              height: 44,
-                              borderRadius: 11,
+                              width: '100%',
+                              height: 46,
+                              borderRadius: 12,
                               backgroundColor: `${brandColor}16`,
                               borderWidth: 1,
                               borderColor: brandColor,
                               flexDirection: 'row',
                               alignItems: 'center',
                               justifyContent: 'center',
-                              gap: 6,
-                              paddingHorizontal: 8,
+                              gap: 8,
+                              paddingHorizontal: 14,
                             }}
                           >
                             <Feather name="user" size={15} color={brandColor} />
-                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '900', fontSize: 12.5 }}>
+                            <Text numberOfLines={1} style={{ color: tColor.text, fontWeight: '900', fontSize: 13.5 }}>
                               {tr('Usuario', 'User')}
                             </Text>
                           </TouchableOpacity>
@@ -8629,8 +9244,91 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     ) : null}
                   </View>
 
-                  {/* ✅ FORMULARIO DE CONTACTO + CAMBIAR MÉTODO + TÉRMINOS (OCULTO HASTA ELEGIR MÉTODO O "NO ESTOY REGISTRADO") */}
-                  {(bookingAuthMethod !== null || isExistingClient) ? (
+                  {/* ✅ CLIENTE YA REGISTRADO: SOLO SE HABILITA ABAJO SI PRESIONA "ACTUALIZAR" ARRIBA EN "¡Hola de nuevo!" */}
+                  {(isExistingClient && isEditingBookingPhone) ? (
+                    <View style={{ backgroundColor: tColor.input, borderWidth: 1.5, borderColor: brandColor, borderRadius: 16, padding: 16, marginBottom: 16, gap: 14 }}>
+                      <View>
+                        <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 6 }]}>
+                          {tr('NOMBRE COMPLETO *', 'FULL NAME *')}
+                        </Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text, fontWeight: '800' }]}
+                          placeholder={tr('Nombre Completo (Ej: Cesar Lopez)', 'Full Name (e.g., Cesar Lopez)')}
+                          placeholderTextColor={tColor.muted}
+                          value={clientName}
+                          onChangeText={text => setClientName(toTitleCase(text))}
+                        />
+                      </View>
+
+                      <View>
+                        <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 6 }]}>
+                          {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
+                        </Text>
+                        <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(clientPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                          <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
+                          <TextInput
+                            style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '800', outlineStyle: 'none' } as any}
+                            placeholder={tr('(909) 000-0000', '(909) 000-0000')}
+                            placeholderTextColor={tColor.muted}
+                            keyboardType="phone-pad"
+                            value={clientPhone}
+                            onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))}
+                          />
+                        </View>
+                      </View>
+
+                      {clientEmail ? (
+                        <View style={{ backgroundColor: tColor.bg, borderRadius: 10, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Feather name="lock" size={13} color={tColor.muted} />
+                          <Text style={{ color: tColor.muted, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                            {tr('Correo vinculado (sin cambios):', 'Linked email (unchanged):')} <Text style={{ color: tColor.text, fontWeight: '700' }}>{clientEmail}</Text>
+                          </Text>
+                        </View>
+                      ) : null}
+
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        disabled={isSavingExpedienteProfile}
+                        onPress={async () => {
+                          const cleanName = toTitleCase(clientName.trim());
+                          if (!cleanName) {
+                            alert(tr('Por favor ingresa tu Nombre Completo.', 'Please enter your Full Name.'));
+                            return;
+                          }
+                          if (cleanPhoneDigits(clientPhone).length < 7) {
+                            alert(tr('Por favor ingresa un número de Teléfono válido.', 'Please enter a valid Phone Number.'));
+                            return;
+                          }
+                          const formattedPhone = clientPhone.trim().startsWith('+')
+                            ? clientPhone.trim()
+                            : `${bookingCountryCode} ${clientPhone.trim()}`;
+                          setIsSavingExpedienteProfile(true);
+                          try {
+                            await persistUpdatedClientNameAndPhoneToDb({
+                              newName: cleanName,
+                              newFormattedPhone: formattedPhone,
+                              countryCode: bookingCountryCode,
+                              rawDigitsPhone: clientPhone.trim(),
+                            });
+                            setIsEditingBookingPhone(false);
+                            alert(tr('✅ ¡Nombre y teléfono actualizados!', '✅ Name and phone updated!'));
+                          } finally {
+                            setIsSavingExpedienteProfile(false);
+                          }
+                        }}
+                        style={[styles.primaryButton, { backgroundColor: brandColor, height: 44 }]}
+                      >
+                        <Text style={styles.primaryButtonText}>
+                          {isSavingExpedienteProfile
+                            ? tr('Guardando...', 'Saving...')
+                            : tr('💾 Guardar Nombre y Teléfono', '💾 Save Name & Phone')}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+
+                  {/* ✅ FORMULARIO DE REGISTRO PARA CLIENTE NUEVO (OCULTO SI YA ESTÁ REGISTRADO) */}
+                  {(bookingAuthMethod !== null && !isExistingClient) ? (
                   <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 16, marginBottom: 16 }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.03)', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: tColor.border }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
@@ -8648,26 +9346,41 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </Text>
                       </View>
 
-                      {!isExistingClient ? (
-                        <TouchableOpacity
-                          activeOpacity={0.8}
-                          onPress={() => {
-                            setBookingAuthMethod(null);
-                            setClientName('');
-                            setClientEmail('');
-                            setClientPhone('');
-                            setAcceptedBookingTerms(false);
-                            setBookingEntryMode('existing');
-                            setShowBookingQuickLookup(false);
-                          }}
-                          style={{ paddingLeft: 8 }}
-                        >
-                          <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textDecorationLine: 'underline' }}>
-                            {tr('Cambiar método', 'Change method')}
-                          </Text>
-                        </TouchableOpacity>
-                      ) : null}
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => {
+                          setBookingAuthMethod(null);
+                          setClientName('');
+                          setClientEmail('');
+                          setClientPhone('');
+                          setAcceptedBookingTerms(false);
+                          setBookingEntryMode('existing');
+                          setShowBookingQuickLookup(false);
+                        }}
+                        style={{ paddingLeft: 8 }}
+                      >
+                        <Text style={{ color: brandColor, fontSize: 11, fontWeight: '900', textDecorationLine: 'underline' }}>
+                          {tr('Cambiar método', 'Change method')}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
+
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                          {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
+                        </Text>
+                        <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(clientPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                          <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
+                          <TextInput
+                            style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '700', outlineStyle: 'none' } as any}
+                            placeholder={tr('(909) 000-0000', '(909) 000-0000')}
+                            placeholderTextColor={tColor.muted}
+                            keyboardType="phone-pad"
+                            value={clientPhone}
+                            onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))}
+                          />
+                        </View>
+                      </View>
 
                       <View style={{ marginBottom: 14 }}>
                         <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
@@ -8682,40 +9395,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         />
                       </View>
 
-                      <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 14, marginBottom: 16 }}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
-                            {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
-                          </Text>
-                          <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(clientPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
-                            <CountryCodeSelector value={bookingCountryCode} onChange={setBookingCountryCode} tColor={tColor} width={105} />
-                            <TextInput
-                              style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '700', outlineStyle: 'none' } as any}
-                              placeholder={tr('(909) 000-0000', '(909) 000-0000')}
-                              placeholderTextColor={tColor.muted}
-                              keyboardType="phone-pad"
-                              value={clientPhone}
-                              onChangeText={text => setClientPhone(text.replace(/[^0-9\s-]/g, ''))}
-                            />
-                          </View>
-                        </View>
-
-                        <View style={{ flex: 1 }}>
-                          <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
-                            {bookingAuthMethod === 'manual'
-                              ? tr('CORREO ELECTRÓNICO *', 'EMAIL ADDRESS *')
-                              : tr('CORREO ELECTRÓNICO (OPCIONAL)', 'EMAIL ADDRESS (OPTIONAL)')}
-                          </Text>
-                          <TextInput
-                            style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
-                            placeholder={tr('ejemplo@correo.com', 'example@email.com')}
-                            placeholderTextColor={tColor.muted}
-                            keyboardType="email-address"
-                            autoCapitalize="none"
-                            value={clientEmail}
-                            onChangeText={setClientEmail}
-                          />
-                        </View>
+                      <View style={{ marginBottom: 16 }}>
+                        <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                          {bookingAuthMethod === 'manual'
+                            ? tr('CORREO ELECTRÓNICO *', 'EMAIL ADDRESS *')
+                            : tr('CORREO ELECTRÓNICO (OPCIONAL)', 'EMAIL ADDRESS (OPTIONAL)')}
+                        </Text>
+                        <TextInput
+                          style={[styles.formInput, { backgroundColor: tColor.bg, borderColor: tColor.border, color: tColor.text }]}
+                          placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                          placeholderTextColor={tColor.muted}
+                          keyboardType="email-address"
+                          autoCapitalize="none"
+                          value={clientEmail}
+                          onChangeText={setClientEmail}
+                        />
                       </View>
 
                       {bookingAuthMethod === 'manual' ? (
@@ -8741,53 +9435,55 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
                       ) : null}
 
-                      {/* 📜 CHECKBOX DE TÉRMINOS Y CONDICIONES (OBLIGATORIO PARA AGENDAR) */}
-                      <View
-                        style={{
-                          backgroundColor: acceptedBookingTerms ? 'rgba(16, 185, 129, 0.1)' : tColor.bg,
-                          borderWidth: 1,
-                          borderColor: acceptedBookingTerms ? '#10B981' : tColor.border,
-                          borderRadius: 12,
-                          padding: 12,
-                          flexDirection: 'row',
-                          alignItems: 'center',
-                          gap: 10,
-                        }}
-                      >
-                        <TouchableOpacity
-                          activeOpacity={0.8}
-                          onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}
+                      {/* 📜 CHECKBOX DE TÉRMINOS Y CONDICIONES: SOLO PARA REGISTRO NUEVO */}
+                      {!savedClientSession ? (
+                        <View
                           style={{
-                            width: 22,
-                            height: 22,
-                            borderRadius: 6,
-                            borderWidth: 2,
-                            borderColor: acceptedBookingTerms ? brandColor : tColor.muted,
-                            backgroundColor: acceptedBookingTerms ? brandColor : 'transparent',
+                            backgroundColor: acceptedBookingTerms ? 'rgba(16, 185, 129, 0.1)' : tColor.bg,
+                            borderWidth: 1,
+                            borderColor: acceptedBookingTerms ? '#10B981' : tColor.border,
+                            borderRadius: 12,
+                            padding: 12,
+                            flexDirection: 'row',
                             alignItems: 'center',
-                            justifyContent: 'center',
+                            gap: 10,
                           }}
                         >
-                          {acceptedBookingTerms ? <Feather name="check" size={14} color="#FFFFFF" /> : null}
-                        </TouchableOpacity>
+                          <TouchableOpacity
+                            activeOpacity={0.8}
+                            onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}
+                            style={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: 6,
+                              borderWidth: 2,
+                              borderColor: acceptedBookingTerms ? brandColor : tColor.muted,
+                              backgroundColor: acceptedBookingTerms ? brandColor : 'transparent',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            {acceptedBookingTerms ? <Feather name="check" size={14} color="#FFFFFF" /> : null}
+                          </TouchableOpacity>
 
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 18 }}>
-                            <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
-                              {tr('He leído y acepto los ', 'I have read and accept the ')}
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 18 }}>
+                              <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
+                                {tr('He leído y acepto los ', 'I have read and accept the ')}
+                              </Text>
+                              <Text
+                                onPress={() => setIsTermsModalOpen(true)}
+                                style={{ color: brandColor, fontWeight: '900', textDecorationLine: 'underline' }}
+                              >
+                                {tr('Términos y Condiciones', 'Terms & Conditions')}
+                              </Text>
+                              <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
+                                {tr(' de PickTime Book.', ' of PickTime Book.')}
+                              </Text>
                             </Text>
-                            <Text
-                              onPress={() => setIsTermsModalOpen(true)}
-                              style={{ color: brandColor, fontWeight: '900', textDecorationLine: 'underline' }}
-                            >
-                              {tr('Términos y Condiciones', 'Terms & Conditions')}
-                            </Text>
-                            <Text onPress={() => setAcceptedBookingTerms(!acceptedBookingTerms)}>
-                              {tr(' de PickTime Book.', ' of PickTime Book.')}
-                            </Text>
-                          </Text>
+                          </View>
                         </View>
-                      </View>
+                      ) : null}
                   </View>
                   ) : null}
 
