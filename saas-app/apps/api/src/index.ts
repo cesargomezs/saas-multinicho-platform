@@ -87,7 +87,8 @@ import {
   saveClientReview,              // 👈 Guardar reseña / reacción única por cliente
   getActiveLegalDocument,
   authenticateClientUser,
-  updateClientProfile           // 👈 Actualizar nombre y teléfono en BD
+  updateClientProfile,           // 👈 Actualizar nombre y teléfono en BD
+  registerDevicePushToken
 } from '../controllers/appointmentController';
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
@@ -284,6 +285,8 @@ app.get('/api/legal-documents/active', getActiveLegalDocument);
 // Rutas de Recepción Telefónica IA (Vapi.ai 1-Clic BYOK + Webhook Bilingüe ES/EN)
 app.post('/api/tenants/vapi-setup', configureTenantVapiAssistant);
 app.post('/api/vapi/webhook', handleVapiVoiceWebhook);
+
+router.post('/api/push-tokens/register', registerDevicePushToken);
 
 // Rutas del Canal Interno de Telegram Parametrizado por Consultorio / Negocio
 app.put('/api/tenants/telegram-config', configureTenantTelegramChannel);

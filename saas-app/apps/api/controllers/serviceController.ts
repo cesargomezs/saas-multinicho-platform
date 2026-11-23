@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
-import { db, services } from '@taller/database';
+import { db, services, tenants } from '@taller/database';
 import { eq, and } from 'drizzle-orm';
+import { notifyNearbyClientsPush, sendTelegramNotification } from './appointmentController';
 
 // 1. Listar todos los servicios del catálogo del tenant actual
 export async function getServices(req: Request, res: Response) {
@@ -21,31 +22,63 @@ export async function getServices(req: Request, res: Response) {
   }
 }
 
-// 2. Crear un nuevo servicio en el catálogo del negocio
+// 2. Crear un nuevo servicio en el catálogo del negocio + Notificar Push a clientes cercanos por ZIP/radio
 export const createService = async (req: Request, res: Response) => {
   try {
-    // Extraemos el tenantId de los headers (que envía tu función apiFetch del frontend)
     const tenantId = req.headers['x-tenant-id'] as string;
-    
-    // 🌟 FIX: Extraemos description e imageUrl del body para guardarlos
     const { name, description, price, durationMinutes, imageUrl } = req.body;
 
     if (!tenantId || !name || !price) {
       return res.status(400).json({ success: false, message: 'Faltan datos obligatorios' });
     }
 
-    // Insertamos en PostgreSQL vía Drizzle ORM
-    const newService = await db.insert(services).values({
+    const [createdService] = await db.insert(services).values({
       tenantId,
       name: name.trim(),
-      description: description ? description.trim() : null, // 🌟 GUARDAMOS DESCRIPCIÓN
+      description: description ? description.trim() : null,
       price: String(price),
       durationMinutes: Number(durationMinutes || 30),
-      imageUrl: imageUrl || null // 🌟 GUARDAMOS IMAGEN
-    }).returning(); // .returning() nos devuelve el objeto recién creado con su ID real
+      imageUrl: imageUrl || null
+    }).returning();
 
-    return res.status(201).json({ success: true, service: newService[0] });
+    // Disparar en segundo plano Push a clientes en el código postal / radio cercano + aviso Telegram
+    (async () => {
+      try {
+        const [tenantRow] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+        if (tenantRow && createdService) {
+          const tAny = tenantRow as any;
+          const zipCode = tAny.zipCode || tAny.zip_code || null;
+          const latitude = tAny.latitude ?? null;
+          const longitude = tAny.longitude ?? null;
 
+          await Promise.allSettled([
+            notifyNearbyClientsPush({
+              zipCode,
+              latitude,
+              longitude,
+              payload: {
+                title: `✨ Nuevo servicio en ${tenantRow.name}`,
+                body: `${createdService.name} por $${createdService.price}. ¡Reserva tu turno hoy!`,
+                data: {
+                  tenantId: tenantRow.id,
+                  serviceId: createdService.id,
+                  view: 'servicios',
+                },
+              },
+            }),
+            sendTelegramNotification(
+              `🆕 <b>Nuevo servicio publicado en catálogo:</b> ${createdService.name} ($${createdService.price})`,
+              tenantId,
+              'system'
+            ),
+          ]);
+        }
+      } catch (bgErr) {
+        console.warn('⚠️ Aviso enviando push de nuevo servicio:', bgErr);
+      }
+    })();
+
+    return res.status(201).json({ success: true, service: createdService });
   } catch (error) {
     console.error("Error creando servicio:", error);
     return res.status(500).json({ success: false, message: 'Error interno del servidor' });
@@ -62,20 +95,17 @@ export async function updateService(req: Request, res: Response) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
     }
 
-    // 🌟 FIX: Agregamos imageUrl a las variables exactas que envía el frontend
     const { name, description, price, durationMinutes, category, isActive, imageUrl } = req.body;
 
-    // 🌟 FIX: Armamos el objeto de actualización solo con los campos que vienen en el body
     const updateData: any = {};
     if (name !== undefined) updateData.name = name.trim();
-    if (description !== undefined) updateData.description = description ? description.trim() : null; // Permite vaciar la descripción
+    if (description !== undefined) updateData.description = description ? description.trim() : null;
     if (price !== undefined) updateData.price = String(price);
     if (durationMinutes !== undefined) updateData.durationMinutes = Number(durationMinutes);
     if (category !== undefined) updateData.category = category.trim();
     if (isActive !== undefined) updateData.isActive = Boolean(isActive);
-    if (imageUrl !== undefined) updateData.imageUrl = imageUrl; // 🌟 GUARDAMOS IMAGEN AL EDITAR
+    if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
 
-    // 🌟 FIX: Prevenimos el error "No values to set" si el body llegó vacío
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ success: false, error: 'No se enviaron datos válidos para actualizar.' });
     }

@@ -204,6 +204,72 @@ const formatWallClockTime12h = (orderObj: any): string => {
   return rawTime || 'Hora N/A';
 };
 
+// 🗺️ HELPER UNIVERSAL "CÓMO LLEGAR": Apple Maps en iOS, Google Maps en Android y Web
+const openBusinessDirections = async (tenantObj: any, fallbackQuery: string) => {
+  const lat = Number((tenantObj as any)?.latitude || 0);
+  const lon = Number((tenantObj as any)?.longitude || 0);
+  const addr = String((tenantObj as any)?.address || '').trim();
+  const city = String((tenantObj as any)?.city || '').trim();
+  const state = String((tenantObj as any)?.state || '').trim();
+  const zip = String((tenantObj as any)?.zipCode || (tenantObj as any)?.zip_code || '').trim();
+  const fullDest = [addr, city, state, zip].filter(Boolean).join(', ') || fallbackQuery || 'AutoFlow';
+  const encodedDest = encodeURIComponent(fullDest);
+  const hasCoords = Boolean(lat && lon && !Number.isNaN(lat) && !Number.isNaN(lon));
+
+  const iosUrl = hasCoords
+    ? `maps://?daddr=${lat},${lon}&q=${encodedDest}`
+    : `maps://?daddr=${encodedDest}`;
+  const iosFallbackHttpUrl = hasCoords
+    ? `https://maps.apple.com/?daddr=${lat},${lon}&q=${encodedDest}`
+    : `https://maps.apple.com/?daddr=${encodedDest}`;
+  const googleMapsUrl = hasCoords
+    ? `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encodedDest}`;
+
+  if (Platform.OS === 'ios') {
+    try {
+      const { Linking } = require('react-native');
+      const supported = await Linking.canOpenURL(iosUrl);
+      if (supported) {
+        await Linking.openURL(iosUrl);
+        return;
+      }
+      await Linking.openURL(iosFallbackHttpUrl);
+      return;
+    } catch (_e) {
+      if (typeof window !== 'undefined') {
+        window.open(iosFallbackHttpUrl, '_blank');
+      }
+      return;
+    }
+  }
+
+  if (Platform.OS === 'android') {
+    try {
+      const { Linking } = require('react-native');
+      const navUrl = hasCoords
+        ? `google.navigation:q=${lat},${lon}`
+        : `google.navigation:q=${encodedDest}`;
+      const supported = await Linking.canOpenURL(navUrl);
+      if (supported) {
+        await Linking.openURL(navUrl);
+        return;
+      }
+      await Linking.openURL(googleMapsUrl);
+      return;
+    } catch (_e) {
+      if (typeof window !== 'undefined') {
+        window.open(googleMapsUrl, '_blank');
+      }
+      return;
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.open(googleMapsUrl, '_blank');
+  }
+};
+
 // 📅 HELPER UNIVERSAL: Generar enlace directo a Google Calendar en 1 clic (para Abogados, Odontólogos, etc.)
 const buildGoogleCalendarUrl = (orderObj: any, businessName?: string, durationMin = 30): string => {
   const startDt = parseAppointmentWallClock(orderObj);
@@ -1230,6 +1296,18 @@ export default function TenantDashboardScreen() {
   const [expedientePasswordInput, setExpedientePasswordInput] = useState<string>('');
   const [showExpedientePassword, setShowExpedientePassword] = useState<boolean>(false);
   const [expedienteSetPassFirstTime, setExpedienteSetPassFirstTime] = useState<boolean>(false);
+  const [expedienteMode, setExpedienteMode] = useState<'login' | 'register'>('login');
+  const [expRegName, setExpRegName] = useState<string>('');
+  const [expRegCountryCode, setExpRegCountryCode] = useState<string>('+1');
+  const [expRegPhone, setExpRegPhone] = useState<string>('');
+  const [expRegEmail, setExpRegEmail] = useState<string>('');
+  const [expRegPassword, setExpRegPassword] = useState<string>('');
+  const [expRegAcceptedTerms, setExpRegAcceptedTerms] = useState<boolean>(false);
+  const [isRegisteringExpediente, setIsRegisteringExpediente] = useState<boolean>(false);
+  const [bookingLoginEmail, setBookingLoginEmail] = useState<string>('');
+  const [bookingLoginPassword, setBookingLoginPassword] = useState<string>('');
+  const [showBookingLoginPassword, setShowBookingLoginPassword] = useState<boolean>(false);
+  const [isLoggingInBookingUser, setIsLoggingInBookingUser] = useState<boolean>(false);
   const [bookingPassword, setBookingPassword] = useState<string>('');
   const [showBookingPassword, setShowBookingPassword] = useState<boolean>(false);
   const [lastAppleUserId, setLastAppleUserId] = useState<string>('');
@@ -1524,13 +1602,94 @@ export default function TenantDashboardScreen() {
   };
 
   // 🌐 Autenticación con Google (Supabase OAuth + validación contra tabla public.users en BD)
+  const finalizeGoogleSessionWithUser = async (
+    googleUser: any,
+    targetContext: 'booking' | 'expediente'
+  ) => {
+    const gEmail = String(googleUser?.email || '').trim().toLowerCase();
+    const gFullName = String(
+      googleUser?.user_metadata?.full_name ||
+      googleUser?.user_metadata?.name ||
+      (gEmail ? gEmail.split('@')[0].replace(/[._-]+/g, ' ') : '')
+    ).trim();
+
+    if (!gEmail) {
+      if (targetContext === 'expediente') {
+        setExpedienteAuthMethod('manual');
+      }
+      alert(
+        tr(
+          'No se obtuvo un correo válido desde Google. Intenta nuevamente o ingresa con tu correo y contraseña.',
+          'No valid email was returned from Google. Try again or sign in with email and password.'
+        )
+      );
+      return;
+    }
+
+    const dbCheck = await authenticateUserAgainstDb({
+      provider: 'google',
+      email: gEmail,
+      fullName: gFullName,
+    });
+
+    if (targetContext === 'expediente') {
+      if (dbCheck.ok && dbCheck.data?.client) {
+        let safeClient = { ...dbCheck.data.client };
+        if (typeof safeClient.metadata === 'string') {
+          try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
+        }
+        applyAuthenticatedClientToState({ ...dbCheck.data, client: safeClient }, { openExpediente: true, applyToBooking: true });
+        setExpedienteAuthMethod('google');
+        await persistAuthenticatedClientSession({
+          provider: 'google',
+          email: gEmail || safeClient?.email || '',
+          fullName: gFullName || safeClient?.name || '',
+        });
+      } else {
+        setExpedienteEmailInput(gEmail);
+        setExpedienteAuthMethod('manual');
+        alert(
+          dbCheck.error ||
+          tr(
+            `Cuenta de Google verificada (${gEmail}), pero aún no está registrada en este negocio. Completa tu primera reserva o ingresa con tu correo y contraseña.`,
+            `Google account verified (${gEmail}), but not registered at this business yet. Complete your first booking or sign in with email & password.`
+          )
+        );
+      }
+      return;
+    }
+
+    if (dbCheck.ok && dbCheck.data?.client) {
+      applyAuthenticatedClientToState(dbCheck.data, { openExpediente: false, applyToBooking: true });
+      await persistAuthenticatedClientSession({
+        provider: 'google',
+        email: gEmail || dbCheck.data?.client?.email || '',
+        fullName: gFullName || dbCheck.data?.client?.name || '',
+      });
+    } else {
+      setIsExistingClient(false);
+      setBookingMatchedVisits(0);
+      setBookingClientCoupons(0);
+      setClientName(gFullName ? toTitleCase(gFullName) : '');
+      setClientEmail(gEmail);
+      setClientPhone('');
+      setIsEditingBookingPhone(false);
+      setBookingAuthMethod('google');
+      setBookingEntryMode(null);
+      setShowBookingQuickLookup(false);
+    }
+  };
+
   const handleGoogleProviderAuth = async (targetContext: 'booking' | 'expediente' = 'booking') => {
     setIsAuthenticatingProvider(true);
     try {
-      const redirectUrl =
-        Platform.OS === 'web' && typeof window !== 'undefined'
-          ? window.location.href
-          : 'picktimebook://auth/callback';
+      let redirectUrl = 'picktimebook://auth/callback';
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        redirectUrl = window.location.href;
+      } else {
+        // Usamos el custom scheme registrado en la app sin requerir  en runtime
+        redirectUrl = 'picktimebook://auth/callback';
+      }
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -1545,10 +1704,51 @@ export default function TenantDashboardScreen() {
         throw error;
       }
 
-      if (Platform.OS !== 'web' && data?.url) {
-        const authResult = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
-        if (authResult.type === 'success' && authResult.url) {
-          const parsedUrl = new URL(authResult.url);
+      if (Platform.OS === 'web') {
+        const { data: sessData } = await supabase.auth.getSession();
+        if (sessData?.session?.user) {
+          await finalizeGoogleSessionWithUser(sessData.session.user, targetContext);
+        }
+        return;
+      }
+
+      if (data?.url) {
+        let finalAuthUrl = String(data.url);
+        try {
+          const authParsed = new URL(finalAuthUrl);
+          authParsed.searchParams.set('redirect_to', redirectUrl);
+          finalAuthUrl = authParsed.toString();
+        } catch (_urlErr) {}
+
+        let linkingSub: any = null;
+        let capturedCallbackUrl: string | null = null;
+        if ((Platform.OS as string) !== 'web') {
+          try {
+            const { Linking } = require('react-native');
+            linkingSub = Linking.addEventListener('url', (event: { url?: string }) => {
+              if (event?.url && (event.url.includes('code=') || event.url.includes('access_token=') || event.url.includes('picktimebook://'))) {
+                capturedCallbackUrl = event.url;
+                try { WebBrowser.dismissBrowser(); } catch (_dErr) {}
+              }
+            });
+          } catch (_lErr) {}
+        }
+
+        let authResult: any = null;
+        try {
+          authResult = await WebBrowser.openAuthSessionAsync(finalAuthUrl, redirectUrl);
+        } finally {
+          if (linkingSub && typeof linkingSub.remove === 'function') {
+            try { linkingSub.remove(); } catch (_rErr) {}
+          }
+        }
+
+        const effectiveUrl = (authResult?.type === 'success' && authResult?.url)
+          ? authResult.url
+          : capturedCallbackUrl;
+
+        if (effectiveUrl) {
+          const parsedUrl = new URL(effectiveUrl);
           const hashParams = new URLSearchParams(parsedUrl.hash ? parsedUrl.hash.replace(/^#/, '') : '');
           const accessToken = parsedUrl.searchParams.get('access_token') || hashParams.get('access_token');
           const refreshToken = parsedUrl.searchParams.get('refresh_token') || hashParams.get('refresh_token');
@@ -1556,13 +1756,15 @@ export default function TenantDashboardScreen() {
 
           let googleUser: any = null;
           if (accessToken && refreshToken) {
-            const { data: sessData } = await supabase.auth.setSession({
+            const { data: sessData, error: sessErr } = await supabase.auth.setSession({
               access_token: accessToken,
               refresh_token: refreshToken,
             });
+            if (sessErr) throw sessErr;
             googleUser = sessData?.user || null;
           } else if (authCode) {
-            const { data: exchData } = await supabase.auth.exchangeCodeForSession(authCode);
+            const { data: exchData, error: exchErr } = await supabase.auth.exchangeCodeForSession(authCode);
+            if (exchErr) throw exchErr;
             googleUser = exchData?.user || null;
           }
 
@@ -1571,93 +1773,37 @@ export default function TenantDashboardScreen() {
             googleUser = userData?.user || null;
           }
 
-          const gEmail = String(googleUser?.email || '').trim().toLowerCase();
-          const gFullName = String(
-            googleUser?.user_metadata?.full_name ||
-            googleUser?.user_metadata?.name ||
-            (gEmail ? gEmail.split('@')[0].replace(/[._-]+/g, ' ') : '')
-          ).trim();
+          await finalizeGoogleSessionWithUser(googleUser, targetContext);
+          return;
+        }
 
-          const dbCheck = await authenticateUserAgainstDb({
-            provider: 'google',
-            email: gEmail,
-            fullName: gFullName,
-          });
-
-          if (targetContext === 'expediente') {
-            if (dbCheck.ok && dbCheck.data?.client) {
-              let safeClient = { ...dbCheck.data.client };
-              if (typeof safeClient.metadata === 'string') {
-                try { safeClient.metadata = JSON.parse(safeClient.metadata); } catch (_e) {}
-              }
-              applyAuthenticatedClientToState({ ...dbCheck.data, client: safeClient }, { openExpediente: true, applyToBooking: true });
-              setExpedienteAuthMethod('google');
-              await persistAuthenticatedClientSession({
-                provider: 'google',
-                email: gEmail || safeClient?.email || '',
-                fullName: gFullName || safeClient?.name || '',
-              });
-            } else {
-              if (gEmail) setExpedienteEmailInput(gEmail);
-              setExpedienteAuthMethod('manual');
-              alert(
-                dbCheck.error ||
-                tr(
-                  'Google verificado, pero aún no estás registrado en la base de datos. Completa tu primera reserva o ingresa con tu correo y contraseña.',
-                  'Google verified, but you are not registered in the database yet. Complete your first booking or sign in with email & password.'
-                )
-              );
-            }
-            return;
+        // Si el navegador cerró apuntando a localhost (sin devolver URL a la app),
+        // revisamos si Supabase ya guardó sesión activa o si el usuario canceló/cerró.
+        if (authResult?.type === 'cancel' || authResult?.type === 'dismiss') {
+          const { data: lateSess } = await supabase.auth.getSession();
+          if (lateSess?.session?.user) {
+            await finalizeGoogleSessionWithUser(lateSess.session.user, targetContext);
           }
-
-          if (dbCheck.ok && dbCheck.data?.client) {
-            const c = dbCheck.data.client;
-            let meta = c.metadata;
-            if (typeof meta === 'string') {
-              try { meta = JSON.parse(meta); } catch (_e) { meta = {}; }
-            }
-            const dbEarned = Number(meta?.earnedReferralDiscounts || 0);
-            const cPhoneClean = cleanPhoneDigits(c.phone);
-            const liveEarned = cPhoneClean && pendingReferralsByPhone[cPhoneClean] ? pendingReferralsByPhone[cPhoneClean].length : 0;
-            const visitsCount = Number(c.loyaltyVisits ?? (Array.isArray(dbCheck.data.serviceHistory) ? dbCheck.data.serviceHistory.length : 0));
-
-            if (c.name) setClientName(toTitleCase(c.name));
-            if (c.email) setClientEmail(c.email);
-            if (c.phone) {
-              const rawPhone = String(c.phone);
-              const matchedCode = COUNTRY_CODES.find((item) => rawPhone.startsWith(item.code));
-              if (matchedCode) setBookingCountryCode(matchedCode.code);
-              setClientPhone(rawPhone.replace(/^\+\d+\s*/, ''));
-            }
-            setBookingMatchedVisits(visitsCount);
-            setBookingClientCoupons(Math.max(0, dbEarned + liveEarned));
-            setIsExistingClient(visitsCount > 0 || (Array.isArray(dbCheck.data.serviceHistory) && dbCheck.data.serviceHistory.length > 0));
-            applyAuthenticatedClientToState(dbCheck.data, { openExpediente: false, applyToBooking: true });
-            await persistAuthenticatedClientSession({
-              provider: 'google',
-              email: gEmail || dbCheck.data?.client?.email || '',
-              fullName: gFullName || dbCheck.data?.client?.name || '',
-            });
-          } else {
-            setIsExistingClient(false);
-            setBookingMatchedVisits(0);
-            setBookingClientCoupons(0);
-            setClientName(gFullName ? toTitleCase(gFullName) : '');
-            setClientEmail(gEmail);
-            setClientPhone('');
-            setBookingAuthMethod('google');
-            setBookingEntryMode(null);
-            setShowBookingQuickLookup(false);
-          }
+          return;
         }
       }
     } catch (err: any) {
       const msg = err?.message || String(err || '');
+      if (savedClientSession && clientExpedienteData?.client) {
+        setIsExpedienteExpanded(false);
+        return;
+      }
+      if (targetContext === 'expediente') {
+        setExpedienteAuthMethod('manual');
+      }
       alert(
         tr(
-          `No se pudo completar el inicio de sesión con Google.${msg ? `\n\nDetalle: ${msg}` : ''}\n\nAsegúrate de tener habilitado el proveedor Google en Supabase Authentication -> Providers.`,
-          `Could not complete Google sign-in.${msg ? `\n\nDetail: ${msg}` : ''}\n\nMake sure Google provider is enabled in Supabase Authentication -> Providers.`
+          `No se pudo completar la validación con Google${msg ? ` (${msg})` : ''}.
+
+Revisa que el proveedor Google esté activo en Supabase (Authentication -> Providers) y el esquema picktimebook:// en tu app, o usa Usuario (Correo y Contraseña).`,
+          `Could not complete Google validation${msg ? ` (${msg})` : ''}.
+
+Ensure Google provider is enabled in Supabase (Authentication -> Providers) and picktimebook:// scheme is configured, or use User (Email & Password).`
         )
       );
     } finally {
@@ -3699,6 +3845,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         if (dbCheck.needsPasswordSetup) {
           setExpedienteSetPassFirstTime(true);
         }
+        if (dbCheck.notRegistered) {
+          setExpRegEmail(cleanEmail);
+          setExpedienteMode('register');
+        }
         alert(dbCheck.error || tr('Credenciales inválidas o usuario no registrado.', 'Invalid credentials or unregistered user.'));
       }
     } catch (_err) {
@@ -5038,67 +5188,50 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 </View>
               </View>
 
-              {/* Bloque Inferior: TEXTO DEBAJO DE LA IMAGEN (Ordenado, limpio y sin cruzarse en móvil) */}
+              {/* Bloque Inferior: ENCABEZADO EDITORIAL LIMPIO + UBICACIÓN + "CÓMO LLEGAR" */}
               <View style={{ padding: isMobile ? 18 : 26, backgroundColor: tColor.card }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 }}>
-                  {tenantInfo?.logoUrl ? (
-                    <TouchableOpacity
-                      activeOpacity={0.85}
-                      onPress={() => setExpandedImage({ path: tenantInfo.logoUrl!, alt: tenantInfo?.name || 'Logo' })}
-                      style={{
-                        width: isMobile ? 46 : 54,
-                        height: isMobile ? 46 : 54,
-                        borderRadius: 14,
-                        overflow: 'hidden',
-                        borderWidth: 2,
-                        borderColor: brandColor,
-                        backgroundColor: '#000',
-                        flexShrink: 0
-                      }}
-                    >
-                      <PrivateSupabaseImage path={tenantInfo.logoUrl} alt={tenantInfo?.name || 'Logo'} />
-                    </TouchableOpacity>
-                  ) : (
-                    <View
-                      style={{
-                        width: isMobile ? 46 : 54,
-                        height: isMobile ? 46 : 54,
-                        borderRadius: 14,
-                        backgroundColor: brandColor,
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        borderWidth: 2,
-                        borderColor: 'rgba(255,255,255,0.35)',
-                        flexShrink: 0
-                      }}
-                    >
-                      <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: isMobile ? 20 : 24 }}>
-                        {tenantInfo?.name ? tenantInfo.name.charAt(0).toUpperCase() : 'A'}
-                      </Text>
-                    </View>
-                  )}
-
+                <View style={{ flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'center', gap: 12, marginBottom: 12 }}>
                   <View style={{ flex: 1, minWidth: 0 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                       <Text
-                        style={{ color: tColor.text, fontSize: isMobile ? 18 : 22, fontWeight: '900' }}
+                        style={{ color: tColor.text, fontSize: isMobile ? 14 : 15, fontWeight: '800', letterSpacing: 0.2 }}
                         numberOfLines={1}
                       >
                         {tenantInfo?.name || 'AutoFlow'}
                       </Text>
-                      <Ionicons name="checkmark-circle" size={17} color={brandColor} />
+                      <Ionicons name="checkmark-circle" size={15} color={brandColor} />
                     </View>
-                    <Text style={{ color: tColor.muted, fontSize: isMobile ? 12 : 13, fontWeight: '600', marginTop: 2 }} numberOfLines={1}>
-                      {clientDistanceMiles
-                        ? `📍 ${t.distancePrefix} ${clientDistanceMiles} ${t.distanceSuffix} ${tenantInfo?.name || 'AutoFlow'}`
-                        : tr('Agenda Abierta 24/7 en Tiempo Real', '24/7 Real-Time Online Booking')}
+                    <Text style={{ fontSize: isMobile ? 25 : 33, fontWeight: '900', color: tColor.text, lineHeight: isMobile ? 30 : 39 }}>
+                      {t.heroTitle1} <Text style={{ color: brandColor }}>{t.heroTitle2}</Text>
                     </Text>
                   </View>
+
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => openBusinessDirections(tenantInfo, tenantInfo?.name || 'AutoFlow')}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 7,
+                      paddingHorizontal: 14,
+                      paddingVertical: 10,
+                      borderRadius: 12,
+                      backgroundColor: `${brandColor}16`,
+                      borderWidth: 1.5,
+                      borderColor: brandColor,
+                      alignSelf: isMobile ? 'flex-start' : 'center',
+                    }}
+                  >
+                    <Feather name="navigation" size={14} color={brandColor} />
+                    <Text style={{ color: brandColor, fontSize: 12.5, fontWeight: '900' }}>
+                      {tr('Cómo llegar', 'Get Directions')}
+                    </Text>
+                    <Text style={{ color: tColor.muted, fontSize: 11, fontWeight: '800' }}>
+                      ({Platform.OS === 'ios' ? 'Maps' : 'Google Maps'})
+                    </Text>
+                  </TouchableOpacity>
                 </View>
 
-                <Text style={{ fontSize: isMobile ? 24 : 32, fontWeight: '900', color: tColor.text, marginBottom: 4, lineHeight: isMobile ? 29 : 38 }}>
-                  {t.heroTitle1} <Text style={{ color: brandColor }}>{t.heroTitle2}</Text>
-                </Text>
                 <Text style={{ color: tColor.muted, fontSize: isMobile ? 13 : 14, lineHeight: isMobile ? 19 : 21 }}>
                   {t.heroSubtitle}
                 </Text>
@@ -5432,12 +5565,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </View>
                     ) : null}
 
-                    {/* 🔐 3 OPCIONES SEGURAS DE ACCESO AL EXPEDIENTE: SE MUESTRAN SI NO HAY SESIÓN ACTIVA (O TRAS CERRAR SESIÓN) */}
+                    {/* 🔐 ACCESO AL EXPEDIENTE + OPCIÓN "SOY NUEVO" + TÉRMINOS Y CONDICIONES */}
                     {!savedClientSession ? (
                     <View style={{ backgroundColor: tColor.input, borderRadius: 16, borderWidth: 1, borderColor: tColor.border, padding: 14, marginBottom: 18, gap: 10 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
-                          {tr('Elige cómo validar y cargar tu expediente:', 'Choose how to verify and load your records:')}
+                          {expedienteMode === 'register'
+                            ? tr('Crea tu cuenta y expediente o valida con iOS / Google:', 'Create your account & record or verify with iOS / Google:')
+                            : tr('Elige cómo validar y cargar tu expediente:', 'Choose how to verify and load your records:')}
                         </Text>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.35)', paddingHorizontal: 8, paddingVertical: 2.5, borderRadius: 8 }}>
                           <Feather name="shield" size={11} color="#10B981" />
@@ -5447,10 +5582,56 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
                       </View>
 
+                      <View style={{ flexDirection: 'row', gap: 8 }}>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => setExpedienteMode('login')}
+                          style={{
+                            flex: 1,
+                            height: 40,
+                            borderRadius: 10,
+                            backgroundColor: expedienteMode === 'login' ? brandColor : tColor.bg,
+                            borderWidth: 1,
+                            borderColor: expedienteMode === 'login' ? brandColor : tColor.border,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          <Text style={{ color: expedienteMode === 'login' ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                            {tr('⚡ Ya registrado', '⚡ Registered')}
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          activeOpacity={0.85}
+                          onPress={() => {
+                            setExpedienteMode('register');
+                            setExpedienteAuthMethod('manual');
+                            if (expedienteEmailInput && !expRegEmail) setExpRegEmail(expedienteEmailInput);
+                          }}
+                          style={{
+                            flex: 1,
+                            height: 40,
+                            borderRadius: 10,
+                            backgroundColor: expedienteMode === 'register' ? brandColor : tColor.bg,
+                            borderWidth: 1,
+                            borderColor: expedienteMode === 'register' ? brandColor : tColor.border,
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexDirection: 'row',
+                            gap: 5,
+                          }}
+                        >
+                          <Feather name="user-plus" size={13} color={expedienteMode === 'register' ? '#FFFFFF' : brandColor} />
+                          <Text style={{ color: expedienteMode === 'register' ? '#FFFFFF' : tColor.text, fontWeight: '900', fontSize: 12 }}>
+                            {tr('Soy nuevo', 'I am new')}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
                       <View style={{ flexDirection: 'column', gap: 10 }}>
                         <TouchableOpacity
                           activeOpacity={0.85}
-                          disabled={isAuthenticatingProvider || isSearchingExpediente}
+                          disabled={isAuthenticatingProvider || isSearchingExpediente || isRegisteringExpediente}
                           onPress={() => handleAppleProviderAuth('expediente')}
                           style={{
                             width: '100%',
@@ -5472,7 +5653,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                         <TouchableOpacity
                           activeOpacity={0.85}
-                          disabled={isAuthenticatingProvider || isSearchingExpediente}
+                          disabled={isAuthenticatingProvider || isSearchingExpediente || isRegisteringExpediente}
                           onPress={() => handleGoogleProviderAuth('expediente')}
                           style={{
                             width: '100%',
@@ -5564,8 +5745,171 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </View>
                     ) : null}
 
-                    {/* Formulario seguro de Correo + Contraseña: VISIBLE SOLO SI EL USUARIO PULSA "Usuario" */}
+                    {/* Formulario seguro de Correo + Contraseña o Registro "Soy nuevo" */}
                     {expedienteAuthMethod === 'manual' ? (
+                      expedienteMode === 'register' ? (
+                        <View style={{ gap: 12, width: '100%' }}>
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                              {tr('NOMBRE COMPLETO *', 'FULL NAME *')}
+                            </Text>
+                            <TextInput
+                              style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, fontWeight: '700' }]}
+                              placeholder={tr('Nombre Completo (Ej: Cesar Lopez)', 'Full Name (e.g., Cesar Lopez)')}
+                              placeholderTextColor={tColor.muted}
+                              value={expRegName}
+                              onChangeText={(txt) => setExpRegName(toTitleCase(txt))}
+                            />
+                          </View>
+
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                              {tr('TELÉFONO / WHATSAPP *', 'PHONE / WHATSAPP *')}
+                            </Text>
+                            <View style={{ flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(expRegPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                              <CountryCodeSelector value={expRegCountryCode} onChange={setExpRegCountryCode} tColor={tColor} width={105} />
+                              <TextInput
+                                style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '700', outlineStyle: 'none' } as any}
+                                placeholder={tr('(909) 000-0000', '(909) 000-0000')}
+                                placeholderTextColor={tColor.muted}
+                                keyboardType="phone-pad"
+                                value={expRegPhone}
+                                onChangeText={(txt) => setExpRegPhone(txt.replace(/[^0-9\s-]/g, ''))}
+                              />
+                            </View>
+                          </View>
+
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                              {tr('CORREO ELECTRÓNICO *', 'EMAIL ADDRESS *')}
+                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                              <Feather name="mail" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                              <TextInput
+                                style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                                placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                                placeholderTextColor={tColor.muted}
+                                keyboardType="email-address"
+                                autoCapitalize="none"
+                                value={expRegEmail}
+                                onChangeText={setExpRegEmail}
+                              />
+                            </View>
+                          </View>
+
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                              {tr('CONTRASEÑA PARA PROTEGER TU EXPEDIENTE *', 'PASSWORD TO PROTECT YOUR RECORDS *')}
+                            </Text>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                              <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                              <TextInput
+                                style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                                placeholder={tr('Mínimo 4 caracteres', 'Minimum 4 characters')}
+                                placeholderTextColor={tColor.muted}
+                                secureTextEntry={!showExpedientePassword}
+                                autoCapitalize="none"
+                                value={expRegPassword}
+                                onChangeText={setExpRegPassword}
+                              />
+                              <TouchableOpacity onPress={() => setShowExpedientePassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                <Feather name={showExpedientePassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: expRegAcceptedTerms ? brandColor : tColor.border, padding: 12 }}>
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              onPress={() => setExpRegAcceptedTerms((prev) => !prev)}
+                              style={{ width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: expRegAcceptedTerms ? brandColor : tColor.muted, backgroundColor: expRegAcceptedTerms ? brandColor : 'transparent', alignItems: 'center', justifyContent: 'center' }}
+                            >
+                              {expRegAcceptedTerms ? <Feather name="check" size={13} color="#FFFFFF" /> : null}
+                            </TouchableOpacity>
+                            <Text style={{ flex: 1, color: tColor.muted, fontSize: 12, lineHeight: 17 }}>
+                              {tr('He leído y acepto los ', 'I have read and accept the ')}
+                              <Text
+                                onPress={() => setIsTermsModalOpen(true)}
+                                style={{ color: brandColor, fontWeight: '900', textDecorationLine: 'underline' }}
+                              >
+                                {tr('Términos y Condiciones', 'Terms and Conditions')}
+                              </Text>
+                              {tr(' de PickTime Book.', ' of PickTime Book.')}
+                            </Text>
+                          </View>
+
+                          <TouchableOpacity
+                            style={[styles.primaryButton, { backgroundColor: brandColor, height: 50, marginTop: 4 }]}
+                            disabled={isRegisteringExpediente}
+                            onPress={async () => {
+                              const cleanNm = toTitleCase(expRegName.trim());
+                              const cleanEm = expRegEmail.trim().toLowerCase();
+                              const cleanPw = expRegPassword.trim();
+                              if (!cleanNm) {
+                                alert(tr('Por favor ingresa tu Nombre Completo.', 'Please enter your Full Name.'));
+                                return;
+                              }
+                              if (cleanPhoneDigits(expRegPhone).length < 7) {
+                                alert(tr('Por favor ingresa un número de Teléfono válido.', 'Please enter a valid Phone Number.'));
+                                return;
+                              }
+                              if (!cleanEm || !cleanEm.includes('@')) {
+                                alert(tr('Por favor ingresa un Correo Electrónico válido.', 'Please enter a valid Email Address.'));
+                                return;
+                              }
+                              if (cleanPw.length < 4) {
+                                alert(tr('Crea una Contraseña de al menos 4 caracteres.', 'Create a Password of at least 4 characters.'));
+                                return;
+                              }
+                              if (!expRegAcceptedTerms) {
+                                alert(tr('Debes aceptar los Términos y Condiciones para crear tu cuenta.', 'You must accept the Terms and Conditions to create your account.'));
+                                return;
+                              }
+                              setIsRegisteringExpediente(true);
+                              try {
+                                const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+                                const formattedPh = expRegPhone.trim().startsWith('+')
+                                  ? expRegPhone.trim()
+                                  : `${expRegCountryCode} ${expRegPhone.trim()}`;
+                                const resReg = await apiFetch('/api/clients/auth', {
+                                  method: 'POST',
+                                  headers: activeTenantUuid ? { 'x-tenant-id': activeTenantUuid } : {},
+                                  body: JSON.stringify({
+                                    provider: 'manual',
+                                    email: cleanEm,
+                                    password: cleanPw,
+                                    fullName: cleanNm,
+                                    phone: formattedPh,
+                                    tenantId: activeTenantUuid,
+                                    registerNewUser: true,
+                                    acceptedTerms: true,
+                                  }),
+                                });
+                                const regData = await resReg.json().catch(() => ({}));
+                                if (resReg.ok && regData.success && regData.client) {
+                                  applyAuthenticatedClientToState(regData, { openExpediente: true, applyToBooking: true });
+                                  await persistAuthenticatedClientSession({
+                                    provider: 'manual',
+                                    email: cleanEm,
+                                    fullName: cleanNm,
+                                  });
+                                  alert(tr('✅ ¡Cuenta creada y vinculada a tu expediente!', '✅ Account created and linked to your records!'));
+                                } else {
+                                  alert(regData?.error || tr('No se pudo crear tu cuenta.', 'Could not create your account.'));
+                                }
+                              } finally {
+                                setIsRegisteringExpediente(false);
+                              }
+                            }}
+                          >
+                            <Text style={styles.primaryButtonText}>
+                              {isRegisteringExpediente
+                                ? tr('Creando cuenta...', 'Creating account...')
+                                : tr('✨ Crear Cuenta y Abrir Expediente', '✨ Create Account & Open Records')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
                       <View style={{ gap: 12, width: '100%' }}>
                         <View>
                           <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
@@ -5631,6 +5975,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </Text>
                         </TouchableOpacity>
                       </View>
+                      )
                     ) : null}
                   </View>
                 ) : null}
@@ -9178,7 +9523,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <Text style={{ color: tColor.text, fontSize: 12, fontWeight: '800', flex: 1 }}>
                             {bookingEntryMode === 'new'
                               ? tr('Elige cómo deseas registrarte:', 'Choose how you want to sign up:')
-                              : tr('Elige cómo validar y cargar tus datos:', 'Choose how to verify and load your info:')}
+                              : tr('Por tu seguridad, valida tu identidad con iOS o Google en 1 toque, o ingresa con tu Correo y Contraseña:', 'For your security, verify with iOS or Google in 1 tap, or sign in with your Email and Password:')}
                           </Text>
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(16, 185, 129, 0.12)', borderWidth: 1, borderColor: 'rgba(16, 185, 129, 0.35)', paddingHorizontal: 8, paddingVertical: 2.5, borderRadius: 8 }}>
                             <Feather name="shield" size={11} color="#10B981" />
@@ -9191,7 +9536,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         <View style={{ flexDirection: 'column', gap: 10 }}>
                           <TouchableOpacity
                             activeOpacity={0.85}
-                            disabled={isAuthenticatingProvider}
+                            disabled={isAuthenticatingProvider || isLoggingInBookingUser}
                             onPress={() => handleAppleProviderAuth('booking')}
                             style={{
                               width: '100%',
@@ -9213,7 +9558,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                           <TouchableOpacity
                             activeOpacity={0.85}
-                            disabled={isAuthenticatingProvider}
+                            disabled={isAuthenticatingProvider || isLoggingInBookingUser}
                             onPress={() => handleGoogleProviderAuth('booking')}
                             style={{
                               width: '100%',
@@ -9238,16 +9583,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <TouchableOpacity
                             activeOpacity={0.85}
                             onPress={() => {
-                              setBookingAuthMethod('manual');
-                              setBookingEntryMode(null);
-                              setShowBookingQuickLookup(false);
+                              if (bookingEntryMode === 'existing') {
+                                setBookingAuthMethod('manual');
+                                setShowBookingQuickLookup(false);
+                              } else {
+                                setBookingAuthMethod('manual');
+                                setBookingEntryMode(null);
+                                setShowBookingQuickLookup(false);
+                              }
                             }}
                             style={{
                               width: '100%',
                               height: 46,
                               borderRadius: 12,
-                              backgroundColor: `${brandColor}16`,
-                              borderWidth: 1,
+                              backgroundColor: (bookingEntryMode === 'existing' && bookingAuthMethod === 'manual') ? `${brandColor}28` : `${brandColor}16`,
+                              borderWidth: 1.5,
                               borderColor: brandColor,
                               flexDirection: 'row',
                               alignItems: 'center',
@@ -9263,10 +9613,98 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           </TouchableOpacity>
                         </View>
 
+                        {bookingEntryMode === 'existing' && bookingAuthMethod === 'manual' ? (
+                          <View style={{ marginTop: 8, gap: 12, width: '100%' }}>
+                            <View>
+                              <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                                {tr('CORREO ELECTRÓNICO REGISTRADO *', 'REGISTERED EMAIL *')}
+                              </Text>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                                <Feather name="mail" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                                <TextInput
+                                  style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                                  placeholder={tr('ejemplo@correo.com', 'example@email.com')}
+                                  placeholderTextColor={tColor.muted}
+                                  keyboardType="email-address"
+                                  autoCapitalize="none"
+                                  value={bookingLoginEmail}
+                                  onChangeText={setBookingLoginEmail}
+                                />
+                              </View>
+                            </View>
+
+                            <View>
+                              <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                                {tr('CONTRASEÑA *', 'PASSWORD *')}
+                              </Text>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: tColor.border, paddingHorizontal: 14, minHeight: 48 }}>
+                                <Feather name="lock" size={16} color={tColor.muted} style={{ marginRight: 10 }} />
+                                <TextInput
+                                  style={{ flex: 1, color: tColor.text, fontSize: 15, fontWeight: '700', outlineStyle: 'none' } as any}
+                                  placeholder="••••••••"
+                                  placeholderTextColor={tColor.muted}
+                                  secureTextEntry={!showBookingLoginPassword}
+                                  autoCapitalize="none"
+                                  value={bookingLoginPassword}
+                                  onChangeText={setBookingLoginPassword}
+                                />
+                                <TouchableOpacity onPress={() => setShowBookingLoginPassword((prev) => !prev)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                  <Feather name={showBookingLoginPassword ? 'eye-off' : 'eye'} size={17} color={tColor.muted} />
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+
+                            <TouchableOpacity
+                              activeOpacity={0.85}
+                              disabled={isLoggingInBookingUser}
+                              onPress={async () => {
+                                const cleanEm = bookingLoginEmail.trim().toLowerCase();
+                                const cleanPw = bookingLoginPassword.trim();
+                                if (!cleanEm || !cleanEm.includes('@')) {
+                                  alert(tr('Ingresa tu correo electrónico registrado.', 'Enter your registered email address.'));
+                                  return;
+                                }
+                                if (!cleanPw) {
+                                  alert(tr('Ingresa tu contraseña para validar tu cuenta.', 'Enter your password to verify your account.'));
+                                  return;
+                                }
+                                setIsLoggingInBookingUser(true);
+                                try {
+                                  const dbCheck = await authenticateUserAgainstDb({
+                                    provider: 'manual',
+                                    email: cleanEm,
+                                    password: cleanPw,
+                                  });
+                                  if (dbCheck.ok && dbCheck.data?.client) {
+                                    applyAuthenticatedClientToState(dbCheck.data, { openExpediente: true, applyToBooking: true });
+                                    await persistAuthenticatedClientSession({
+                                      provider: 'manual',
+                                      email: cleanEm,
+                                      fullName: dbCheck.data.client?.name || '',
+                                    });
+                                    setBookingLoginPassword('');
+                                  } else {
+                                    alert(dbCheck.error || tr('Correo o contraseña incorrectos.', 'Invalid email or password.'));
+                                  }
+                                } finally {
+                                  setIsLoggingInBookingUser(false);
+                                }
+                              }}
+                              style={[styles.primaryButton, { backgroundColor: brandColor, height: 48 }]}
+                            >
+                              <Text style={styles.primaryButtonText}>
+                                {isLoggingInBookingUser
+                                  ? tr('Validando...', 'Verifying...')
+                                  : tr('🔐 Validar y Autocompletar Datos', '🔐 Verify & Autofill Details')}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        ) : null}
+
                         <Text style={{ color: tColor.muted, fontSize: 10.5, lineHeight: 15 }}>
                           {bookingEntryMode === 'new'
                             ? tr('🔒 Regístrate rápido con iOS o Google, o toca Usuario para ingresar tu información.', '🔒 Sign up fast with iOS or Google, or tap User to enter your details.')
-                            : tr('🔒 Tus datos solo se utilizan para confirmar tu cita y proteger tu expediente.', '🔒 Your info is used solely to confirm your appointment and protect your record.')}
+                            : tr('🔒 No exponemos tu historial por número telefónico. Solo tú puedes acceder con tu cuenta verificada.', '🔒 We never expose your history by phone number. Only you can access it with your verified account.')}
                         </Text>
                       </View>
                     ) : null}
@@ -9356,7 +9794,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   ) : null}
 
                   {/* ✅ FORMULARIO DE REGISTRO PARA CLIENTE NUEVO (OCULTO SI YA ESTÁ REGISTRADO) */}
-                  {(bookingAuthMethod !== null && !isExistingClient) ? (
+                  {(bookingAuthMethod !== null && !isExistingClient && bookingEntryMode !== 'existing') ? (
                   <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 16, padding: 16, marginBottom: 16 }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, backgroundColor: 'rgba(255,255,255,0.03)', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: tColor.border }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>

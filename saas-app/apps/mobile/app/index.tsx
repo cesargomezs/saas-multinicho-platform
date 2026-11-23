@@ -99,19 +99,24 @@ const DirectoryTenantLogo = ({
     };
   }, [path]);
 
+  const avatarSize = Math.round(size * 1.38);
+  const squircleRadius = Math.round(avatarSize * 0.28);
+
   if (!path || imgError || !signedUrl) {
     return (
       <View
         style={{
-          width: size,
-          height: size,
-          borderRadius: Math.round(size * 0.28),
+          width: avatarSize,
+          height: avatarSize,
+          borderRadius: squircleRadius,
           backgroundColor: brandColor,
+          borderWidth: 1.5,
+          borderColor: 'rgba(255,255,255,0.22)',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: Math.round(size * 0.42) }}>
+        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: Math.round(avatarSize * 0.42) }}>
           {name ? name.charAt(0).toUpperCase() : 'A'}
         </Text>
       </View>
@@ -122,10 +127,10 @@ const DirectoryTenantLogo = ({
     <Image
       source={{ uri: signedUrl }}
       style={{
-        width: size,
-        height: size,
-        borderRadius: Math.round(size * 0.28),
-        borderWidth: 1.5,
+        width: avatarSize,
+        height: avatarSize,
+        borderRadius: squircleRadius,
+        borderWidth: 2,
         borderColor: brandColor,
         backgroundColor: '#000',
       }}
@@ -1346,11 +1351,11 @@ export default function DirectoryHomeScreen() {
                               ) : (
                                 <View
                                   style={{
-                                    width: 52,
-                                    height: 52,
-                                    borderRadius: 14,
+                                    width: 82,
+                                    height: 82,
+                                    borderRadius: 20,
                                     backgroundColor: `${tColorPrimary}18`,
-                                    borderWidth: 1,
+                                    borderWidth: 1.5,
                                     borderColor: `${tColorPrimary}45`,
                                     alignItems: 'center',
                                     justifyContent: 'center',
@@ -1360,12 +1365,12 @@ export default function DirectoryHomeScreen() {
                                     <Feather name={selectedCatObj.iconName as any} size={22} color={tColorPrimary} />
                                   )}
                                   {selectedCatObj?.iconFamily === 'Ionicons' && (
-                                    <Ionicons name={selectedCatObj.iconName as any} size={23} color={tColorPrimary} />
+                                    <Ionicons name={selectedCatObj.iconName as any} size={43} color={tColorPrimary} />
                                   )}
                                   {selectedCatObj?.iconFamily === 'MCI' && (
                                     <MaterialCommunityIcons
                                       name={selectedCatObj.iconName as any}
-                                      size={23}
+                                      size={43}
                                       color={tColorPrimary}
                                     />
                                   )}
@@ -1462,7 +1467,7 @@ export default function DirectoryHomeScreen() {
                                 </Text>
                               </View>
 
-                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
                                 <Text style={{ color: tColorPrimary, fontSize: 14.5, fontWeight: '900' }}>
                                   {tr('Ver Catálogo y Agendar', 'View Catalog & Book')}
                                 </Text>

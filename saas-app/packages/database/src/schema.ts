@@ -1,4 +1,4 @@
-import { pgTable, uuid, varchar, text, timestamp, jsonb, decimal, integer, boolean, uniqueIndex, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, text, timestamp, jsonb, decimal, doublePrecision, integer, boolean, uniqueIndex, index } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 // ============================================================================
@@ -145,6 +145,27 @@ export const userDevices = pgTable('user_devices', {
   isActive: boolean('is_active').default(true),
   lastUsedAt: timestamp('last_used_at').defaultNow(),
   createdAt: timestamp('created_at').defaultNow(),
+});
+
+// ============================================================================
+// 2.2 DEVICE PUSH TOKENS (Notificaciones Push Geo-Segmentadas B2B y B2C)
+// ============================================================================
+export const devicePushTokens = pgTable('device_push_tokens', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  expoPushToken: text('expo_push_token').notNull().unique(),
+  userId: uuid('user_id').references(() => users.id),
+  tenantId: uuid('tenant_id').references(() => tenants.id),
+  role: varchar('role', { length: 20 }).default('client').notNull(), // 'client' | 'tenant_owner' | 'staff'
+  zipCode: varchar('zip_code', { length: 15 }),
+  latitude: doublePrecision('latitude'),
+  longitude: doublePrecision('longitude'),
+  isActive: boolean('is_active').default(true),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, (table) => {
+  return {
+    zipIdx: index('idx_push_tokens_zip').on(table.zipCode),
+    tenantIdx: index('idx_push_tokens_tenant').on(table.tenantId),
+  };
 });
 
 // ============================================================================
@@ -378,11 +399,13 @@ export const tenantsRelations = relations(tenants, ({ many }) => ({
   reports: many(reports),
   auditLogs: many(auditLogs),
   legalDocuments: many(legalDocuments),
+  devicePushTokens: many(devicePushTokens),
 }));
 
 export const usersRelations = relations(users, ({ one, many }) => ({
   tenant: one(tenants, { fields: [users.tenantId], references: [tenants.id] }),
   devices: many(userDevices),
+  devicePushTokens: many(devicePushTokens),
   legalAcceptances: many(userLegalAcceptances),
   clientAppointments: many(appointments, { relationName: 'clientAppointments' }),
   reviews: many(reviews),
@@ -391,6 +414,11 @@ export const usersRelations = relations(users, ({ one, many }) => ({
 
 export const userDevicesRelations = relations(userDevices, ({ one }) => ({
   user: one(users, { fields: [userDevices.userId], references: [users.id] }),
+}));
+
+export const devicePushTokensRelations = relations(devicePushTokens, ({ one }) => ({
+  user: one(users, { fields: [devicePushTokens.userId], references: [users.id] }),
+  tenant: one(tenants, { fields: [devicePushTokens.tenantId], references: [tenants.id] }),
 }));
 
 export const legalDocumentsRelations = relations(legalDocuments, ({ one, many }) => ({
