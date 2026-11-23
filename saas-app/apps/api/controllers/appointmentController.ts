@@ -36,11 +36,19 @@ export interface ExpoPushPayload {
   data?: Record<string, any>;
 }
 
-export async function sendExpoPushInBatches(tokens: string[], payload: ExpoPushPayload): Promise<void> {
+export async function sendExpoPushInBatches(
+  tokens: string[],
+  payload: ExpoPushPayload,
+  meta?: { tenantId?: string | null; eventType?: string }
+): Promise<void> {
   const uniqueTokens = [
     ...new Set(tokens.filter((t) => typeof t === 'string' && t.startsWith('ExponentPushToken['))),
   ];
   if (uniqueTokens.length === 0) return;
+
+  const eventType = meta?.eventType || String(payload.data?.eventType || 'notification');
+  const tenantUuid = meta?.tenantId || (payload.data?.tenantId ? String(payload.data.tenantId) : null);
+  const dataJsonStr = JSON.stringify(payload.data || {});
 
   const CHUNK_SIZE = 100;
   const deadTokens: string[] = [];
@@ -68,26 +76,74 @@ export async function sendExpoPushInBatches(tokens: string[], payload: ExpoPushP
 
       const json = await res.json().catch(() => null);
       console.log('📲 [EXPO PUSH] Enviados:', chunk.length, '| Respuesta Expo:', JSON.stringify(json));
-      if (Array.isArray(json?.data)) {
-        json.data.forEach((ticket: any, idx: number) => {
-          if (ticket?.status === 'error' && ticket?.details?.error === 'DeviceNotRegistered') {
-            deadTokens.push(chunk[idx]);
-          }
-        });
+
+      const tickets: any[] = Array.isArray(json?.data) ? json.data : [];
+      for (let idx = 0; idx < chunk.length; idx++) {
+        const tok = chunk[idx];
+        const ticket = tickets[idx];
+        const isErr = !res.ok || ticket?.status === 'error';
+        const errCode = ticket?.details?.error || '';
+        if (errCode === 'DeviceNotRegistered') {
+          deadTokens.push(tok);
+        }
+        const statusVal = isErr ? 'failed' : 'sent';
+        const errMsg = isErr ? (ticket?.message || errCode || `HTTP ${res.status}`) : null;
+
+        await db.execute(sql`
+          INSERT INTO public.push_notifications (
+            tenant_id, user_id, device_id, push_token, event_type, title, body, data, status, error_message, sent_at, created_at
+          )
+          SELECT
+            ${tenantUuid ? sql`${tenantUuid}::uuid` : sql`ud.tenant_id`},
+            ud.user_id,
+            ud.id,
+            ${tok},
+            ${eventType},
+            ${payload.title},
+            ${payload.body},
+            ${dataJsonStr}::jsonb,
+            ${statusVal},
+            ${errMsg},
+            ${isErr ? sql`NULL` : sql`NOW()`},
+            NOW()
+          FROM public.user_devices ud
+          WHERE ud.push_token = ${tok}
+          LIMIT 1
+        `).catch(() => {});
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('⚠️ Error enviando lote Expo Push:', err);
+      for (const tok of chunk) {
+        await db.execute(sql`
+          INSERT INTO public.push_notifications (
+            tenant_id, user_id, device_id, push_token, event_type, title, body, data, status, error_message, created_at
+          )
+          SELECT
+            ${tenantUuid ? sql`${tenantUuid}::uuid` : sql`ud.tenant_id`},
+            ud.user_id,
+            ud.id,
+            ${tok},
+            ${eventType},
+            ${payload.title},
+            ${payload.body},
+            ${dataJsonStr}::jsonb,
+            'failed',
+            ${String(err?.message || err)},
+            NOW()
+          FROM public.user_devices ud
+          WHERE ud.push_token = ${tok}
+          LIMIT 1
+        `).catch(() => {});
+      }
     }
   }
 
-  if (deadTokens.length > 0) {
-    for (const dead of deadTokens) {
-      await db.execute(sql`
-        UPDATE public.device_push_tokens
-        SET is_active = FALSE, updated_at = NOW()
-        WHERE expo_push_token = ${dead}
-      `).catch(() => {});
-    }
+  for (const dead of deadTokens) {
+    await db.execute(sql`
+      UPDATE public.user_devices
+      SET is_active = FALSE, last_used_at = NOW()
+      WHERE push_token = ${dead}
+    `).catch(() => {});
   }
 }
 
@@ -96,30 +152,19 @@ export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayloa
   try {
     const tokenSet = new Set<string>();
 
-    // 1) Tokens registrados en device_push_tokens para este negocio
     const devRes = await db.execute(sql`
-      SELECT expo_push_token
-      FROM public.device_push_tokens
-      WHERE is_active = TRUE AND tenant_id = ${tenantId}::uuid
+      SELECT d.push_token
+      FROM public.user_devices d
+      LEFT JOIN public.users u ON u.id = d.user_id
+      WHERE d.is_active = TRUE
+        AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
     `);
     const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
     devRows.forEach((r: any) => {
-      if (r?.expo_push_token) tokenSet.add(String(r.expo_push_token));
-    });
-
-    // 2) Respaldo: tokens en user_devices de usuarios del negocio
-    const legacyRes = await db.execute(sql`
-      SELECT d.push_token
-      FROM public.user_devices d
-      INNER JOIN public.users u ON u.id = d.user_id
-      WHERE u.tenant_id = ${tenantId}::uuid AND d.is_active = TRUE
-    `);
-    const legacyRows = Array.isArray(legacyRes) ? legacyRes : (legacyRes as any).rows || [];
-    legacyRows.forEach((r: any) => {
       if (r?.push_token) tokenSet.add(String(r.push_token));
     });
 
-    await sendExpoPushInBatches([...tokenSet], payload);
+    await sendExpoPushInBatches([...tokenSet], payload, { tenantId, eventType: 'appointment' });
   } catch (err) {
     console.warn('⚠️ Error notifyTenantPush:', err);
   }
@@ -137,20 +182,21 @@ export async function notifyNearbyClientsPush(params: {
     const lonNum = params.longitude !== null && params.longitude !== undefined ? Number(params.longitude) : null;
 
     const res = await db.execute(sql`
-      SELECT expo_push_token
-      FROM public.device_push_tokens
-      WHERE is_active = TRUE
-        AND role = 'client'
+      SELECT d.push_token
+      FROM public.user_devices d
+      INNER JOIN public.users u ON u.id = d.user_id
+      WHERE d.is_active = TRUE
+        AND COALESCE(u.role, 'client') = 'client'
         AND (
-          (${zipClean}::text IS NOT NULL AND zip_code = ${zipClean})
+          (${zipClean}::text IS NOT NULL AND COALESCE(d.zip_code, u.zip_code) = ${zipClean})
           OR (
             ${latNum}::double precision IS NOT NULL AND ${lonNum}::double precision IS NOT NULL
-            AND latitude IS NOT NULL AND longitude IS NOT NULL
+            AND d.latitude IS NOT NULL AND d.longitude IS NOT NULL
             AND (3958.8 * acos(
               LEAST(1.0, GREATEST(-1.0,
-                cos(radians(${latNum})) * cos(radians(latitude)) *
-                cos(radians(longitude) - radians(${lonNum})) +
-                sin(radians(${latNum})) * sin(radians(latitude))
+                cos(radians(${latNum})) * cos(radians(d.latitude)) *
+                cos(radians(d.longitude) - radians(${lonNum})) +
+                sin(radians(${latNum})) * sin(radians(d.latitude))
               ))
             )) <= 8.0
           )
@@ -158,8 +204,9 @@ export async function notifyNearbyClientsPush(params: {
     `);
     const rows = Array.isArray(res) ? res : (res as any).rows || [];
     await sendExpoPushInBatches(
-      rows.map((r: any) => String(r.expo_push_token)),
-      params.payload
+      rows.map((r: any) => String(r.push_token)),
+      params.payload,
+      { eventType: String(params.payload.data?.eventType || 'new_service') }
     );
   } catch (err) {
     console.warn('⚠️ Error notifyNearbyClientsPush:', err);
@@ -190,31 +237,51 @@ export async function registerDevicePushToken(req: Request, res: Response) {
     const latVal = latitude !== undefined && latitude !== null && !Number.isNaN(Number(latitude)) ? Number(latitude) : null;
     const lonVal = longitude !== undefined && longitude !== null && !Number.isNaN(Number(longitude)) ? Number(longitude) : null;
 
+    let targetUserId = userId || null;
+    if (!targetUserId && resolvedTenantId) {
+      const existingUsers = await db.select().from(users).where(eq(users.tenantId, resolvedTenantId));
+      const fallbackStaffOrClient =
+        existingUsers.find((u: any) => u.role === 'owner' || u.role === 'admin' || u.role === 'staff') ||
+        existingUsers[0] ||
+        null;
+      if (fallbackStaffOrClient) {
+        targetUserId = fallbackStaffOrClient.id;
+      }
+    }
+
+    if (!targetUserId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Se requiere userId o un usuario registrado en el negocio para vincular el dispositivo en user_devices.'
+      });
+    }
+
     await db.execute(sql`
-      INSERT INTO public.device_push_tokens (
-        expo_push_token, user_id, tenant_id, role, zip_code, latitude, longitude, is_active, updated_at
+      INSERT INTO public.user_devices (
+        user_id, tenant_id, push_token, device_model, os, zip_code, latitude, longitude, is_active, last_used_at, created_at
       )
       VALUES (
-        ${expoPushToken.trim()},
-        ${userId ? sql`${userId}::uuid` : sql`NULL`},
+        ${targetUserId}::uuid,
         ${resolvedTenantId ? sql`${resolvedTenantId}::uuid` : sql`NULL`},
-        ${resolvedRole},
+        ${expoPushToken.trim()},
+        ${`Expo Device (${resolvedRole})`},
+        'mobile',
         ${cleanZip},
         ${latVal},
         ${lonVal},
         TRUE,
+        NOW(),
         NOW()
       )
-      ON CONFLICT (expo_push_token)
+      ON CONFLICT (push_token)
       DO UPDATE SET
-        user_id = COALESCE(EXCLUDED.user_id, public.device_push_tokens.user_id),
-        tenant_id = COALESCE(EXCLUDED.tenant_id, public.device_push_tokens.tenant_id),
-        role = EXCLUDED.role,
-        zip_code = COALESCE(EXCLUDED.zip_code, public.device_push_tokens.zip_code),
-        latitude = COALESCE(EXCLUDED.latitude, public.device_push_tokens.latitude),
-        longitude = COALESCE(EXCLUDED.longitude, public.device_push_tokens.longitude),
+        user_id = COALESCE(EXCLUDED.user_id, public.user_devices.user_id),
+        tenant_id = COALESCE(EXCLUDED.tenant_id, public.user_devices.tenant_id),
+        zip_code = COALESCE(EXCLUDED.zip_code, public.user_devices.zip_code),
+        latitude = COALESCE(EXCLUDED.latitude, public.user_devices.latitude),
+        longitude = COALESCE(EXCLUDED.longitude, public.user_devices.longitude),
         is_active = TRUE,
-        updated_at = NOW()
+        last_used_at = NOW()
     `);
 
     return res.status(200).json({ success: true, message: 'Token push registrado correctamente.' });

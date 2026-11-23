@@ -134,37 +134,51 @@ export const users = pgTable('users', {
 });
 
 // ============================================================================
-// 2.1 USER DEVICES (Múltiples dispositivos por usuario para Push)
+// 2.1 USER DEVICES (Múltiples dispositivos por usuario 1:N para Push y Geo-Discovery)
 // ============================================================================
 export const userDevices = pgTable('user_devices', {
   id: uuid('id').defaultRandom().primaryKey(),
   userId: uuid('user_id').references(() => users.id).notNull(),
+  tenantId: uuid('tenant_id').references(() => tenants.id),
   pushToken: varchar('push_token', { length: 255 }).notNull().unique(), 
   deviceModel: varchar('device_model', { length: 100 }), 
   os: varchar('os', { length: 50 }), 
-  isActive: boolean('is_active').default(true),
-  lastUsedAt: timestamp('last_used_at').defaultNow(),
-  createdAt: timestamp('created_at').defaultNow(),
-});
-
-// ============================================================================
-// 2.2 DEVICE PUSH TOKENS (Notificaciones Push Geo-Segmentadas B2B y B2C)
-// ============================================================================
-export const devicePushTokens = pgTable('device_push_tokens', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  expoPushToken: text('expo_push_token').notNull().unique(),
-  userId: uuid('user_id').references(() => users.id),
-  tenantId: uuid('tenant_id').references(() => tenants.id),
-  role: varchar('role', { length: 20 }).default('client').notNull(), // 'client' | 'tenant_owner' | 'staff'
   zipCode: varchar('zip_code', { length: 15 }),
   latitude: doublePrecision('latitude'),
   longitude: doublePrecision('longitude'),
   isActive: boolean('is_active').default(true),
-  updatedAt: timestamp('updated_at').defaultNow(),
+  lastUsedAt: timestamp('last_used_at').defaultNow(),
+  createdAt: timestamp('created_at').defaultNow(),
 }, (table) => {
   return {
-    zipIdx: index('idx_push_tokens_zip').on(table.zipCode),
-    tenantIdx: index('idx_push_tokens_tenant').on(table.tenantId),
+    userDevicesUserIdx: index('user_devices_user_id_idx').on(table.userId),
+    userDevicesTenantIdx: index('user_devices_tenant_id_idx').on(table.tenantId),
+    userDevicesZipIdx: index('user_devices_zip_code_idx').on(table.zipCode),
+  };
+});
+
+// ============================================================================
+// 2.2 PUSH NOTIFICATIONS (Cola y Trazabilidad de Notificaciones Enviadas)
+// ============================================================================
+export const pushNotifications = pgTable('push_notifications', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  tenantId: uuid('tenant_id').references(() => tenants.id),
+  userId: uuid('user_id').references(() => users.id),
+  deviceId: uuid('device_id').references(() => userDevices.id),
+  pushToken: varchar('push_token', { length: 255 }).notNull(),
+  eventType: varchar('event_type', { length: 50 }).notNull(), // 'appointment' | 'new_service' | 'new_business' | 'campaign'
+  title: varchar('title', { length: 255 }).notNull(),
+  body: text('body').notNull(),
+  data: jsonb('data').default({}),
+  status: varchar('status', { length: 30 }).default('pending').notNull(), // 'pending' | 'sent' | 'failed'
+  errorMessage: text('error_message'),
+  sentAt: timestamp('sent_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    tenantStatusIdx: index('push_notifications_tenant_status_idx').on(table.tenantId, table.status),
+    userIdx: index('push_notifications_user_idx').on(table.userId),
+    eventIdx: index('push_notifications_event_type_idx').on(table.eventType),
   };
 });
 
@@ -399,26 +413,30 @@ export const tenantsRelations = relations(tenants, ({ many }) => ({
   reports: many(reports),
   auditLogs: many(auditLogs),
   legalDocuments: many(legalDocuments),
-  devicePushTokens: many(devicePushTokens),
+  userDevices: many(userDevices),
+  pushNotifications: many(pushNotifications),
 }));
 
 export const usersRelations = relations(users, ({ one, many }) => ({
   tenant: one(tenants, { fields: [users.tenantId], references: [tenants.id] }),
   devices: many(userDevices),
-  devicePushTokens: many(devicePushTokens),
+  pushNotifications: many(pushNotifications),
   legalAcceptances: many(userLegalAcceptances),
   clientAppointments: many(appointments, { relationName: 'clientAppointments' }),
   reviews: many(reviews),
   reportsMade: many(reports),
 }));
 
-export const userDevicesRelations = relations(userDevices, ({ one }) => ({
+export const userDevicesRelations = relations(userDevices, ({ one, many }) => ({
   user: one(users, { fields: [userDevices.userId], references: [users.id] }),
+  tenant: one(tenants, { fields: [userDevices.tenantId], references: [tenants.id] }),
+  notifications: many(pushNotifications),
 }));
 
-export const devicePushTokensRelations = relations(devicePushTokens, ({ one }) => ({
-  user: one(users, { fields: [devicePushTokens.userId], references: [users.id] }),
-  tenant: one(tenants, { fields: [devicePushTokens.tenantId], references: [tenants.id] }),
+export const pushNotificationsRelations = relations(pushNotifications, ({ one }) => ({
+  tenant: one(tenants, { fields: [pushNotifications.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [pushNotifications.userId], references: [users.id] }),
+  device: one(userDevices, { fields: [pushNotifications.deviceId], references: [userDevices.id] }),
 }));
 
 export const legalDocumentsRelations = relations(legalDocuments, ({ one, many }) => ({

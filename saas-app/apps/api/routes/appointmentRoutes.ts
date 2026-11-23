@@ -12,6 +12,7 @@ import {
   confirmAppointment,
   sendAppointmentReminder,
   cancelAppointment,
+  registerDevicePushToken,
 } from '../controllers/appointmentController';
 
 const router = Router();
@@ -33,5 +34,7 @@ router.put('/:appointmentId/complete', completeWorkOrder);
 router.put('/:appointmentId/confirm', confirmAppointment);
 router.post('/:appointmentId/remind', sendAppointmentReminder);
 router.put('/:appointmentId/cancel', cancelAppointment);
+
+router.post('/push-tokens/register', registerDevicePushToken);
 
 export default router;

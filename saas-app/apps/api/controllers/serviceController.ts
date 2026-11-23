@@ -63,6 +63,7 @@ export const createService = async (req: Request, res: Response) => {
                   tenantId: tenantRow.id,
                   serviceId: createdService.id,
                   view: 'servicios',
+                  eventType: 'new_service',
                 },
               },
             }),
