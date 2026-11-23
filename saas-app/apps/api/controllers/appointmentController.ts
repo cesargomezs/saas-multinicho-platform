@@ -147,22 +147,98 @@ export async function sendExpoPushInBatches(
   }
 }
 
-export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayload): Promise<void> {
+export async function notifyTenantPush(
+  tenantId: string,
+  payload: ExpoPushPayload,
+  targetStaffOrUserId?: string | null
+): Promise<void> {
   if (!tenantId) return;
   try {
     const tokenSet = new Set<string>();
+    const isValidUuid =
+      typeof targetStaffOrUserId === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(targetStaffOrUserId.trim());
 
-    const devRes = await db.execute(sql`
-      SELECT d.push_token
-      FROM public.user_devices d
-      LEFT JOIN public.users u ON u.id = d.user_id
-      WHERE d.is_active = TRUE
-        AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
-    `);
-    const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
-    devRows.forEach((r: any) => {
-      if (r?.push_token) tokenSet.add(String(r.push_token));
-    });
+    if (isValidUuid) {
+      const cleanId = targetStaffOrUserId!.trim();
+
+      // 1) Buscamos el registro en public.staff (nombre y teléfono si existe) para cruzar con public.users
+      const staffLookup = await db.execute(sql`
+        SELECT *
+        FROM public.staff
+        WHERE id = ${cleanId}::uuid AND tenant_id = ${tenantId}::uuid
+        LIMIT 1
+      `).catch(() => ({ rows: [] }));
+      const staffRows = Array.isArray(staffLookup) ? staffLookup : (staffLookup as any).rows || [];
+      const staffRec = staffRows[0] || null;
+      const staffName = staffRec?.name ? String(staffRec.name).trim() : '';
+      const staffPhoneDigits = staffRec?.phone
+        ? String(staffRec.phone).replace(/\D/g, '').slice(-10)
+        : '';
+
+      // Cruce práctico por teléfono (últimos 10 dígitos) en public.users
+      if (staffPhoneDigits.length >= 7) {
+        const byPhoneRes = await db.execute(sql`
+          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+          FROM public.user_devices d
+          INNER JOIN public.users u ON u.id = d.user_id
+          WHERE d.is_active = TRUE
+            AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+            AND RIGHT(regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g'), 10) = ${staffPhoneDigits}
+            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+        `);
+        const phoneRows = Array.isArray(byPhoneRes) ? byPhoneRes : (byPhoneRes as any).rows || [];
+        phoneRows.forEach((r: any) => {
+          if (r?.push_token) tokenSet.add(String(r.push_token));
+        });
+      }
+
+      // Cruce secundario por nombre normalizado (limpiando espacios dobles) si no hubo match por teléfono
+      if (tokenSet.size === 0 && staffName) {
+        const matchedUsersRes = await db.execute(sql`
+          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+          FROM public.user_devices d
+          INNER JOIN public.users u ON u.id = d.user_id
+          WHERE d.is_active = TRUE
+            AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+            AND LOWER(REGEXP_REPLACE(TRIM(u.name), '\s+', ' ', 'g')) = LOWER(REGEXP_REPLACE(TRIM(${staffName}), '\s+', ' ', 'g'))
+            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+        `);
+        const matchedRows = Array.isArray(matchedUsersRes) ? matchedUsersRes : (matchedUsersRes as any).rows || [];
+        matchedRows.forEach((r: any) => {
+          if (r?.push_token) tokenSet.add(String(r.push_token));
+        });
+      }
+
+      // 2) También revisamos si el ID coincide directamente con un user_id en user_devices
+      const directUserRes = await db.execute(sql`
+        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+        FROM public.user_devices d
+        WHERE d.is_active = TRUE
+          AND d.user_id = ${cleanId}::uuid
+          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+      `);
+      const directRows = Array.isArray(directUserRes) ? directUserRes : (directUserRes as any).rows || [];
+      directRows.forEach((r: any) => {
+        if (r?.push_token) tokenSet.add(String(r.push_token));
+      });
+    }
+
+    // 3) Si el staff aún no tiene un dispositivo vinculado (o no se asignó ninguno), notificamos a todos los dispositivos activos del negocio (incluyendo el del dueño)
+    if (tokenSet.size === 0) {
+      const devRes = await db.execute(sql`
+        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+        FROM public.user_devices d
+        LEFT JOIN public.users u ON u.id = d.user_id
+        WHERE d.is_active = TRUE
+          AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+      `);
+      const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
+      devRows.forEach((r: any) => {
+        if (r?.push_token) tokenSet.add(String(r.push_token));
+      });
+    }
 
     await sendExpoPushInBatches([...tokenSet], payload, { tenantId, eventType: 'appointment' });
   } catch (err) {
@@ -182,11 +258,12 @@ export async function notifyNearbyClientsPush(params: {
     const lonNum = params.longitude !== null && params.longitude !== undefined ? Number(params.longitude) : null;
 
     const res = await db.execute(sql`
-      SELECT d.push_token
+      SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
       FROM public.user_devices d
       INNER JOIN public.users u ON u.id = d.user_id
       WHERE d.is_active = TRUE
         AND COALESCE(u.role, 'client') = 'client'
+        AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%'
         AND (
           (${zipClean}::text IS NOT NULL AND COALESCE(d.zip_code, u.zip_code) = ${zipClean})
           OR (
@@ -256,16 +333,27 @@ export async function registerDevicePushToken(req: Request, res: Response) {
       });
     }
 
+    const cleanToken = expoPushToken.trim();
+    const devType = String(req.body?.deviceType || req.body?.os || 'mobile').slice(0, 50);
+
+    await db.execute(sql`
+      ALTER TABLE public.user_devices
+        ADD COLUMN IF NOT EXISTS expo_push_token TEXT,
+        ADD COLUMN IF NOT EXISTS device_type VARCHAR(50)
+    `).catch(() => {});
+
     await db.execute(sql`
       INSERT INTO public.user_devices (
-        user_id, tenant_id, push_token, device_model, os, zip_code, latitude, longitude, is_active, last_used_at, created_at
+        user_id, tenant_id, push_token, expo_push_token, device_model, device_type, os, zip_code, latitude, longitude, is_active, last_used_at, created_at
       )
       VALUES (
         ${targetUserId}::uuid,
         ${resolvedTenantId ? sql`${resolvedTenantId}::uuid` : sql`NULL`},
-        ${expoPushToken.trim()},
+        ${cleanToken},
+        ${cleanToken},
         ${`Expo Device (${resolvedRole})`},
-        'mobile',
+        ${devType},
+        ${devType},
         ${cleanZip},
         ${latVal},
         ${lonVal},
@@ -277,6 +365,8 @@ export async function registerDevicePushToken(req: Request, res: Response) {
       DO UPDATE SET
         user_id = COALESCE(EXCLUDED.user_id, public.user_devices.user_id),
         tenant_id = COALESCE(EXCLUDED.tenant_id, public.user_devices.tenant_id),
+        expo_push_token = COALESCE(EXCLUDED.expo_push_token, public.user_devices.expo_push_token),
+        device_type = COALESCE(EXCLUDED.device_type, public.user_devices.device_type),
         zip_code = COALESCE(EXCLUDED.zip_code, public.user_devices.zip_code),
         latitude = COALESCE(EXCLUDED.latitude, public.user_devices.latitude),
         longitude = COALESCE(EXCLUDED.longitude, public.user_devices.longitude),
@@ -632,9 +722,10 @@ async function recordLegalAcceptanceAndDevice(params: {
   // 2. Registrar / actualizar dispositivo en user_devices
   try {
     const rawToken = String(deviceInfo?.pushToken || '').trim();
-    const cleanPhoneForToken = extractCleanPhone(String(req.body?.clientPhone || ''));
-    const fallbackToken = `device-${userId.slice(0, 8)}-${cleanPhoneForToken || 'web'}`;
-    const finalPushToken = (rawToken || fallbackToken).slice(0, 255);
+    if (!rawToken.startsWith('ExponentPushToken[')) {
+      return;
+    }
+    const finalPushToken = rawToken.slice(0, 255);
 
     const providerSuffix = deviceInfo?.authProvider ? ` (${deviceInfo.authProvider})` : '';
     const deviceModel = String(
@@ -880,8 +971,8 @@ ${refPhone ? `🤝 <b>Referido por:</b> ${refPhone}
       notifyTenantPush(tenantId, {
         title: `📅 Nueva Cita: ${clientName.trim()}`,
         body: `${prettyAptWhen} • ${modalityText}`,
-        data: { tenantId, appointmentId: apt.id, view: 'mecanico' },
-      }),
+        data: { tenantId, appointmentId: apt.id, staffId: safeDbStaffId || staffId || null, view: 'mecanico' },
+      }, safeDbStaffId || staffId || null),
     ]);
 
     return res.status(201).json({ success: true, appointment: apt });
@@ -2560,8 +2651,8 @@ ${caseType ? `📌 <b>Motivo:</b> ${caseType}\n` : ''}💬 <b>Resumen IA:</b> <i
       notifyTenantPush(tenantId, {
         title: `📞 Nueva Cita por Voz IA: ${finalClientName}`,
         body: `${resolvedServiceName} • ${formattedDateStr}`,
-        data: { tenantId, appointmentId: apt.id, view: 'mecanico' },
-      }),
+        data: { tenantId, appointmentId: apt.id, staffId: safeDbStaffId || staffId || null, view: 'mecanico' },
+      }, safeDbStaffId || staffId || null),
     ]);
   }
 
