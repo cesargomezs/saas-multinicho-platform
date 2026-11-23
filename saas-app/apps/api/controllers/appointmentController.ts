@@ -67,6 +67,7 @@ export async function sendExpoPushInBatches(tokens: string[], payload: ExpoPushP
       });
 
       const json = await res.json().catch(() => null);
+      console.log('📲 [EXPO PUSH] Enviados:', chunk.length, '| Respuesta Expo:', JSON.stringify(json));
       if (Array.isArray(json?.data)) {
         json.data.forEach((ticket: any, idx: number) => {
           if (ticket?.status === 'error' && ticket?.details?.error === 'DeviceNotRegistered') {
