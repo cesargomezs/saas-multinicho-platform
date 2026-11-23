@@ -668,6 +668,7 @@ async function recordLegalAcceptanceAndDevice(params: {
   acceptedTerms?: boolean;
   deviceInfo?: {
     pushToken?: string;
+    expoPushToken?: string;
     deviceModel?: string;
     os?: string;
     authProvider?: string;
@@ -721,13 +722,23 @@ async function recordLegalAcceptanceAndDevice(params: {
 
   // 2. Registrar / actualizar dispositivo en user_devices
   try {
-    const rawToken = String(deviceInfo?.pushToken || '').trim();
-    if (!rawToken.startsWith('ExponentPushToken[')) {
-      return;
-    }
-    const finalPushToken = rawToken.slice(0, 255);
+    const rawToken = String(
+      deviceInfo?.pushToken ||
+      deviceInfo?.expoPushToken ||
+      req.body?.pushToken ||
+      req.body?.expoPushToken ||
+      ''
+    ).trim();
+    const hasValidExpoToken = rawToken.startsWith('ExponentPushToken[');
+    const finalPushToken = hasValidExpoToken ? rawToken.slice(0, 255) : null;
 
-    const providerSuffix = deviceInfo?.authProvider ? ` (${deviceInfo.authProvider})` : '';
+    const effectiveProvider = String(
+      deviceInfo?.authProvider ||
+      req.body?.authProvider ||
+      safeParseJSON(req.body?.metadata)?.authProvider ||
+      ''
+    ).trim();
+    const providerSuffix = effectiveProvider ? ` (${effectiveProvider})` : '';
     const deviceModel = String(
       deviceInfo?.deviceModel ||
       req.body?.deviceModel ||
@@ -745,16 +756,106 @@ async function recordLegalAcceptanceAndDevice(params: {
     ).slice(0, 50);
 
     await db.execute(sql`
-      INSERT INTO public.user_devices (user_id, push_token, device_model, os, is_active, last_used_at, created_at)
-      VALUES (${userId}::uuid, ${finalPushToken}, ${deviceModel}, ${osName}, true, NOW(), NOW())
-      ON CONFLICT (push_token)
-      DO UPDATE SET
-        user_id = EXCLUDED.user_id,
-        device_model = EXCLUDED.device_model,
-        os = EXCLUDED.os,
-        is_active = true,
-        last_used_at = NOW()
-    `);
+      ALTER TABLE public.user_devices
+        ADD COLUMN IF NOT EXISTS tenant_id UUID,
+        ADD COLUMN IF NOT EXISTS expo_push_token TEXT,
+        ADD COLUMN IF NOT EXISTS device_type VARCHAR(50),
+        ADD COLUMN IF NOT EXISTS zip_code VARCHAR(15),
+        ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION
+    `).catch(() => {});
+
+    const cleanZip = req.body?.zipCode ? String(req.body.zipCode).trim().slice(0, 15) : null;
+    const latVal = req.body?.latitude !== undefined && req.body?.latitude !== null && !Number.isNaN(Number(req.body.latitude)) ? Number(req.body.latitude) : null;
+    const lonVal = req.body?.longitude !== undefined && req.body?.longitude !== null && !Number.isNaN(Number(req.body.longitude)) ? Number(req.body.longitude) : null;
+
+    if (finalPushToken) {
+      await db.execute(sql`
+        INSERT INTO public.user_devices (
+          user_id, tenant_id, push_token, expo_push_token, device_model, device_type, os, zip_code, latitude, longitude, is_active, last_used_at, created_at
+        )
+        VALUES (
+          ${userId}::uuid,
+          ${tenantId}::uuid,
+          ${finalPushToken},
+          ${finalPushToken},
+          ${deviceModel},
+          ${osName},
+          ${osName},
+          ${cleanZip},
+          ${latVal},
+          ${lonVal},
+          true,
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT (push_token)
+        DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          tenant_id = COALESCE(EXCLUDED.tenant_id, public.user_devices.tenant_id),
+          expo_push_token = EXCLUDED.expo_push_token,
+          device_model = EXCLUDED.device_model,
+          device_type = EXCLUDED.device_type,
+          os = EXCLUDED.os,
+          zip_code = COALESCE(EXCLUDED.zip_code, public.user_devices.zip_code),
+          latitude = COALESCE(EXCLUDED.latitude, public.user_devices.latitude),
+          longitude = COALESCE(EXCLUDED.longitude, public.user_devices.longitude),
+          is_active = true,
+          last_used_at = NOW()
+      `);
+    } else {
+      // Registro 1:N de cada dispositivo/sesión distinta (ej. otro navegador, otro equipo o login con Google)
+      const incomingUserAgent = String(req.headers['user-agent'] || '').trim().slice(0, 120);
+      const sessionFingerprint = incomingUserAgent
+        ? `${deviceModel} | ${incomingUserAgent.slice(0, 50)}`
+        : deviceModel;
+
+      const existingSameSession = await db.execute(sql`
+        SELECT id
+        FROM public.user_devices
+        WHERE user_id = ${userId}::uuid
+          AND device_model = ${sessionFingerprint.slice(0, 100)}
+          AND COALESCE(os, '') = ${osName}
+        ORDER BY last_used_at DESC NULLS LAST
+        LIMIT 1
+      `);
+      const existingRows = Array.isArray(existingSameSession) ? existingSameSession : (existingSameSession as any).rows || [];
+
+      if (existingRows.length > 0 && existingRows[0]?.id) {
+        await db.execute(sql`
+          UPDATE public.user_devices
+          SET tenant_id = COALESCE(${tenantId}::uuid, tenant_id),
+              device_type = ${osName},
+              os = ${osName},
+              zip_code = COALESCE(${cleanZip}, zip_code),
+              latitude = COALESCE(${latVal}, latitude),
+              longitude = COALESCE(${lonVal}, longitude),
+              last_used_at = NOW()
+          WHERE id = ${String(existingRows[0].id)}::uuid
+        `);
+      } else {
+        await db.execute(sql`
+          INSERT INTO public.user_devices (
+            user_id, tenant_id, push_token, expo_push_token, device_model, device_type, os, zip_code, latitude, longitude, is_active, last_used_at, created_at
+          )
+          VALUES (
+            ${userId}::uuid,
+            ${tenantId}::uuid,
+            NULL,
+            NULL,
+            ${sessionFingerprint.slice(0, 100)},
+            ${osName},
+            ${osName},
+            ${cleanZip},
+            ${latVal},
+            ${lonVal},
+            false,
+            NOW(),
+            NOW()
+          )
+        `);
+      }
+    }
   } catch (devErr) {
     console.warn('⚠️ Aviso registrando dispositivo (user_devices):', devErr);
   }
