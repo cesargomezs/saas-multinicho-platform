@@ -1919,7 +1919,7 @@ export default function TenantDashboardScreen() {
       if (Platform.OS === 'web' && typeof window !== 'undefined') {
         redirectUrl = window.location.href;
       } else {
-        // Usamos el custom scheme registrado en la app sin requerir  en runtime
+        // Usamos el custom scheme registrado en la app sin requerir expo-auth-session en runtime
         redirectUrl = 'picktimebook://auth/callback';
       }
 
