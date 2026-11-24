@@ -162,11 +162,12 @@ export async function notifyTenantPush(
     if (isValidUuid) {
       const cleanId = targetStaffOrUserId!.trim();
 
-      // 1) Buscamos el registro en public.staff (nombre y teléfono si existe) para cruzar con public.users
+      // 1) Buscar trabajador/barbero en public.staff por id o por user_id si existe
       const staffLookup = await db.execute(sql`
         SELECT *
         FROM public.staff
-        WHERE id = ${cleanId}::uuid AND tenant_id = ${tenantId}::uuid
+        WHERE (id = ${cleanId}::uuid OR user_id = ${cleanId}::uuid)
+          AND tenant_id = ${tenantId}::uuid
         LIMIT 1
       `).catch(() => ({ rows: [] }));
       const staffRows = Array.isArray(staffLookup) ? staffLookup : (staffLookup as any).rows || [];
@@ -175,9 +176,24 @@ export async function notifyTenantPush(
       const staffPhoneDigits = staffRec?.phone
         ? String(staffRec.phone).replace(/\D/g, '').slice(-10)
         : '';
+      const linkedStaffUserId = staffRec?.user_id ? String(staffRec.user_id).trim() : '';
 
-      // Cruce práctico por teléfono (últimos 10 dígitos) en public.users
-      if (staffPhoneDigits.length >= 7) {
+      if (linkedStaffUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedStaffUserId)) {
+        const byLinkedUserRes = await db.execute(sql`
+          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+          FROM public.user_devices d
+          WHERE d.is_active = TRUE
+            AND d.user_id = ${linkedStaffUserId}::uuid
+            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+        `);
+        const linkedRows = Array.isArray(byLinkedUserRes) ? byLinkedUserRes : (byLinkedUserRes as any).rows || [];
+        linkedRows.forEach((r: any) => {
+          if (r?.push_token) tokenSet.add(String(r.push_token));
+        });
+      }
+
+      // Cruce por teléfono (últimos 10 dígitos) en public.users
+      if (tokenSet.size === 0 && staffPhoneDigits.length >= 7) {
         const byPhoneRes = await db.execute(sql`
           SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
           FROM public.user_devices d
@@ -193,7 +209,7 @@ export async function notifyTenantPush(
         });
       }
 
-      // Cruce secundario por nombre normalizado (limpiando espacios dobles) si no hubo match por teléfono
+      // Cruce secundario por nombre normalizado en public.users
       if (tokenSet.size === 0 && staffName) {
         const matchedUsersRes = await db.execute(sql`
           SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
@@ -210,21 +226,25 @@ export async function notifyTenantPush(
         });
       }
 
-      // 2) También revisamos si el ID coincide directamente con un user_id en user_devices
-      const directUserRes = await db.execute(sql`
-        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
-        FROM public.user_devices d
-        WHERE d.is_active = TRUE
-          AND d.user_id = ${cleanId}::uuid
-          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-      `);
-      const directRows = Array.isArray(directUserRes) ? directUserRes : (directUserRes as any).rows || [];
-      directRows.forEach((r: any) => {
-        if (r?.push_token) tokenSet.add(String(r.push_token));
-      });
+      // Revisión directa por user_id si coincide con un usuario staff/owner
+      if (tokenSet.size === 0) {
+        const directUserRes = await db.execute(sql`
+          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+          FROM public.user_devices d
+          LEFT JOIN public.users u ON u.id = d.user_id
+          WHERE d.is_active = TRUE
+            AND d.user_id = ${cleanId}::uuid
+            AND COALESCE(u.role, 'staff') <> 'client'
+            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+        `);
+        const directRows = Array.isArray(directUserRes) ? directUserRes : (directUserRes as any).rows || [];
+        directRows.forEach((r: any) => {
+          if (r?.push_token) tokenSet.add(String(r.push_token));
+        });
+      }
     }
 
-    // 3) Si el staff aún no tiene un dispositivo vinculado (o no se asignó ninguno), notificamos a todos los dispositivos activos del negocio (incluyendo el del dueño)
+    // Fallback a dispositivos activos del staff/dueño del negocio si el trabajador asignado aún no tiene token propio
     if (tokenSet.size === 0) {
       const devRes = await db.execute(sql`
         SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
@@ -232,6 +252,7 @@ export async function notifyTenantPush(
         LEFT JOIN public.users u ON u.id = d.user_id
         WHERE d.is_active = TRUE
           AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+          AND COALESCE(u.role, 'staff') <> 'client'
           AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
       `);
       const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
@@ -240,9 +261,32 @@ export async function notifyTenantPush(
       });
     }
 
-    await sendExpoPushInBatches([...tokenSet], payload, { tenantId, eventType: 'appointment' });
+    await sendExpoPushInBatches([...tokenSet], payload, { tenantId, eventType: String(payload.data?.eventType || 'appointment') });
   } catch (err) {
     console.warn('⚠️ Error notifyTenantPush:', err);
+  }
+}
+
+export async function notifyClientPush(
+  tenantId: string,
+  clientUserId: string,
+  payload: ExpoPushPayload,
+  eventType = 'appointment_reminder'
+): Promise<void> {
+  if (!tenantId || !clientUserId) return;
+  try {
+    const res = await db.execute(sql`
+      SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+      FROM public.user_devices d
+      WHERE d.is_active = TRUE
+        AND d.user_id = ${clientUserId}::uuid
+        AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+    `);
+    const rows = Array.isArray(res) ? res : (res as any).rows || [];
+    const tokens = rows.map((r: any) => String(r.push_token || '').trim()).filter(Boolean);
+    await sendExpoPushInBatches(tokens, payload, { tenantId, eventType });
+  } catch (err) {
+    console.warn('⚠️ Error notifyClientPush:', err);
   }
 }
 
@@ -1645,35 +1689,28 @@ export async function cancelAppointment(req: Request, res: Response) {
     `;
     await sendTelegramNotification(telegramMsg, tenantId, 'status');
 
-    // 3. Disparar Notificación Push vía Expo a los dispositivos registrados en public.user_devices
-    try {
-      const devicesRes = await db.execute(sql`
-        SELECT d.push_token 
-        FROM public.user_devices d
-        INNER JOIN public.users u ON u.id = d.user_id
-        WHERE u.tenant_id = ${tenantId}::uuid AND d.is_active = true
-      `);
-      const deviceRows = Array.isArray(devicesRes) ? devicesRes : (devicesRes as any).rows || [];
-      const tokens = deviceRows.map((r: any) => r.push_token).filter((t: string) => t && t.startsWith('ExponentPushToken'));
-
-      if (tokens.length > 0) {
-        const pushMessages = tokens.map((token: string) => ({
-          to: token,
-          sound: 'default',
+    // 3. Disparar Notificación Push vía Expo al cliente y al trabajador/barbero asignado
+    await Promise.allSettled([
+      notifyClientPush(
+        tenantId,
+        String(currentApt.clientId),
+        {
+          title: '❌ Cita Cancelada',
+          body: `Tu cita de ${finalServiceName} (${formattedDate}) fue cancelada.`,
+          data: { tenantId, appointmentId, status: 'cancelled', eventType: 'appointment_cancelled' },
+        },
+        'appointment_cancelled'
+      ),
+      notifyTenantPush(
+        tenantId,
+        {
           title: '❌ Cita Cancelada — Turno Disponible',
           body: `${finalClientName} canceló ${finalServiceName} (${formattedDate}). El espacio ya está libre.`,
-          data: { tenantId, appointmentId, status: 'cancelled' }
-        }));
-
-        await fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(pushMessages)
-        });
-      }
-    } catch (pushErr) {
-      console.warn('⚠️ Info Push en cancelación:', pushErr);
-    }
+          data: { tenantId, appointmentId, status: 'cancelled', eventType: 'appointment_cancelled' },
+        },
+        currentApt.staffId || existingMeta?.assignedStaffId || null
+      ),
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -1742,33 +1779,28 @@ export async function confirmAppointment(req: Request, res: Response) {
     `;
     await sendTelegramNotification(telegramMsg, tenantId, 'status');
 
-    // 2. Enviar Notificación Push vía Expo a los dispositivos del negocio
-    try {
-      const devicesRes = await db.execute(sql`
-        SELECT d.push_token 
-        FROM public.user_devices d
-        INNER JOIN public.users u ON u.id = d.user_id
-        WHERE u.tenant_id = ${tenantId}::uuid AND d.is_active = true
-      `);
-      const deviceRows = Array.isArray(devicesRes) ? devicesRes : (devicesRes as any).rows || [];
-      const tokens = deviceRows.map((r: any) => r.push_token).filter((t: string) => t && t.startsWith('ExponentPushToken'));
-
-      if (tokens.length > 0) {
-        const pushMessages = tokens.map((token: string) => ({
-          to: token,
-          sound: 'default',
+    // 2. Enviar Notificación Push vía Expo al cliente y al trabajador/barbero del negocio
+    await Promise.allSettled([
+      notifyClientPush(
+        tenantId,
+        String(currentApt.clientId),
+        {
+          title: '✅ Asistencia Confirmada',
+          body: `Tu cita de ${finalServiceName} (${formattedDate}) está confirmada.`,
+          data: { tenantId, appointmentId, status: 'confirmed', eventType: 'appointment_confirmed' },
+        },
+        'appointment_confirmed'
+      ),
+      notifyTenantPush(
+        tenantId,
+        {
           title: '✅ Asistencia Confirmada',
           body: `${finalClientName} confirmó su cita de ${finalServiceName} (${formattedDate}).`,
-          data: { tenantId, appointmentId, status: 'confirmed' }
-        }));
-
-        await fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify(pushMessages)
-        });
-      }
-    } catch (pushErr) {}
+          data: { tenantId, appointmentId, status: 'confirmed', eventType: 'appointment_confirmed' },
+        },
+        currentApt.staffId || existingMeta?.assignedStaffId || null
+      ),
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -3702,4 +3734,125 @@ export async function updateClientProfile(req: Request, res: Response) {
     console.error('Error en updateClientProfile:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
+}
+
+
+// =========================================================================
+// ⏰ CRON JOB AUTOMÁTICO (RECORDATORIOS 6H ANTES -> TELEGRAM + EXPO PUSH)
+// =========================================================================
+let reminderCronInterval: ReturnType<typeof setInterval> | null = null;
+let isReminderCronRunning = false;
+
+export async function runSixHourAppointmentRemindersJob(): Promise<{ processed: number; sent: number }> {
+  if (isReminderCronRunning) return { processed: 0, sent: 0 };
+  isReminderCronRunning = true;
+  let processed = 0;
+  let sent = 0;
+
+  try {
+    const nowMs = Date.now();
+    // Ventana objetivo: citas entre 5.5h y 6.5h en el futuro (evaluado cada 5 min)
+    const minFutureMs = nowMs + 5 * 60 * 60 * 1000;
+    const maxFutureMs = nowMs + 7 * 60 * 60 * 1000;
+
+    const candidateRows = await db
+      .select({
+        apt: appointments,
+        cli: users,
+        svc: services,
+      })
+      .from(appointments)
+      .innerJoin(users, eq(appointments.clientId, users.id))
+      .leftJoin(services, eq(appointments.serviceId, services.id))
+      .where(
+        and(
+          gte(appointments.scheduledAt, new Date(minFutureMs)),
+          lt(appointments.scheduledAt, new Date(maxFutureMs)),
+          ne(appointments.status, 'cancelled'),
+          ne(appointments.status, 'completed')
+        )
+      );
+
+    for (const row of candidateRows) {
+      processed += 1;
+      const aptObj = row.apt;
+      const meta = safeParseJSON(aptObj.mediaAndReports);
+
+      if (meta?.reminder6hSent === true || meta?.attendanceConfirmed === true) {
+        continue;
+      }
+
+      const scheduledMs = new Date(aptObj.scheduledAt).getTime();
+      const hoursUntil = (scheduledMs - nowMs) / (1000 * 60 * 60);
+      if (hoursUntil < 5.25 || hoursUntil > 6.75) {
+        continue;
+      }
+
+      const tenantId = String(aptObj.tenantId);
+      const clientName = row.cli?.name || 'Cliente';
+      const clientPhone = row.cli?.phone || 'N/A';
+      const serviceName = row.svc?.name || 'Servicio General';
+      const formattedDate = formatWallClockForNotification(aptObj.scheduledAt, meta);
+
+      const telegramMsg = `
+⏰ <b>¡RECORDATORIO AUTOMÁTICO DE CITA (6 HORAS ANTES)!</b> ⏰
+👤 <b>Cliente:</b> ${clientName} (${clientPhone})
+🗓️ <b>Horario:</b> ${formattedDate}
+🛠️ <b>Servicio:</b> ${serviceName}
+📲 <i>Recordatorio automático disparado por Cron: confirma tu asistencia o cancela con al menos 3 horas de anticipación.</i>
+      `;
+
+      await Promise.allSettled([
+        sendTelegramNotification(telegramMsg, tenantId, 'status'),
+        notifyClientPush(
+          tenantId,
+          String(aptObj.clientId),
+          {
+            title: '⏰ Recordatorio de tu Cita (En ~6 horas)',
+            body: `Hola ${clientName}, tu cita de ${serviceName} es a las ${formattedDate}. Confirma o cancela con mínimo 3h de anticipación.`,
+            data: { tenantId, appointmentId: aptObj.id, eventType: 'appointment_reminder_6h' },
+          },
+          'appointment_reminder_6h'
+        ),
+        notifyTenantPush(
+          tenantId,
+          {
+            title: `⏰ Cita en ~6h: ${clientName}`,
+            body: `${serviceName} • ${formattedDate}`,
+            data: { tenantId, appointmentId: aptObj.id, eventType: 'appointment_reminder_6h' },
+          },
+          aptObj.staffId || meta?.assignedStaffId || null
+        ),
+      ]);
+
+      await db
+        .update(appointments)
+        .set({
+          mediaAndReports: {
+            ...meta,
+            reminder6hSent: true,
+            reminderSentAt: new Date().toISOString(),
+          },
+        })
+        .where(eq(appointments.id, aptObj.id));
+
+      sent += 1;
+    }
+
+    return { processed, sent };
+  } catch (cronErr) {
+    console.warn('⚠️ Error ejecutando Cron de recordatorios 6h:', cronErr);
+    return { processed, sent };
+  } finally {
+    isReminderCronRunning = false;
+  }
+}
+
+export function startAppointmentRemindersCron(intervalMs = 5 * 60 * 1000): void {
+  if (reminderCronInterval) return;
+  runSixHourAppointmentRemindersJob().catch(() => {});
+  reminderCronInterval = setInterval(() => {
+    runSixHourAppointmentRemindersJob().catch(() => {});
+  }, intervalMs);
+  console.log(`⏰ [CRON] Recordatorios automáticos de citas (6h) activo cada ${Math.round(intervalMs / 60000)} min.`);
 }

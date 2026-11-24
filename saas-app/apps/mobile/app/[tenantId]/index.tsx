@@ -24,6 +24,226 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 
 
 
+
+// ==========================================
+// 📲 CAPTURA DEL TOKEN / ID DEL DISPOSITIVO PARA NOTIFICACIONES PUSH (FIRMADO POR DISPOSITIVO + REUTILIZADO DESDE BD)
+// ==========================================
+const buildDeterministicDeviceUid = (platform: string, osVersion: string): string => {
+  const seed = `${platform}|${osVersion}|${(globalThis as any)?.navigator?.userAgent || ''}|${(globalThis as any)?.navigator?.platform || ''}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ ch, 0x85ebca6b) >>> 0;
+  }
+  return `${platform}-${h1.toString(36)}${h2.toString(36).slice(0, 6)}`;
+};
+
+const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Promise<{
+  expoPushToken: string;
+  pushToken: string;
+  deviceId: string;
+  deviceModel: string;
+  platform: string;
+}> => {
+  const platform = Platform.OS;
+  const osVersion = String((Platform as any).Version || '');
+  const storageKey = 'picktimebook_device_uid_v2';
+  const legacyKeys = ['picktimebook_device_uid_v1', 'picktimebook_device_uid'];
+  let deviceId = '';
+
+  // 1. Recuperar ID guardado previamente en memoria / localStorage / AsyncStorage
+  try {
+    const gMap: Record<string, string> = (globalThis as any).__picktimeDeviceUid || {};
+    deviceId = gMap[storageKey] || legacyKeys.map((k) => gMap[k]).find(Boolean) || '';
+
+    if (!deviceId && Platform.OS === 'web' && typeof window !== 'undefined') {
+      deviceId =
+        window.localStorage?.getItem(storageKey) ||
+        legacyKeys.map((k) => window.localStorage?.getItem(k)).find(Boolean) ||
+        window.sessionStorage?.getItem(storageKey) ||
+        '';
+    }
+
+    if (!deviceId && Platform.OS !== 'web') {
+      try {
+        const AsyncStorageMod = require('@react-native-async-storage/async-storage');
+        const asyncStorage = AsyncStorageMod?.default || AsyncStorageMod;
+        if (asyncStorage && typeof asyncStorage.getItem === 'function') {
+          for (const k of [storageKey, ...legacyKeys]) {
+            const val = await asyncStorage.getItem(k);
+            if (val && String(val).trim()) {
+              deviceId = String(val).trim();
+              break;
+            }
+          }
+        }
+      } catch (_asErr) {}
+    }
+  } catch (_e) {}
+
+  // 2. Si el usuario ya tiene un push_token registrado en public.user_devices, reutilizarlo siempre
+  let existingDbToken = '';
+  let resolvedUid = targetUserId ? String(targetUserId).trim() : '';
+  if (!resolvedUid && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
+    try {
+      const { data: sessData } = await supabase.auth.getSession();
+      if (sessData?.session?.user?.id) {
+        resolvedUid = String(sessData.session.user.id).trim();
+      }
+    } catch (_sErr) {}
+  }
+
+  if (resolvedUid && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
+    try {
+      const { data: rows } = await supabase
+        .from('user_devices')
+        .select('push_token, device_model')
+        .eq('user_id', resolvedUid)
+        .not('push_token', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (rows && rows[0]?.push_token) {
+        existingDbToken = String(rows[0].push_token).trim();
+        const modelStr = String(rows[0]?.device_model || '');
+        const parenMatch = modelStr.match(/\(([^()]+)\)\s*$/);
+        if (parenMatch && parenMatch[1]) {
+          deviceId = parenMatch[1].trim();
+        }
+      }
+    } catch (_dbReadErr) {}
+  }
+
+  // 3. Si no había nada guardado, generar un ID estable determinístico del dispositivo (nunca aleatorio)
+  if (!deviceId) {
+    deviceId = buildDeterministicDeviceUid(platform, osVersion);
+  }
+
+  let injectedToken = String((globalThis as any).__EXPO_PUSH_TOKEN__ || '').trim();
+  if (!injectedToken && Platform.OS !== 'web') {
+    try {
+      const globalAny: any = globalThis as any;
+      const pushHelper = globalAny.__getRealExpoPushToken || globalAny.getExpoPushTokenAsync;
+      if (typeof pushHelper === 'function') {
+        const maybeToken = await pushHelper();
+        if (typeof maybeToken === 'string' && maybeToken.trim()) {
+          injectedToken = maybeToken.trim();
+        } else if (maybeToken?.data && String(maybeToken.data).trim()) {
+          injectedToken = String(maybeToken.data).trim();
+        }
+      }
+    } catch (_e) {}
+  }
+
+  const pushToken = injectedToken || existingDbToken || `ExponentPushToken[${deviceId}]`;
+  const deviceModel = `${platform === 'ios' ? 'iOS' : platform === 'android' ? 'Android' : 'Web'}${osVersion ? ` ${osVersion}` : ''} (${deviceId})`;
+
+  try {
+    const gMap: Record<string, string> = (globalThis as any).__picktimeDeviceUid || {};
+    (globalThis as any).__picktimeDeviceUid = {
+      ...gMap,
+      [storageKey]: deviceId,
+      picktimebook_device_uid_v1: deviceId,
+      picktimebook_device_uid: deviceId,
+    };
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.localStorage?.setItem(storageKey, deviceId);
+      window.localStorage?.setItem('picktimebook_device_uid_v1', deviceId);
+      window.localStorage?.setItem('picktimebook_device_uid', deviceId);
+      window.sessionStorage?.setItem(storageKey, deviceId);
+    } else {
+      try {
+        const AsyncStorageMod = require('@react-native-async-storage/async-storage');
+        const asyncStorage = AsyncStorageMod?.default || AsyncStorageMod;
+        if (asyncStorage && typeof asyncStorage.setItem === 'function') {
+          await asyncStorage.setItem(storageKey, deviceId);
+          await asyncStorage.setItem('picktimebook_device_uid_v1', deviceId);
+        }
+      } catch (_asSaveErr) {}
+    }
+  } catch (_e) {}
+
+  return {
+    expoPushToken: pushToken,
+    pushToken,
+    deviceId,
+    deviceModel,
+    platform,
+  };
+};
+
+// 🔍 Verifica si push_token ya existe en public.user_devices para ese usuario; si no existe, lo inserta
+const ensureDeviceRegisteredInUserDevices = async (params: {
+  apiFetchFn: (url: string, options?: RequestInit) => Promise<Response>;
+  userId?: string | null;
+  staffId?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  role?: 'staff' | 'client' | 'owner';
+  tenantId?: string | null;
+}) => {
+  const creds = await getCurrentDevicePushCredentials(params.userId);
+  const deviceModelLabel = `${params.role === 'staff' ? 'Staff' : 'Client'} Device (${creds.platform}) | ${creds.deviceModel}`;
+
+  const payload = {
+    userId: params.userId || undefined,
+    staffId: params.staffId || undefined,
+    phone: params.phone || undefined,
+    email: params.email || undefined,
+    role: params.role || 'staff',
+    tenantId: params.tenantId || undefined,
+    platform: creds.platform,
+    deviceId: creds.deviceId,
+    deviceModel: deviceModelLabel,
+    device_model: deviceModelLabel,
+    expoPushToken: creds.pushToken,
+    pushToken: creds.pushToken,
+    push_token: creds.pushToken,
+  };
+
+  let registeredViaApi = false;
+  for (const endpoint of ['/api/notifications/register-device', '/api/notifications/devices']) {
+    try {
+      const res = await params.apiFetchFn(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      if (res && res.ok) {
+        registeredViaApi = true;
+        break;
+      }
+    } catch (_e) {}
+  }
+
+  // Respaldo directo en Supabase sobre las columnas reales de public.user_devices: (id, user_id, push_token, device_model)
+  if (!registeredViaApi && supabaseUrl && !supabaseUrl.includes('tu-anon-key') && params.userId) {
+    try {
+      const { data: existingRows } = await supabase
+        .from('user_devices')
+        .select('id, push_token, device_model')
+        .eq('user_id', params.userId);
+
+      const alreadyExists = (existingRows || []).some(
+        (r: any) =>
+          String(r.push_token || '').trim() === creds.pushToken ||
+          (creds.deviceId && String(r.device_model || '').includes(creds.deviceId))
+      );
+
+      if (!alreadyExists) {
+        await supabase.from('user_devices').insert({
+          user_id: params.userId,
+          push_token: creds.pushToken,
+          device_model: deviceModelLabel,
+        });
+      }
+    } catch (_sbErr) {}
+  }
+
+  return creds;
+};
+
 // ==========================================
 // 💾 PERSISTENCIA DE SESIÓN DE LARGA DURACIÓN (iOS, ANDROID Y WEB — 6 MESES / 180 DÍAS)
 // ==========================================
@@ -1060,6 +1280,8 @@ export default function TenantDashboardScreen() {
   const handleStaffLogout = () => {
     setIsMechanicAuth(false);
     setPortalAccessRole('staff');
+    setAuthenticatedStaffMember(null);
+    setStaffLoginPhone('');
     setMechanicPin('');
     setIsMobileMenuOpen(false);
     setIsSupportModalOpen(false);
@@ -1095,6 +1317,9 @@ export default function TenantDashboardScreen() {
 
   const [isMechanicAuth, setIsMechanicAuth] = useState(false);
   const [portalAccessRole, setPortalAccessRole] = useState<'owner' | 'staff'>('staff');
+  const [authenticatedStaffMember, setAuthenticatedStaffMember] = useState<StaffInfo | null>(null);
+  const [staffLoginCountryCode, setStaffLoginCountryCode] = useState('+1');
+  const [staffLoginPhone, setStaffLoginPhone] = useState('');
   const [mechanicEmail, setMechanicEmail] = useState('');
   const [mechanicPin, setMechanicPin] = useState('');
   const [showMechanicPassword, setShowMechanicPassword] = useState(false);
@@ -1139,6 +1364,11 @@ export default function TenantDashboardScreen() {
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffCountryCode, setNewStaffCountryCode] = useState('+1');
   const [newStaffPhone, setNewStaffPhone] = useState('');
+  const [isStaffFormExpanded, setIsStaffFormExpanded] = useState(true);
+  const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
+  const [editStaffCountryCode, setEditStaffCountryCode] = useState('+1');
+  const [editStaffPhone, setEditStaffPhone] = useState('');
+  const [isSavingStaffPhone, setIsSavingStaffPhone] = useState(false);
   const [selectedStaffRole, setSelectedStaffRole] = useState('');
   const [customStaffRole, setCustomStaffRole] = useState('');
   const [isStaffRoleDropdownOpen, setIsStaffRoleDropdownOpen] = useState(false);
@@ -4223,14 +4453,25 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           appointmentDate: combinedDateTime, 
           notes: toTitleCase(quickNotes), 
           acceptedTerms: effectiveTermsAccepted,
+          expoPushToken: (await getCurrentDevicePushCredentials(clientExpedienteData?.client?.id || null)).expoPushToken,
+          deviceId: (await getCurrentDevicePushCredentials(clientExpedienteData?.client?.id || null)).deviceId,
           deviceInfo: {
             os: Platform.OS,
-            authProvider: bookingAuthMethod || 'manual'
+            authProvider: bookingAuthMethod || 'manual',
           },
           metadata: JSON.stringify(metadataObj)
         })
       });
       if (response.ok) {
+        const createdAptJson = await response.json().catch(() => ({}));
+        await ensureDeviceRegisteredInUserDevices({
+          apiFetchFn: apiFetch,
+          userId: createdAptJson?.userId || createdAptJson?.client?.id || clientExpedienteData?.client?.id || null,
+          phone: formattedPhone,
+          email: clientEmail.trim().toLowerCase() || null,
+          role: 'client',
+          tenantId: tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '')),
+        });
         await persistAuthenticatedClientSession({
           provider: bookingAuthMethod || 'manual',
           email: clientEmail.trim().toLowerCase(),
@@ -4416,6 +4657,58 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     } catch (err) { console.error(err); }
   };
 
+  const handleStartEditStaffPhone = (member: StaffInfo) => {
+    if (editingStaffId === member.id) {
+      setEditingStaffId(null);
+      setEditStaffPhone('');
+      return;
+    }
+    const rawPhone = String(member.phone || '').trim();
+    const matchedCountry = COUNTRY_CODES.find((c) => rawPhone.startsWith(c.code));
+    setEditingStaffId(member.id);
+    setEditStaffCountryCode(matchedCountry ? matchedCountry.code : '+1');
+    setEditStaffPhone(rawPhone.replace(/^\+\d+\s*/, ''));
+  };
+
+  const handleSaveStaffPhone = async (member: StaffInfo) => {
+    const cleanDigits = cleanPhoneDigits(editStaffPhone);
+    const formattedPhone = cleanDigits.length >= 7
+      ? (editStaffPhone.trim().startsWith('+') ? editStaffPhone.trim() : `${editStaffCountryCode} ${editStaffPhone.trim()}`)
+      : null;
+
+    if (editStaffPhone.trim() && cleanDigits.length < 7) {
+      alert(tr('Ingresa un número de teléfono válido de al menos 7 dígitos.', 'Enter a valid phone number with at least 7 digits.'));
+      return;
+    }
+
+    setIsSavingStaffPhone(true);
+    try {
+      const res = await apiFetch(`/api/staff/${member.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: member.name,
+          role: member.role,
+          phone: formattedPhone,
+          isActive: member.isActive ?? true,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const updatedMember = data?.member || { ...member, phone: formattedPhone };
+        setStaffList((prev) => prev.map((s) => (s.id === member.id ? { ...s, ...updatedMember, phone: formattedPhone } : s)));
+        setEditingStaffId(null);
+        setEditStaffPhone('');
+        alert(tr('✅ Teléfono actualizado y sincronizado con el usuario staff.', '✅ Phone number updated and synced with the staff user.'));
+      } else {
+        alert(tr('No se pudo actualizar el teléfono del miembro.', 'Could not update the staff member phone number.'));
+      }
+    } catch (_err) {
+      alert(tr('Error de red al actualizar el teléfono.', 'Network error updating phone number.'));
+    } finally {
+      setIsSavingStaffPhone(false);
+    }
+  };
+
   // 🔐 Actualizar el Código PIN de Empleados en tiempo real (revoca acceso inmediato al personal que se retira)
   const handleSaveStaffPin = async () => {
     const cleanPin = staffAccessPin.trim().replace(/\D/g, '');
@@ -4562,20 +4855,31 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     const allUnique = getMergedUniqueAppointments(todayOrders, upcomingOrders);
     const nowLocal = new Date();
     const todayLocalStr = `${nowLocal.getFullYear()}-${String(nowLocal.getMonth() + 1).padStart(2, '0')}-${String(nowLocal.getDate()).padStart(2, '0')}`;
+
+    const matchesStaffScope = (o: any) => {
+      if (portalAccessRole === 'owner' || !authenticatedStaffMember) return true;
+      const orderStaffId = String(o.staffId || o.metadata?.assignedStaffId || '').trim();
+      const orderStaffName = String(o.metadata?.assignedStaffName || o.staffName || '').trim().toLowerCase();
+      if (!orderStaffId && !orderStaffName) return true;
+      if (orderStaffId && orderStaffId === String(authenticatedStaffMember.id)) return true;
+      if (orderStaffName && orderStaffName === String(authenticatedStaffMember.name || '').trim().toLowerCase()) return true;
+      return false;
+    };
+
     if (agendaFilter === 'today') {
       return allUnique.filter((o: any) => {
         const dStr = o.metadata?.localDate || (o.appointmentDate ? String(o.appointmentDate).split('T')[0] : '');
-        return dStr === todayLocalStr;
+        return dStr === todayLocalStr && matchesStaffScope(o);
       });
     }
     if (agendaFilter === 'upcoming') {
       return allUnique.filter((o: any) => {
         const dStr = o.metadata?.localDate || (o.appointmentDate ? String(o.appointmentDate).split('T')[0] : '');
-        return dStr >= todayLocalStr;
+        return dStr >= todayLocalStr && matchesStaffScope(o);
       });
     }
-    return todayOrders;
-  }, [agendaFilter, todayOrders, upcomingOrders]);
+    return todayOrders.filter(matchesStaffScope);
+  }, [agendaFilter, todayOrders, upcomingOrders, portalAccessRole, authenticatedStaffMember]);
 
   const selectedOrderPhoneClean = cleanPhoneDigits(selectedOrder?.clientPhone);
   const selectedOrderEarnedCoupons = Number(selectedOrder?.clientMetadata?.earnedReferralDiscounts || 0);
@@ -6542,64 +6846,150 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
             {!isMechanicAuth ? (
               <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border, maxWidth: 460, alignSelf: 'center', width: '100%', alignItems: 'center', padding: isMobile ? 24 : 32 }]}>
                 <View style={{ width: 60, height: 60, borderRadius: 18, backgroundColor: `${brandColor}18`, borderWidth: 1, borderColor: `${brandColor}45`, alignItems: 'center', justifyContent: 'center', marginBottom: 14 }}>
-                  <Feather name="key" size={26} color={brandColor} />
+                  <Feather name="shield" size={26} color={brandColor} />
                 </View>
                 <Text style={{ fontSize: 24, fontWeight: '900', color: tColor.text, marginBottom: 6, textAlign: 'center' }}>
                   {tr(`Acceso Empleados (${staffTerm})`, `Employee Access (${staffTerm})`)}
                 </Text>
-                <Text style={{ color: tColor.muted, marginBottom: 24, textAlign: 'center', fontSize: 13.5, lineHeight: 19 }}>
+                <Text style={{ color: tColor.muted, marginBottom: 22, textAlign: 'center', fontSize: 13.5, lineHeight: 19 }}>
                   {tr(
-                    `Ingresa el código de acceso de empleados de ${tenantInfo?.name || 'este negocio'} para ver las citas en agenda y cerrar servicios.`,
-                    `Enter the employee access code for ${tenantInfo?.name || 'this business'} to view scheduled appointments and close orders.`
+                    `Valida tu teléfono autorizado y el código de acceso de ${tenantInfo?.name || 'este negocio'} para ver tu agenda y cerrar servicios.`,
+                    `Verify your authorized phone number and access code for ${tenantInfo?.name || 'this business'} to view your schedule and close orders.`
                   )}
                 </Text>
-                <TextInput
-                  style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, marginBottom: 16, width: '100%' }]}
-                  placeholder="••••"
-                  placeholderTextColor={tColor.muted}
-                  secureTextEntry
-                  keyboardType="numeric"
-                  maxLength={6}
-                  value={mechanicPin}
-                  onChangeText={(txt) => setMechanicPin(txt.replace(/\D/g, ''))}
-                />
+
+                <View style={{ width: '100%', marginBottom: 14 }}>
+                  <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                    {tr('TELÉFONO AUTORIZADO DEL EMPLEADO', 'AUTHORIZED EMPLOYEE PHONE')}
+                  </Text>
+                  <View style={{ flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(staffLoginPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 50, width: '100%' }}>
+                    <CountryCodeSelector value={staffLoginCountryCode} onChange={setStaffLoginCountryCode} tColor={tColor} width={105} />
+                    <TextInput
+                      style={{ flex: 1, color: tColor.text, paddingHorizontal: 14, fontSize: 16, fontWeight: '700', outlineStyle: 'none' } as any}
+                      placeholder="(909) 000-0000"
+                      placeholderTextColor={tColor.muted}
+                      keyboardType="phone-pad"
+                      value={staffLoginPhone}
+                      onChangeText={(txt) => setStaffLoginPhone(txt.replace(/[^0-9\s-]/g, ''))}
+                    />
+                  </View>
+                </View>
+
+                <View style={{ width: '100%', marginBottom: 18 }}>
+                  <Text style={[styles.inputLabel, { color: tColor.muted, marginBottom: 6 }]}>
+                    {tr('CÓDIGO DE INGRESO (PIN)', 'ACCESS CODE (PIN)')}
+                  </Text>
+                  <TextInput
+                    style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text, textAlign: 'center', fontSize: 24, letterSpacing: 8, width: '100%' }]}
+                    placeholder="••••"
+                    placeholderTextColor={tColor.muted}
+                    secureTextEntry
+                    keyboardType="numeric"
+                    maxLength={6}
+                    value={mechanicPin}
+                    onChangeText={(txt) => setMechanicPin(txt.replace(/\D/g, ''))}
+                  />
+                </View>
+
                 <TouchableOpacity
                   style={[styles.primaryButton, { backgroundColor: brandColor, width: '100%', marginBottom: 14 }]}
                   disabled={isAuthenticatingStaff}
                   onPress={async () => {
+                    const inputDigits = cleanPhoneDigits(staffLoginPhone);
                     const cleanPin = mechanicPin.trim();
-                    if (!cleanPin) {
-                      return alert(tr('Ingresa el código de acceso de empleado.', 'Enter the employee access code.'));
+                    if (inputDigits.length < 7) {
+                      return alert(tr('Ingresa tu número de teléfono autorizado.', 'Enter your authorized phone number.'));
                     }
+                    if (!cleanPin) {
+                      return alert(tr('Ingresa el código de ingreso de empleado.', 'Enter the employee access code.'));
+                    }
+
+                    const formattedLoginPhone = staffLoginPhone.trim().startsWith('+')
+                      ? staffLoginPhone.trim()
+                      : `${staffLoginCountryCode} ${staffLoginPhone.trim()}`;
+
                     setIsAuthenticatingStaff(true);
                     try {
-                      const configuredPin = localLoyalty?.staffPortalPin || (tenantInfo as any)?.portalPin || (tenantInfo as any)?.portal_pin;
-                      if (configuredPin) {
-                        if (cleanPin === String(configuredPin).trim()) {
-                          setPortalAccessRole('staff');
-                          setAgendaFilter('today');
-                          setIsMechanicAuth(true);
-                          setMechanicPin('');
-                        } else {
-                          alert(t.wrongPin);
+                      // 1. Verificar contra la lista de staff registrada y activa del negocio
+                      const matchedMember = staffList.find((m) => cleanPhoneDigits(m.phone) === inputDigits);
+                      if (staffList.some((m) => cleanPhoneDigits(m.phone).length >= 7)) {
+                        if (!matchedMember) {
+                          return alert(
+                            tr(
+                              'Este teléfono no está registrado como miembro autorizado en este negocio. Pide al dueño que agregue tu teléfono en Personal.',
+                              'This phone number is not registered as an authorized member at this business. Ask the owner to add your phone in Staff.'
+                            )
+                          );
                         }
-                      } else {
-                        const res = await apiFetch('/api/tenants/auth-staff', {
-                          method: 'POST',
-                          body: JSON.stringify({ password: cleanPin }),
-                        });
-                        const json = await res.json();
-                        if (res.ok && json.success) {
-                          setPortalAccessRole('staff');
-                          setAgendaFilter('today');
-                          setIsMechanicAuth(true);
-                          setMechanicPin('');
-                        } else {
-                          alert(json.message || t.wrongPin);
+                        if (matchedMember.isActive === false) {
+                          return alert(
+                            tr(
+                              'Tu usuario de empleado está INACTIVO. Contacta al administrador del negocio.',
+                              'Your employee account is INACTIVE. Contact the business administrator.'
+                            )
+                          );
                         }
                       }
-                    } catch (_e) {
-                      alert(tr('Error de conexión al validar el código.', 'Connection error validating access code.'));
+
+                      // 2. Validar PIN + teléfono en el backend (y registrar dispositivo si aplica)
+                      const configuredPin = localLoyalty?.staffPortalPin || (tenantInfo as any)?.portalPin || (tenantInfo as any)?.portal_pin;
+                      let isAuthorized = false;
+                      let resolvedMember: StaffInfo | null = matchedMember || null;
+
+                      const deviceCreds = await getCurrentDevicePushCredentials((matchedMember as any)?.userId || (matchedMember as any)?.user_id || null);
+                      let resolvedUserId: string | null = (resolvedMember as any)?.userId || (resolvedMember as any)?.user_id || null;
+
+                      try {
+                        const res = await apiFetch('/api/tenants/auth-staff', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            phone: formattedLoginPhone,
+                            password: cleanPin,
+                            pin: cleanPin,
+                            platform: deviceCreds.platform,
+                            deviceId: deviceCreds.deviceId,
+                            expoPushToken: deviceCreds.expoPushToken,
+                          }),
+                        });
+                        const json = await res.json().catch(() => ({}));
+                        if (res.ok && json.success) {
+                          isAuthorized = true;
+                          if (json.member) {
+                            resolvedMember = { ...resolvedMember, ...json.member };
+                          }
+                          resolvedUserId = json.userId || json.user?.id || (resolvedMember as any)?.userId || resolvedUserId;
+                        } else if (configuredPin && cleanPin === String(configuredPin).trim() && matchedMember && matchedMember.isActive !== false) {
+                          isAuthorized = true;
+                        } else {
+                          return alert(
+                            json.message ||
+                            tr('Teléfono no autorizado o código PIN incorrecto.', 'Unauthorized phone number or incorrect PIN code.')
+                          );
+                        }
+                      } catch (_netErr) {
+                        if (configuredPin && cleanPin === String(configuredPin).trim() && matchedMember && matchedMember.isActive !== false) {
+                          isAuthorized = true;
+                        } else {
+                          return alert(tr('Error de conexión al validar tus credenciales.', 'Connection error validating credentials.'));
+                        }
+                      }
+
+                      if (isAuthorized) {
+                        await ensureDeviceRegisteredInUserDevices({
+                          apiFetchFn: apiFetch,
+                          userId: resolvedUserId,
+                          staffId: resolvedMember?.id || null,
+                          phone: formattedLoginPhone,
+                          role: 'staff',
+                          tenantId: tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '')),
+                        });
+
+                        setAuthenticatedStaffMember(resolvedMember);
+                        setPortalAccessRole('staff');
+                        setAgendaFilter('today');
+                        setIsMechanicAuth(true);
+                        setMechanicPin('');
+                      }
                     } finally {
                       setIsAuthenticatingStaff(false);
                     }
@@ -6607,8 +6997,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 >
                   <Text style={styles.primaryButtonText}>
                     {isAuthenticatingStaff
-                      ? tr('Verificando código...', 'Verifying code...')
-                      : tr('Ver Agenda y Cerrar Citas', 'View Schedule & Close Orders')}
+                      ? tr('Validando identidad...', 'Verifying identity...')
+                      : tr('Validar e Ingresar a Agenda', 'Verify & Open Schedule')}
                   </Text>
                 </TouchableOpacity>
 
@@ -6633,7 +7023,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     <Text style={{ color: portalAccessRole === 'owner' ? '#10B981' : '#60A5FA', fontWeight: '900', fontSize: 12 }}>
                       {portalAccessRole === 'owner'
                         ? tr('MODO DUEÑO / ADMINISTRADOR (9 Módulos Activos)', 'OWNER / ADMIN MODE (All 9 Modules)')
-                        : tr(`MODO OPERATIVO ${staffTerm.toUpperCase()} (Agenda y Cierre POS)`, `STAFF MODE (${staffTerm} — Schedule & POS)`)}
+                        : tr(
+                            `${authenticatedStaffMember ? toTitleCase(authenticatedStaffMember.name).toUpperCase() + ' • ' : ''}MODO ${staffTerm.toUpperCase()} (Mi Agenda y Cierre POS)`,
+                            `${authenticatedStaffMember ? toTitleCase(authenticatedStaffMember.name).toUpperCase() + ' • ' : ''}STAFF MODE (${staffTerm} — Schedule & POS)`
+                          )}
                     </Text>
                   </View>
 
@@ -8907,8 +9300,35 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                     <View style={styles.bentoGrid}>
                       <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
-                        <Text style={[styles.cardTitle, { color: tColor.text }]}>➕ Registrar Miembro</Text>
-                        
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: isStaffFormExpanded ? 16 : 0, gap: 10 }}>
+                          <Text style={[styles.cardTitle, { color: tColor.text, marginBottom: 0 }]}>➕ Registrar Miembro</Text>
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            onPress={() => setIsStaffFormExpanded((prev) => !prev)}
+                            style={{
+                              paddingVertical: 7,
+                              paddingHorizontal: 12,
+                              borderRadius: 10,
+                              backgroundColor: isStaffFormExpanded ? `${brandColor}1E` : brandColor,
+                              borderWidth: 1,
+                              borderColor: brandColor,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 6,
+                            }}
+                          >
+                            <Feather
+                              name={isStaffFormExpanded ? 'chevron-up' : 'user-plus'}
+                              size={13}
+                              color={isStaffFormExpanded ? brandColor : '#FFFFFF'}
+                            />
+                            <Text style={{ color: isStaffFormExpanded ? brandColor : '#FFFFFF', fontSize: 12, fontWeight: '900' }}>
+                              {isStaffFormExpanded ? tr('Ocultar', 'Hide') : tr('Registrar', 'Register')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {isStaffFormExpanded ? (
                         <View style={{ flexDirection: 'column', gap: 16 } as any}>
                           <View>
                             <Text style={[styles.inputLabel, { color: tColor.muted }]}>Nombre Completo</Text>
@@ -9070,25 +9490,84 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             <Text style={styles.primaryButtonText}>Guardar en el Sistema</Text>
                           </TouchableOpacity>
                         </View>
+                        ) : null}
                       </View>
 
                       <View style={[styles.flexCard, { backgroundColor: tColor.card, borderColor: tColor.border, minWidth: isMobile ? '100%' : 320 }]}>
                         <Text style={[styles.cardTitle, { color: tColor.text }]}>📋 Personal Registrado ({staffList.length})</Text>
-                        <ScrollView style={{ maxHeight: 350 }} showsVerticalScrollIndicator={false}>
-                          {staffList.map((m, idx) => (
-                            <View key={`${m.id}-${idx}`} style={[styles.staffRow, { backgroundColor: tColor.input, borderColor: tColor.border }, !m.isActive ? { opacity: 0.6 } : {}]}>
-                              <View>
-                                <Text style={[styles.staffName, { color: tColor.text }, !m.isActive ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(m.name)}</Text>
-                                <Text style={[styles.staffRole, { color: brandColor }]}>{toTitleCase(m.role)}</Text>
-                                {m.phone ? (
-                                  <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 2 }}>📞 {m.phone}</Text>
+                        <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+                          {staffList.map((m, idx) => {
+                            const isEditingThis = editingStaffId === m.id;
+                            return (
+                              <View key={`${m.id}-${idx}`} style={{ backgroundColor: tColor.input, borderColor: isEditingThis ? brandColor : tColor.border, borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10, opacity: m.isActive === false ? 0.65 : 1 }}>
+                                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Text style={[styles.staffName, { color: tColor.text }, !m.isActive ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(m.name)}</Text>
+                                    <Text style={[styles.staffRole, { color: brandColor }]}>{toTitleCase(m.role)}</Text>
+                                    <Text style={{ color: m.phone ? tColor.muted : '#F59E0B', fontSize: 12, marginTop: 3, fontWeight: m.phone ? '600' : '800' }}>
+                                      {m.phone ? `📞 ${m.phone}` : tr('📞 Sin teléfono registrado', '📞 No phone registered')}
+                                    </Text>
+                                  </View>
+
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                    <TouchableOpacity
+                                      activeOpacity={0.85}
+                                      onPress={() => handleStartEditStaffPhone(m)}
+                                      style={{
+                                        paddingVertical: 6,
+                                        paddingHorizontal: 10,
+                                        borderRadius: 8,
+                                        backgroundColor: isEditingThis ? 'rgba(239, 68, 68, 0.14)' : `${brandColor}1E`,
+                                        borderWidth: 1,
+                                        borderColor: isEditingThis ? '#EF4444' : brandColor,
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        gap: 4,
+                                      }}
+                                    >
+                                      <Feather name={isEditingThis ? 'x' : 'phone'} size={12} color={isEditingThis ? '#EF4444' : brandColor} />
+                                      <Text style={{ color: isEditingThis ? '#EF4444' : brandColor, fontSize: 11.5, fontWeight: '900' }}>
+                                        {isEditingThis ? tr('Cerrar', 'Close') : tr('Teléfono', 'Phone')}
+                                      </Text>
+                                    </TouchableOpacity>
+
+                                    <TouchableOpacity style={m.isActive ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => toggleStaffStatus(m.id, m.isActive ?? true)}>
+                                      <Text style={m.isActive ? styles.activeStatusText : styles.inactiveStatusText}>{m.isActive ? 'ACTIVO' : 'INACTIVO'}</Text>
+                                    </TouchableOpacity>
+                                  </View>
+                                </View>
+
+                                {isEditingThis ? (
+                                  <View style={{ marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: tColor.border, gap: 10 }}>
+                                    <Text style={[styles.inputLabel, { color: brandColor, marginBottom: 0 }]}>
+                                      {tr('ACTUALIZAR TELÉFONO DEL MIEMBRO', 'UPDATE STAFF PHONE NUMBER')}
+                                    </Text>
+                                    <View style={{ flexDirection: 'row', backgroundColor: tColor.bg, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(editStaffPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 46 }}>
+                                      <CountryCodeSelector value={editStaffCountryCode} onChange={setEditStaffCountryCode} tColor={tColor} width={100} />
+                                      <TextInput
+                                        style={{ flex: 1, color: tColor.text, paddingHorizontal: 12, fontWeight: '700', outlineStyle: 'none' } as any}
+                                        placeholder="(909) 000-0000"
+                                        placeholderTextColor={tColor.muted}
+                                        keyboardType="phone-pad"
+                                        value={editStaffPhone}
+                                        onChangeText={(txt) => setEditStaffPhone(txt.replace(/[^0-9\s-]/g, ''))}
+                                      />
+                                    </View>
+                                    <TouchableOpacity
+                                      activeOpacity={0.85}
+                                      disabled={isSavingStaffPhone}
+                                      onPress={() => handleSaveStaffPhone(m)}
+                                      style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 11, borderRadius: 10 }]}
+                                    >
+                                      <Text style={[styles.primaryButtonText, { fontSize: 13 }]}>
+                                        {isSavingStaffPhone ? tr('Guardando...', 'Saving...') : tr('💾 Guardar Teléfono', '💾 Save Phone')}
+                                      </Text>
+                                    </TouchableOpacity>
+                                  </View>
                                 ) : null}
                               </View>
-                              <TouchableOpacity style={m.isActive ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => toggleStaffStatus(m.id, m.isActive ?? true)}>
-                                <Text style={m.isActive ? styles.activeStatusText : styles.inactiveStatusText}>{m.isActive ? 'ACTIVO' : 'INACTIVO'}</Text>
-                              </TouchableOpacity>
-                            </View>
-                          ))}
+                            );
+                          })}
                         </ScrollView>
                       </View>
                     </View>
