@@ -162,7 +162,7 @@ export async function notifyTenantPush(
     if (isValidUuid) {
       const cleanId = targetStaffOrUserId!.trim();
 
-      // 1) Buscar trabajador/barbero en public.staff por id o por user_id si existe
+      // 1) Buscar trabajador/barbero en public.staff por id o por user_id
       const staffLookup = await db.execute(sql`
         SELECT *
         FROM public.staff
@@ -217,7 +217,7 @@ export async function notifyTenantPush(
           INNER JOIN public.users u ON u.id = d.user_id
           WHERE d.is_active = TRUE
             AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
-            AND LOWER(REGEXP_REPLACE(TRIM(u.name), '\s+', ' ', 'g')) = LOWER(REGEXP_REPLACE(TRIM(${staffName}), '\s+', ' ', 'g'))
+            AND LOWER(REGEXP_REPLACE(TRIM(u.name), '\\s+', ' ', 'g')) = LOWER(REGEXP_REPLACE(TRIM(${staffName}), '\\s+', ' ', 'g'))
             AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
         `);
         const matchedRows = Array.isArray(matchedUsersRes) ? matchedUsersRes : (matchedUsersRes as any).rows || [];
@@ -226,15 +226,13 @@ export async function notifyTenantPush(
         });
       }
 
-      // Revisión directa por user_id si coincide con un usuario staff/owner
+      // Revisión directa por user_id si coincide con un usuario en user_devices
       if (tokenSet.size === 0) {
         const directUserRes = await db.execute(sql`
           SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
           FROM public.user_devices d
-          LEFT JOIN public.users u ON u.id = d.user_id
           WHERE d.is_active = TRUE
             AND d.user_id = ${cleanId}::uuid
-            AND COALESCE(u.role, 'staff') <> 'client'
             AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
         `);
         const directRows = Array.isArray(directUserRes) ? directUserRes : (directUserRes as any).rows || [];
@@ -261,6 +259,7 @@ export async function notifyTenantPush(
       });
     }
 
+    console.log(`📲 [PUSH STAFF/TENANT] tenant=${tenantId} | target=${targetStaffOrUserId || 'none'} | tokens=${tokenSet.size}`);
     await sendExpoPushInBatches([...tokenSet], payload, { tenantId, eventType: String(payload.data?.eventType || 'appointment') });
   } catch (err) {
     console.warn('⚠️ Error notifyTenantPush:', err);
