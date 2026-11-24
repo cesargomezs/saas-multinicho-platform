@@ -142,9 +142,86 @@ export async function sendExpoPushInBatches(
     await db.execute(sql`
       UPDATE public.user_devices
       SET is_active = FALSE, last_used_at = NOW()
-      WHERE push_token = ${dead}
+      WHERE push_token = ${dead} OR expo_push_token = ${dead}
+    `).catch(() => {});
+    await db.execute(sql`
+      UPDATE public.device_push_tokens
+      SET is_active = FALSE, updated_at = NOW()
+      WHERE expo_push_token = ${dead}
     `).catch(() => {});
   }
+}
+
+async function collectActiveExpoTokensFromTables(opts: {
+  tenantId?: string | null;
+  userId?: string | null;
+  staffOnlyFallback?: boolean;
+}): Promise<string[]> {
+  const tokens = new Set<string>();
+  const cleanTenant = opts.tenantId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.tenantId.trim())
+    ? opts.tenantId.trim()
+    : null;
+  const cleanUser = opts.userId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.userId.trim())
+    ? opts.userId.trim()
+    : null;
+
+  const addRows = (res: any, colName = 'push_token') => {
+    const rows = Array.isArray(res) ? res : (res as any)?.rows || [];
+    for (const r of rows) {
+      const val = String(r?.[colName] || r?.expo_push_token || r?.push_token || '').trim();
+      if (val.startsWith('ExponentPushToken[')) {
+        tokens.add(val);
+      }
+    }
+  };
+
+  try {
+    if (cleanUser) {
+      const udByUser = await db.execute(sql`
+        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+        FROM public.user_devices d
+        WHERE d.is_active = TRUE
+          AND d.user_id = ${cleanUser}::uuid
+          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+      `).catch(() => ({ rows: [] }));
+      addRows(udByUser);
+
+      const dptByUser = await db.execute(sql`
+        SELECT dp.expo_push_token AS push_token
+        FROM public.device_push_tokens dp
+        WHERE dp.is_active = TRUE
+          AND dp.user_id = ${cleanUser}::uuid
+          AND dp.expo_push_token LIKE 'ExponentPushToken[%';
+      `).catch(() => ({ rows: [] }));
+      addRows(dptByUser);
+    }
+
+    if (cleanTenant && (opts.staffOnlyFallback || !cleanUser)) {
+      const udByTenant = await db.execute(sql`
+        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
+        FROM public.user_devices d
+        LEFT JOIN public.users u ON u.id = d.user_id
+        WHERE d.is_active = TRUE
+          AND (d.tenant_id = ${cleanTenant}::uuid OR u.tenant_id = ${cleanTenant}::uuid)
+          ${opts.staffOnlyFallback ? sql`AND COALESCE(u.role, 'staff') <> 'client'` : sql``}
+          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
+      `).catch(() => ({ rows: [] }));
+      addRows(udByTenant);
+
+      const dptByTenant = await db.execute(sql`
+        SELECT dp.expo_push_token AS push_token
+        FROM public.device_push_tokens dp
+        LEFT JOIN public.users u ON u.id = dp.user_id
+        WHERE dp.is_active = TRUE
+          AND (dp.tenant_id = ${cleanTenant}::uuid OR u.tenant_id = ${cleanTenant}::uuid)
+          ${opts.staffOnlyFallback ? sql`AND COALESCE(u.role, dp.role, 'staff') <> 'client'` : sql``}
+          AND dp.expo_push_token LIKE 'ExponentPushToken[%';
+      `).catch(() => ({ rows: [] }));
+      addRows(dptByTenant);
+    }
+  } catch (_err) {}
+
+  return [...tokens];
 }
 
 export async function notifyTenantPush(
@@ -162,7 +239,6 @@ export async function notifyTenantPush(
     if (isValidUuid) {
       const cleanId = targetStaffOrUserId!.trim();
 
-      // 1) Buscar trabajador/barbero en public.staff por id o por user_id
       const staffLookup = await db.execute(sql`
         SELECT *
         FROM public.staff
@@ -179,20 +255,10 @@ export async function notifyTenantPush(
       const linkedStaffUserId = staffRec?.user_id ? String(staffRec.user_id).trim() : '';
 
       if (linkedStaffUserId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(linkedStaffUserId)) {
-        const byLinkedUserRes = await db.execute(sql`
-          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
-          FROM public.user_devices d
-          WHERE d.is_active = TRUE
-            AND d.user_id = ${linkedStaffUserId}::uuid
-            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-        `);
-        const linkedRows = Array.isArray(byLinkedUserRes) ? byLinkedUserRes : (byLinkedUserRes as any).rows || [];
-        linkedRows.forEach((r: any) => {
-          if (r?.push_token) tokenSet.add(String(r.push_token));
-        });
+        const linkedTokens = await collectActiveExpoTokensFromTables({ tenantId, userId: linkedStaffUserId });
+        linkedTokens.forEach((t) => tokenSet.add(t));
       }
 
-      // Cruce por teléfono (últimos 10 dígitos) en public.users
       if (tokenSet.size === 0 && staffPhoneDigits.length >= 7) {
         const byPhoneRes = await db.execute(sql`
           SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
@@ -202,14 +268,27 @@ export async function notifyTenantPush(
             AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
             AND RIGHT(regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g'), 10) = ${staffPhoneDigits}
             AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-        `);
+        `).catch(() => ({ rows: [] }));
         const phoneRows = Array.isArray(byPhoneRes) ? byPhoneRes : (byPhoneRes as any).rows || [];
         phoneRows.forEach((r: any) => {
           if (r?.push_token) tokenSet.add(String(r.push_token));
         });
+
+        const dptPhoneRes = await db.execute(sql`
+          SELECT dp.expo_push_token AS push_token
+          FROM public.device_push_tokens dp
+          INNER JOIN public.users u ON u.id = dp.user_id
+          WHERE dp.is_active = TRUE
+            AND (dp.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+            AND RIGHT(regexp_replace(COALESCE(u.phone, ''), '[^0-9]', '', 'g'), 10) = ${staffPhoneDigits}
+            AND dp.expo_push_token LIKE 'ExponentPushToken[%';
+        `).catch(() => ({ rows: [] }));
+        const dptPhoneRows = Array.isArray(dptPhoneRes) ? dptPhoneRes : (dptPhoneRes as any).rows || [];
+        dptPhoneRows.forEach((r: any) => {
+          if (r?.push_token) tokenSet.add(String(r.push_token));
+        });
       }
 
-      // Cruce secundario por nombre normalizado en public.users
       if (tokenSet.size === 0 && staffName) {
         const matchedUsersRes = await db.execute(sql`
           SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
@@ -219,44 +298,42 @@ export async function notifyTenantPush(
             AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
             AND LOWER(REGEXP_REPLACE(TRIM(u.name), '\\s+', ' ', 'g')) = LOWER(REGEXP_REPLACE(TRIM(${staffName}), '\\s+', ' ', 'g'))
             AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-        `);
+        `).catch(() => ({ rows: [] }));
         const matchedRows = Array.isArray(matchedUsersRes) ? matchedUsersRes : (matchedUsersRes as any).rows || [];
         matchedRows.forEach((r: any) => {
           if (r?.push_token) tokenSet.add(String(r.push_token));
         });
-      }
 
-      // Revisión directa por user_id si coincide con un usuario en user_devices
-      if (tokenSet.size === 0) {
-        const directUserRes = await db.execute(sql`
-          SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
-          FROM public.user_devices d
-          WHERE d.is_active = TRUE
-            AND d.user_id = ${cleanId}::uuid
-            AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-        `);
-        const directRows = Array.isArray(directUserRes) ? directUserRes : (directUserRes as any).rows || [];
-        directRows.forEach((r: any) => {
+        const dptNameRes = await db.execute(sql`
+          SELECT dp.expo_push_token AS push_token
+          FROM public.device_push_tokens dp
+          INNER JOIN public.users u ON u.id = dp.user_id
+          WHERE dp.is_active = TRUE
+            AND (dp.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
+            AND LOWER(REGEXP_REPLACE(TRIM(u.name), '\\s+', ' ', 'g')) = LOWER(REGEXP_REPLACE(TRIM(${staffName}), '\\s+', ' ', 'g'))
+            AND dp.expo_push_token LIKE 'ExponentPushToken[%';
+        `).catch(() => ({ rows: [] }));
+        const dptNameRows = Array.isArray(dptNameRes) ? dptNameRes : (dptNameRes as any).rows || [];
+        dptNameRows.forEach((r: any) => {
           if (r?.push_token) tokenSet.add(String(r.push_token));
         });
       }
+
+      if (tokenSet.size === 0) {
+        const directTokens = await collectActiveExpoTokensFromTables({ tenantId, userId: cleanId });
+        directTokens.forEach((t) => tokenSet.add(t));
+      }
     }
 
-    // Fallback a dispositivos activos del staff/dueño del negocio si el trabajador asignado aún no tiene token propio
     if (tokenSet.size === 0) {
-      const devRes = await db.execute(sql`
-        SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
-        FROM public.user_devices d
-        LEFT JOIN public.users u ON u.id = d.user_id
-        WHERE d.is_active = TRUE
-          AND (d.tenant_id = ${tenantId}::uuid OR u.tenant_id = ${tenantId}::uuid)
-          AND COALESCE(u.role, 'staff') <> 'client'
-          AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-      `);
-      const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
-      devRows.forEach((r: any) => {
-        if (r?.push_token) tokenSet.add(String(r.push_token));
-      });
+      const fallbackTokens = await collectActiveExpoTokensFromTables({ tenantId, staffOnlyFallback: true });
+      fallbackTokens.forEach((t) => tokenSet.add(t));
+    }
+
+    // Si aún no hay tokens marcados como staff/owner en el tenant, revisamos cualquier token activo del tenant en ambas tablas
+    if (tokenSet.size === 0) {
+      const anyTenantTokens = await collectActiveExpoTokensFromTables({ tenantId, staffOnlyFallback: false });
+      anyTenantTokens.forEach((t) => tokenSet.add(t));
     }
 
     console.log(`📲 [PUSH STAFF/TENANT] tenant=${tenantId} | target=${targetStaffOrUserId || 'none'} | tokens=${tokenSet.size}`);
@@ -274,15 +351,8 @@ export async function notifyClientPush(
 ): Promise<void> {
   if (!tenantId || !clientUserId) return;
   try {
-    const res = await db.execute(sql`
-      SELECT COALESCE(d.expo_push_token, d.push_token) AS push_token
-      FROM public.user_devices d
-      WHERE d.is_active = TRUE
-        AND d.user_id = ${clientUserId}::uuid
-        AND COALESCE(d.expo_push_token, d.push_token) LIKE 'ExponentPushToken[%';
-    `);
-    const rows = Array.isArray(res) ? res : (res as any).rows || [];
-    const tokens = rows.map((r: any) => String(r.push_token || '').trim()).filter(Boolean);
+    const tokens = await collectActiveExpoTokensFromTables({ tenantId, userId: clientUserId });
+    console.log(`📲 [PUSH CLIENT] tenant=${tenantId} | user=${clientUserId} | tokens=${tokens.length}`);
     await sendExpoPushInBatches(tokens, payload, { tenantId, eventType });
   } catch (err) {
     console.warn('⚠️ Error notifyClientPush:', err);
