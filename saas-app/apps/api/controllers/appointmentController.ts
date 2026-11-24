@@ -3743,7 +3743,7 @@ export async function updateClientProfile(req: Request, res: Response) {
 let reminderCronInterval: ReturnType<typeof setInterval> | null = null;
 let isReminderCronRunning = false;
 
-export async function runSixHourAppointmentRemindersJob(): Promise<{ processed: number; sent: number }> {
+export async function runSixHourAppointmentRemindersJob(options?: { forceAllActive?: boolean }): Promise<{ processed: number; sent: number }> {
   if (isReminderCronRunning) return { processed: 0, sent: 0 };
   isReminderCronRunning = true;
   let processed = 0;
@@ -3751,9 +3751,9 @@ export async function runSixHourAppointmentRemindersJob(): Promise<{ processed: 
 
   try {
     const nowMs = Date.now();
-    // Ventana objetivo: citas entre 5.5h y 6.5h en el futuro (evaluado cada 5 min)
-    const minFutureMs = nowMs + 5 * 60 * 60 * 1000;
-    const maxFutureMs = nowMs + 7 * 60 * 60 * 1000;
+    const forceAllActive = Boolean(options?.forceAllActive);
+    const minFutureMs = forceAllActive ? nowMs - 24 * 60 * 60 * 1000 : nowMs + 5 * 60 * 60 * 1000;
+    const maxFutureMs = forceAllActive ? nowMs + 7 * 24 * 60 * 60 * 1000 : nowMs + 7 * 60 * 60 * 1000;
 
     const candidateRows = await db
       .select({
@@ -3778,13 +3778,13 @@ export async function runSixHourAppointmentRemindersJob(): Promise<{ processed: 
       const aptObj = row.apt;
       const meta = safeParseJSON(aptObj.mediaAndReports);
 
-      if (meta?.reminder6hSent === true || meta?.attendanceConfirmed === true) {
+      if (!forceAllActive && (meta?.reminder6hSent === true || meta?.attendanceConfirmed === true)) {
         continue;
       }
 
       const scheduledMs = new Date(aptObj.scheduledAt).getTime();
       const hoursUntil = (scheduledMs - nowMs) / (1000 * 60 * 60);
-      if (hoursUntil < 5.25 || hoursUntil > 6.75) {
+      if (!forceAllActive && (hoursUntil < 5.25 || hoursUntil > 6.75)) {
         continue;
       }
 
@@ -3839,6 +3839,7 @@ export async function runSixHourAppointmentRemindersJob(): Promise<{ processed: 
       sent += 1;
     }
 
+    console.log(`⏰ [CRON 6H] Revisadas: ${processed} | Enviadas: ${sent} | forceAllActive=${forceAllActive}`);
     return { processed, sent };
   } catch (cronErr) {
     console.warn('⚠️ Error ejecutando Cron de recordatorios 6h:', cronErr);

@@ -88,7 +88,12 @@ import {
   getActiveLegalDocument,
   authenticateClientUser,
   updateClientProfile,           // 👈 Actualizar nombre y teléfono en BD
-  registerDevicePushToken
+  registerDevicePushToken,
+  startAppointmentRemindersCron,
+  runSixHourAppointmentRemindersJob,
+  notifyClientPush,
+  notifyTenantPush,
+  sendTelegramNotification
 } from '../controllers/appointmentController';
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
@@ -301,9 +306,59 @@ app.get('/api/campaigns', getPushCampaigns);
 app.post('/api/campaigns', createPushCampaign);
 app.post('/api/reviews', saveClientReview);
 
-// 5. Levantar el Servidor y sincronizar BD
+// Rutas de prueba (Cron 6h + Telegram + Push)
+app.post('/api/dev/run-reminders-cron', async (req, res) => {
+  const forceAllActive = Boolean(req.body?.forceAllActive);
+  const stats = await runSixHourAppointmentRemindersJob({ forceAllActive });
+  return res.json({ success: true, forceAllActive, ...stats });
+});
+
+app.post('/api/dev/test-notifications', async (req, res) => {
+  const { tenantId, clientUserId, staffId, clientName, serviceName, whenLabel } = req.body || {};
+  if (!tenantId) {
+    return res.status(400).json({ success: false, message: 'Falta tenantId' });
+  }
+  const cName = clientName || 'Cliente Prueba';
+  const sName = serviceName || 'Corte + Barba';
+  const whenStr = whenLabel || 'En ~6 horas';
+
+  await Promise.allSettled([
+    sendTelegramNotification(
+      `💈 <b>[PRUEBA] Cita en Barbería</b>\n👤 <b>Cliente:</b> ${cName}\n✂️ <b>Servicio:</b> ${sName}\n🕒 <b>Horario:</b> ${whenStr}`,
+      tenantId,
+      'status'
+    ),
+    clientUserId
+      ? notifyClientPush(
+          tenantId,
+          clientUserId,
+          {
+            title: '⏰ Recordatorio de tu Cita',
+            body: `Hola ${cName}, tienes ${sName} (${whenStr}).`,
+            data: { tenantId, eventType: 'dev_test_client' },
+          },
+          'dev_test_client'
+        )
+      : Promise.resolve(),
+    notifyTenantPush(
+      tenantId,
+      {
+        title: `✂️ Cita asignada: ${cName}`,
+        body: `${sName} • ${whenStr}`,
+        data: { tenantId, staffId: staffId || null, eventType: 'dev_test_staff' },
+      },
+      staffId || null
+    ),
+  ]);
+
+  return res.json({ success: true, message: 'Prueba ejecutada (Telegram si aplica + Push cliente + Push trabajador).' });
+});
+
+// 5. Levantar el Servidor, sincronizar BD y arrancar Cron de recordatorios
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor ejecutándose en http://127.0.0.1:${PORT}`);
-  ensureMultinicheDatabaseReady();
+  ensureMultinicheDatabaseReady().finally(() => {
+    startAppointmentRemindersCron();
+  });
 });
