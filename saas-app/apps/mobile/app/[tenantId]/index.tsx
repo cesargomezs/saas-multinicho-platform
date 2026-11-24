@@ -747,7 +747,7 @@ interface TelegramChannelConfig { isActive?: boolean; channelName?: string; chat
 interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; telegramConfig?: TelegramChannelConfig; staffPortalPin?: string; }
 interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
 interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
-interface StaffInfo { id: string; name: string; role: string; isActive?: boolean; }
+interface StaffInfo { id: string; name: string; phone?: string | null; role: string; isActive?: boolean; }
 interface ReportItem { id: string; date?: string; createdAt?: string; plate?: string; clientName?: string; service?: string; mechanicId?: string; mechanicName?: string; cost?: number; finalCost?: number | string; status?: string; mechanicNotes?: string; notes?: string; _empty?: boolean; }
 
 // ==========================================
@@ -1137,6 +1137,8 @@ export default function TenantDashboardScreen() {
   const catalogInputRef = useRef<HTMLInputElement>(null); 
 
   const [newStaffName, setNewStaffName] = useState('');
+  const [newStaffCountryCode, setNewStaffCountryCode] = useState('+1');
+  const [newStaffPhone, setNewStaffPhone] = useState('');
   const [selectedStaffRole, setSelectedStaffRole] = useState('');
   const [customStaffRole, setCustomStaffRole] = useState('');
   const [isStaffRoleDropdownOpen, setIsStaffRoleDropdownOpen] = useState(false);
@@ -4386,12 +4388,22 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     if (!newStaffName || (!selectedStaffRole && !customStaffRole)) return;
     const finalRole = selectedStaffRole === 'custom' ? toTitleCase(customStaffRole.trim()) : selectedStaffRole;
     const finalName = toTitleCase(newStaffName.trim());
+    const cleanDigits = cleanPhoneDigits(newStaffPhone);
+    const formattedStaffPhone = cleanDigits.length >= 7
+      ? (newStaffPhone.trim().startsWith('+') ? newStaffPhone.trim() : `${newStaffCountryCode} ${newStaffPhone.trim()}`)
+      : null;
     try {
-      const res = await apiFetch('/api/staff', { method: 'POST', body: JSON.stringify({ name: finalName, role: finalRole }) });
+      const res = await apiFetch('/api/staff', {
+        method: 'POST',
+        body: JSON.stringify({ name: finalName, phone: formattedStaffPhone, role: finalRole })
+      });
       if (res.ok) {
         const data = await res.json();
-        setStaffList([...staffList, data.member || { id: Date.now().toString(), name: finalName, role: finalRole, isActive: true }]);
-        setNewStaffName(''); setSelectedStaffRole(''); setCustomStaffRole(''); setIsStaffRoleDropdownOpen(false);
+        setStaffList([
+          ...staffList,
+          data.member || { id: Date.now().toString(), name: finalName, phone: formattedStaffPhone, role: finalRole, isActive: true }
+        ]);
+        setNewStaffName(''); setNewStaffPhone(''); setSelectedStaffRole(''); setCustomStaffRole(''); setIsStaffRoleDropdownOpen(false);
       }
     } catch (err) { alert('Error guardando staff'); }
   };
@@ -8902,6 +8914,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             <Text style={[styles.inputLabel, { color: tColor.muted }]}>Nombre Completo</Text>
                             <TextInput style={[styles.formInput, { backgroundColor: tColor.input, borderColor: tColor.border, color: tColor.text }]} placeholder="Ej: Andy Perez" placeholderTextColor={tColor.muted} value={newStaffName} onChangeText={text => setNewStaffName(toTitleCase(text))} />
                           </View>
+
+                          <View>
+                            <Text style={[styles.inputLabel, { color: tColor.muted }]}>Teléfono (Para asociar y ver agenda)</Text>
+                            <View style={{ flexDirection: 'row', backgroundColor: tColor.input, borderRadius: 12, borderWidth: 1, borderColor: cleanPhoneDigits(newStaffPhone).length >= 7 ? '#10B981' : tColor.border, overflow: 'hidden', minHeight: 48 }}>
+                              <CountryCodeSelector value={newStaffCountryCode} onChange={setNewStaffCountryCode} tColor={tColor} width={105} />
+                              <TextInput
+                                style={{ flex: 1, color: tColor.text, padding: 14, fontWeight: '700', outlineStyle: 'none' } as any}
+                                placeholder="(909) 000-0000"
+                                placeholderTextColor={tColor.muted}
+                                keyboardType="phone-pad"
+                                value={newStaffPhone}
+                                onChangeText={text => setNewStaffPhone(text.replace(/[^0-9\s-]/g, ''))}
+                              />
+                            </View>
+                          </View>
                           
                           <View>
                             <Text style={[styles.inputLabel, { color: tColor.muted }]}>Especialidad / Cargo</Text>
@@ -9053,6 +9080,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               <View>
                                 <Text style={[styles.staffName, { color: tColor.text }, !m.isActive ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(m.name)}</Text>
                                 <Text style={[styles.staffRole, { color: brandColor }]}>{toTitleCase(m.role)}</Text>
+                                {m.phone ? (
+                                  <Text style={{ color: tColor.muted, fontSize: 12, marginTop: 2 }}>📞 {m.phone}</Text>
+                                ) : null}
                               </View>
                               <TouchableOpacity style={m.isActive ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => toggleStaffStatus(m.id, m.isActive ?? true)}>
                                 <Text style={m.isActive ? styles.activeStatusText : styles.inactiveStatusText}>{m.isActive ? 'ACTIVO' : 'INACTIVO'}</Text>
