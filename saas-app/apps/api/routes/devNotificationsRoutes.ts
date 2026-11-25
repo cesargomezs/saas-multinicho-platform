@@ -32,7 +32,7 @@ devRouter.post('/dev/test-notifications', async (req, res) => {
   const sName = serviceName || 'Corte + Barba';
   const whenStr = whenLabel || 'En ~6 horas';
 
-  console.log('[DEV-NOTIF] test-notifications start:', { tenantId, clientUserId, staffId, cName, sName, whenStr });
+  console.log('[DEV-NOTIF] test-notifications start:', JSON.stringify({ tenantId, clientUserId, staffId, cName, sName, whenStr }));
 
   const settled = await Promise.allSettled([
     sendTelegramNotification(
@@ -73,7 +73,7 @@ devRouter.post('/dev/test-notifications', async (req, res) => {
 
   return res.json({
     success: true,
-    message: 'Prueba ejecutada. Revisa debugTrace para ver el resultado de cada canal.',
+    message: 'Prueba ejecutada. Revisa debugTrace y los logs del servidor para ver dónde se queda.',
     debugTrace,
   });
 });
@@ -91,7 +91,7 @@ devRouter.post('/dev/notify-assigned', async (req, res) => {
   const srvLabel = serviceName || 'Servicio';
   const whenStr = [appointmentDate, appointmentTime].filter(Boolean).join(' • ') || 'Hoy';
 
-  console.log('[DEV-NOTIF] notify-assigned:', { tenantId, staffId, sLabel, cLabel, srvLabel, whenStr });
+  console.log('[DEV-NOTIF] notify-assigned:', JSON.stringify({ tenantId, staffId, sLabel, cLabel, srvLabel, whenStr }));
 
   const settled = await Promise.allSettled([
     sendTelegramNotification(
@@ -116,6 +116,8 @@ devRouter.post('/dev/notify-assigned', async (req, res) => {
     value: item.status === 'fulfilled' ? item.value : String((item as PromiseRejectedResult).reason || 'error'),
   }));
 
+  console.log('[DEV-NOTIF] notify-assigned trace:', JSON.stringify(debugTrace));
+
   return res.json({ success: true, eventType: 'assigned', debugTrace });
 });
 
@@ -133,7 +135,7 @@ devRouter.post('/dev/notify-cancelled', async (req, res) => {
   const whenStr = [appointmentDate, appointmentTime].filter(Boolean).join(' • ') || 'Hoy';
   const reasonLine = reason ? `\n📝 <b>Motivo:</b> ${reason}` : '';
 
-  console.log('[DEV-NOTIF] notify-cancelled:', { tenantId, staffId, sLabel, cLabel, srvLabel, whenStr, reason });
+  console.log('[DEV-NOTIF] notify-cancelled:', JSON.stringify({ tenantId, staffId, sLabel, cLabel, srvLabel, whenStr, reason }));
 
   const settled = await Promise.allSettled([
     sendTelegramNotification(
@@ -158,6 +160,8 @@ devRouter.post('/dev/notify-cancelled', async (req, res) => {
     value: item.status === 'fulfilled' ? item.value : String((item as PromiseRejectedResult).reason || 'error'),
   }));
 
+  console.log('[DEV-NOTIF] notify-cancelled trace:', JSON.stringify(debugTrace));
+
   return res.json({ success: true, eventType: 'cancelled', debugTrace });
 });
 
@@ -176,12 +180,15 @@ devRouter.post(['/notifications/staff-event', '/notifications/send'], async (req
     const srvLabel = body.serviceName || 'Servicio';
     const whenStr = [body.appointmentDate, body.appointmentTime].filter(Boolean).join(' • ') || 'Hoy';
 
-    console.log('[DEV-NOTIF] staff-event/send:', {
-      tenantId,
-      eventType: body.eventType,
-      staffId: body.staffId,
-      pushTokensCount: Array.isArray(body.pushTokens) ? body.pushTokens.length : 0,
-    });
+    console.log(
+      '[DEV-NOTIF] staff-event/send:',
+      JSON.stringify({
+        tenantId,
+        eventType: body.eventType,
+        staffId: body.staffId,
+        pushTokensCount: Array.isArray(body.pushTokens) ? body.pushTokens.length : 0,
+      })
+    );
 
     const tgText = isCancelled
       ? `❌ <b>Cita Cancelada (${sLabel})</b>\n👤 <b>Cliente:</b> ${cLabel}\n✂️ <b>Servicio:</b> ${srvLabel}\n🕒 <b>Horario:</b> ${whenStr}${body.reason ? `\n📝 <b>Motivo:</b> ${body.reason}` : ''}`
@@ -212,6 +219,8 @@ devRouter.post(['/notifications/staff-event', '/notifications/send'], async (req
       status: item.status,
       value: item.status === 'fulfilled' ? item.value : String((item as PromiseRejectedResult).reason || 'error'),
     }));
+
+    console.log('[DEV-NOTIF] staff-event/send trace:', JSON.stringify(debugTrace));
 
     return res.json({ success: true, debugTrace });
   } catch (err: any) {
