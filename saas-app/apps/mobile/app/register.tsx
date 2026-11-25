@@ -1,7 +1,10 @@
 'use client';
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator, Share } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator, Share, Linking } from 'react-native';
+import * as WebBrowser from 'expo-web-browser';
 import { useRouter } from 'expo-router';
+
+try { WebBrowser.maybeCompleteAuthSession(); } catch (_wbErr) {}
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
 
@@ -307,86 +310,238 @@ export default function B2BRegistrationScreen() {
   };
 
   // 🔐 Función para autenticar con Apple o Google (vía Supabase OAuth / Nativo) o continuar con correo y contraseña
+  const finalizeSocialSessionInRegister = async (
+    authUser: any,
+    provider: 'apple' | 'google',
+    mode: 'register' | 'login'
+  ) => {
+    const resolvedEmail = String(authUser?.email || '').trim().toLowerCase();
+    if (!resolvedEmail) {
+      if (mode === 'register') {
+        setSocialAuthProvider(provider);
+        setShowEmailRegisterForm(false);
+        const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
+        if (!password) {
+          setPassword(autoToken);
+          setConfirmPassword(autoToken);
+        }
+      }
+      alert('No se obtuvo un correo válido desde el proveedor. Escribe tu correo o usa Correo y Contraseña.');
+      return;
+    }
+
+    if (mode === 'register') {
+      setEmail(resolvedEmail);
+      setSocialAuthProvider(provider);
+      setShowEmailRegisterForm(false);
+      const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
+      setPassword(autoToken);
+      setConfirmPassword(autoToken);
+      alert(`✅ Cuenta de ${provider === 'apple' ? 'Apple' : 'Google'} (${resolvedEmail}) conectada. Ahora define el PIN de 4 dígitos para tus empleados y continúa.`);
+    } else {
+      setOwnerLoginEmail(resolvedEmail);
+      const res = await fetch(`${getApiBaseUrl()}/api/tenants/owner-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: resolvedEmail,
+          oauthProvider: provider,
+          password: `OAuth_${provider}_2026$AutoFlow!`,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && json.success && Array.isArray(json.tenants)) {
+        setVerifiedOwnerEmail(resolvedEmail);
+        setMyOwnedTenants(json.tenants);
+        if (resolvedEmail === SUPER_ADMIN_EMAIL) {
+          fetchPromoCodesList(resolvedEmail);
+        }
+      } else {
+        alert(json.message || 'No encontramos negocios asociados a ese correo.');
+      }
+    }
+  };
+
   const handleSocialAuth = async (provider: 'apple' | 'google', mode: 'register' | 'login' = 'register') => {
     setIsSocialLoading(provider);
     try {
-      const redirectUrl =
-        Platform.OS === 'web' && typeof window !== 'undefined'
-          ? `${window.location.origin}/register`
-          : 'mobile://register';
+      if (provider === 'apple' && Platform.OS === 'ios') {
+        try {
+          const AppleAuthMod: any = require('expo-apple-authentication');
+          const AppleAuth: any = AppleAuthMod?.default || AppleAuthMod;
+          if (AppleAuth && typeof AppleAuth.isAvailableAsync === 'function') {
+            const available = await AppleAuth.isAvailableAsync();
+            if (available && typeof AppleAuth.signInAsync === 'function') {
+              const credential: any = await AppleAuth.signInAsync({
+                requestedScopes: [
+                  AppleAuth.AppleAuthenticationScope?.FULL_NAME ?? 0,
+                  AppleAuth.AppleAuthenticationScope?.EMAIL ?? 1,
+                ],
+              });
+              const appleEmail = String(credential?.email || '').trim().toLowerCase();
+              if (appleEmail) {
+                await finalizeSocialSessionInRegister({ email: appleEmail }, 'apple', mode);
+                return;
+              }
+            }
+          }
+        } catch (appleErr: any) {
+          if (appleErr?.code === 'ERR_REQUEST_CANCELED') {
+            return;
+          }
+        }
+      }
+
+      let redirectUrl = 'picktimebook://auth/callback';
+      const isWebPlatform = (Platform.OS as string) === 'web';
+      if (isWebPlatform && typeof window !== 'undefined') {
+        redirectUrl = `${window.location.origin}/register`;
+      } else {
+        try {
+          const ConstantsMod: any = require('expo-constants');
+          const ConstantsObj: any = ConstantsMod?.default || ConstantsMod;
+          const LinkingExpoMod: any = require('expo-linking');
+          const ownership = String(ConstantsObj?.appOwnership || '').toLowerCase();
+          if (ownership === 'expo' && typeof LinkingExpoMod?.createURL === 'function') {
+            redirectUrl = LinkingExpoMod.createURL('auth/callback');
+          } else {
+            redirectUrl = 'picktimebook://auth/callback';
+          }
+        } catch (_redirErr) {
+          redirectUrl = 'picktimebook://auth/callback';
+        }
+      }
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
           redirectTo: redirectUrl,
-          skipBrowserRedirect: Platform.OS !== 'web',
+          skipBrowserRedirect: !isWebPlatform,
+          queryParams: provider === 'google' ? { prompt: 'select_account' } : undefined,
         },
       });
 
-      if (!error && data?.url) {
-        if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      if (error) {
+        throw error;
+      }
+
+      if (isWebPlatform) {
+        if (data?.url && typeof window !== 'undefined') {
           window.location.href = data.url;
           return;
-        } else {
-          // En simulador / Expo Go abrimos el navegador del sistema o activamos vinculación rápida
-          const { Linking } = await import('react-native');
-          const canOpen = await Linking.canOpenURL(data.url);
-          if (canOpen) {
-            await Linking.openURL(data.url);
+        }
+        const sessResp: any = await supabase.auth.getSession();
+        const sessionEmail = sessResp?.data?.session?.user?.email;
+        if (sessionEmail) {
+          await finalizeSocialSessionInRegister(sessResp.data.session.user, provider, mode);
+        }
+        return;
+      }
+
+      if (data?.url && !isWebPlatform) {
+        let finalAuthUrl = String(data.url);
+        try {
+          const authParsed = new URL(finalAuthUrl);
+          authParsed.searchParams.set('redirect_to', redirectUrl);
+          finalAuthUrl = authParsed.toString();
+        } catch (_urlErr) {}
+
+        let linkingSub: any = null;
+        let capturedCallbackUrl: string | null = null;
+        try {
+          linkingSub = Linking.addEventListener('url', (event: { url?: string }) => {
+            if (
+              event?.url &&
+              (event.url.includes('code=') ||
+                event.url.includes('access_token=') ||
+                event.url.includes('picktimebook://'))
+            ) {
+              capturedCallbackUrl = event.url;
+              try { WebBrowser.dismissBrowser(); } catch (_dErr) {}
+            }
+          });
+        } catch (_lErr) {}
+
+        let authResult: any = null;
+        try {
+          authResult = await WebBrowser.openAuthSessionAsync(finalAuthUrl, redirectUrl);
+        } finally {
+          if (linkingSub && typeof linkingSub.remove === 'function') {
+            try { linkingSub.remove(); } catch (_rErr) {}
           }
+        }
+
+        const effectiveUrl =
+          authResult?.type === 'success' && authResult?.url
+            ? authResult.url
+            : capturedCallbackUrl;
+
+        let socialUser: any = null;
+        if (effectiveUrl) {
+          try {
+            const parsedUrl = new URL(effectiveUrl);
+            const hashParams = new URLSearchParams(
+              parsedUrl.hash ? parsedUrl.hash.replace(/^#/, '') : ''
+            );
+            const accessToken =
+              parsedUrl.searchParams.get('access_token') || hashParams.get('access_token');
+            const refreshToken =
+              parsedUrl.searchParams.get('refresh_token') || hashParams.get('refresh_token');
+            const authCode = parsedUrl.searchParams.get('code');
+
+            if (accessToken && refreshToken) {
+              const sessRes: any = await supabase.auth.setSession({
+                access_token: accessToken,
+                refresh_token: refreshToken,
+              });
+              if (sessRes?.error) throw sessRes.error;
+              socialUser = sessRes?.data?.user || sessRes?.data?.session?.user || null;
+            } else if (authCode) {
+              const exchRes: any = await supabase.auth.exchangeCodeForSession(authCode);
+              if (exchRes?.error) throw exchRes.error;
+              socialUser = exchRes?.data?.user || exchRes?.data?.session?.user || null;
+            }
+          } catch (_cbErr) {}
+        }
+
+        if (!socialUser) {
+          const fallbackSess: any = await supabase.auth.getSession();
+          socialUser = fallbackSess?.data?.session?.user || null;
+        }
+
+        if (socialUser?.email) {
+          await finalizeSocialSessionInRegister(socialUser, provider, mode);
+          return;
+        }
+
+        if (authResult?.type === 'cancel' || authResult?.type === 'dismiss') {
+          return;
         }
       }
 
-      // Verificar si ya hay sesión de Supabase activa tras el retorno OAuth
-      const { data: sessionData } = await supabase.auth.getSession();
-      const sessionEmail = sessionData?.session?.user?.email;
-
-      if (sessionEmail) {
-        if (mode === 'register') {
-          setEmail(sessionEmail);
-          setSocialAuthProvider(provider);
-          setShowEmailRegisterForm(false);
-          const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
+      if (mode === 'register') {
+        setSocialAuthProvider(provider);
+        setShowEmailRegisterForm(false);
+        const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
+        if (!password) {
           setPassword(autoToken);
           setConfirmPassword(autoToken);
-          alert(`✅ Cuenta de ${provider === 'apple' ? 'Apple' : 'Google'} (${sessionEmail}) conectada. Ahora solo define el PIN de 4 dígitos para tus empleados y continúa.`);
-        } else {
-          setOwnerLoginEmail(sessionEmail);
-          const res = await fetch(`${getApiBaseUrl()}/api/tenants/owner-login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: sessionEmail.toLowerCase(), oauthProvider: provider, password: `OAuth_${provider}_2026$AutoFlow!` }),
-          });
-          const json = await res.json();
-          if (res.ok && json.success && Array.isArray(json.tenants)) {
-            setVerifiedOwnerEmail(sessionEmail.toLowerCase());
-            setMyOwnedTenants(json.tenants);
-          }
-        }
-      } else {
-        // Si el proveedor OAuth aún no está activo en el panel de Supabase o el usuario cancela en el simulador,
-        // activamos el modo asistido con Apple/Google o le indicamos usar Correo y Contraseña abajo
-        if (mode === 'register') {
-          setSocialAuthProvider(provider);
-          setShowEmailRegisterForm(false);
-          const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
-          if (!password) {
-            setPassword(autoToken);
-            setConfirmPassword(autoToken);
-          }
-          alert(
-            `🔐 Modo ${provider === 'apple' ? 'Apple ID' : 'Google'} seleccionado.
-
-Confirma tu correo de ${provider === 'apple' ? 'Apple' : 'Google'} y el PIN de empleados abajo, o usa el registro tradicional con correo y contraseña.`
-          );
-        } else {
-          alert(
-            `Para ingresar con ${provider === 'apple' ? 'Apple' : 'Google'} en el simulador, asegúrate de tener habilitado ${provider.toUpperCase()} en Supabase Auth > Providers, o ingresa abajo con tu Correo y Contraseña.`
-          );
         }
       }
-    } catch (_err) {
-      alert('Puedes continuar registrándote directamente con tu Correo Electrónico y Contraseña abajo.');
+    } catch (err: any) {
+      const msg = err?.message || String(err || '');
+      if (mode === 'register') {
+        setSocialAuthProvider(provider);
+        setShowEmailRegisterForm(false);
+        const autoToken = `OAuth_${provider}_2026$AutoFlow!`;
+        if (!password) {
+          setPassword(autoToken);
+          setConfirmPassword(autoToken);
+        }
+      }
+      alert(
+        `No se pudo completar la validación con ${provider === 'apple' ? 'Apple' : 'Google'}${msg ? ` (${msg})` : ''}. Puedes ingresar tu correo o continuar con Correo y Contraseña.`
+      );
     } finally {
       setIsSocialLoading(null);
     }

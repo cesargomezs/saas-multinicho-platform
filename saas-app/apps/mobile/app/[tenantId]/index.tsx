@@ -1919,8 +1919,18 @@ export default function TenantDashboardScreen() {
       if (Platform.OS === 'web' && typeof window !== 'undefined') {
         redirectUrl = window.location.href;
       } else {
-        // Usamos el custom scheme registrado en la app sin requerir expo-auth-session en runtime
-        redirectUrl = 'picktimebook://auth/callback';
+        try {
+          const ConstantsMod = require('expo-constants');
+          const ConstantsObj = ConstantsMod?.default || ConstantsMod;
+          const LinkingMod = require('expo-linking');
+          if (ConstantsObj?.appOwnership === 'expo' && typeof LinkingMod?.createURL === 'function') {
+            redirectUrl = LinkingMod.createURL('auth/callback');
+          } else {
+            redirectUrl = 'picktimebook://auth/callback';
+          }
+        } catch (_redirErr) {
+          redirectUrl = 'picktimebook://auth/callback';
+        }
       }
 
       const { data, error } = await supabase.auth.signInWithOAuth({
