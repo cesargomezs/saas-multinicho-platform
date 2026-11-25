@@ -4,52 +4,58 @@
     "slug": "mobile",
     "version": "1.0.0",
     "backgroundColor": "#000000",
-    "splash": {
-      "image": "./assets/images/logopick-time.jpg",
-      "resizeMode": "contain",
-      "backgroundColor": "#000000"
-    },
     "orientation": "portrait",
-    "icon": "./assets/images/logopick-time.jpg",
+    "icon": "./assets/images/logopick-time.png",
     "scheme": "mobile",
     "userInterfaceStyle": "dark",
     "ios": {
       "supportsTablet": true,
       "usesAppleSignIn": true,
       "bundleIdentifier": "com.cesargomez853.saasapp",
+      "buildNumber": "5",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
+      },
       "entitlements": {
         "com.apple.developer.applesignin": [
           "Default"
-        ]
-      },
-      "splash": {
-        "image": "./assets/images/logopick-time.jpg",
-        "resizeMode": "contain",
-        "backgroundColor": "#000000"
+        ],
+        "aps-environment": "production"
       }
     },
     "android": {
       "package": "com.cesargomez853.saasapp",
       "adaptiveIcon": {
         "backgroundColor": "#000000",
-        "foregroundImage": "./assets/images/logopick-time.jpg"
+        "foregroundImage": "./assets/images/logopick-time.png"
       },
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "bundler": "metro",
       "output": "server",
-      "favicon": "./assets/images/logopick-time.jpg"
+      "favicon": "./assets/images/logopick-time.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/logopick-time.jpg",
+          "image": "./assets/images/logopick-time.png",
           "imageWidth": 280,
           "resizeMode": "contain",
           "backgroundColor": "#000000"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/logopick-time-1024x1024.png",
+          "color": "#FF5E00",
+          "defaultChannel": "default"
         }
       ],
       "expo-apple-authentication",
@@ -60,6 +66,16 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "4bc80661-2a37-43b0-b5a4-05239c3a9c2e"
+      }
     }
   }
 }

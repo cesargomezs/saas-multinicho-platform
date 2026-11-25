@@ -41,9 +41,20 @@ const buildDeterministicDeviceUid = (platform: string, osVersion: string): strin
   return `${platform}-${h1.toString(36)}${h2.toString(36).slice(0, 6)}`;
 };
 
+const EAS_PROJECT_ID = '4bc80661-2a37-43b0-b5a4-05239c3a9c2e';
+
+const isRealExpoPushToken = (token?: string | null): boolean => {
+  const clean = String(token || '').trim();
+  if (!clean) return false;
+  if (!/^Exponent?PushToken\[[^\]]+\]$/.test(clean)) return false;
+  // Descartar tokens falsos generados anteriormente con el deviceId
+  if (/^Exponent?PushToken\[(ios|android|web)-/i.test(clean)) return false;
+  return true;
+};
+
 const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Promise<{
-  expoPushToken: string;
-  pushToken: string;
+  expoPushToken: string | null;
+  pushToken: string | null;
   deviceId: string;
   deviceModel: string;
   platform: string;
@@ -84,7 +95,7 @@ const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Pr
     }
   } catch (_e) {}
 
-  // 2. Si el usuario ya tiene un push_token registrado en public.user_devices, reutilizarlo siempre
+  // 2. Si el usuario ya tiene un push_token REAL en public.user_devices, reutilizarlo
   let existingDbToken = '';
   let resolvedUid = targetUserId ? String(targetUserId).trim() : '';
   if (!resolvedUid && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
@@ -104,10 +115,11 @@ const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Pr
         .eq('user_id', resolvedUid)
         .not('push_token', 'is', null)
         .order('created_at', { ascending: false })
-        .limit(1);
-      if (rows && rows[0]?.push_token) {
-        existingDbToken = String(rows[0].push_token).trim();
-        const modelStr = String(rows[0]?.device_model || '');
+        .limit(5);
+      const validRow = (rows || []).find((r: any) => isRealExpoPushToken(r?.push_token));
+      if (validRow?.push_token) {
+        existingDbToken = String(validRow.push_token).trim();
+        const modelStr = String(validRow?.device_model || '');
         const parenMatch = modelStr.match(/\(([^()]+)\)\s*$/);
         if (parenMatch && parenMatch[1]) {
           deviceId = parenMatch[1].trim();
@@ -116,28 +128,48 @@ const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Pr
     } catch (_dbReadErr) {}
   }
 
-  // 3. Si no había nada guardado, generar un ID estable determinístico del dispositivo (nunca aleatorio)
+  // 3. Si no había nada guardado, generar un ID estable determinístico del dispositivo
   if (!deviceId) {
     deviceId = buildDeterministicDeviceUid(platform, osVersion);
   }
 
-  let injectedToken = String((globalThis as any).__EXPO_PUSH_TOKEN__ || '').trim();
-  if (!injectedToken && Platform.OS !== 'web') {
+  // 4. Obtener token REAL de Expo Push Notifications en iOS / Android
+  let realToken = isRealExpoPushToken((globalThis as any).__EXPO_PUSH_TOKEN__)
+    ? String((globalThis as any).__EXPO_PUSH_TOKEN__).trim()
+    : '';
+
+  if (!realToken && Platform.OS !== 'web') {
     try {
-      const globalAny: any = globalThis as any;
-      const pushHelper = globalAny.__getRealExpoPushToken || globalAny.getExpoPushTokenAsync;
-      if (typeof pushHelper === 'function') {
-        const maybeToken = await pushHelper();
-        if (typeof maybeToken === 'string' && maybeToken.trim()) {
-          injectedToken = maybeToken.trim();
-        } else if (maybeToken?.data && String(maybeToken.data).trim()) {
-          injectedToken = String(maybeToken.data).trim();
+      const Notifications = require('expo-notifications');
+      const ConstantsMod = require('expo-constants');
+      const Constants = ConstantsMod?.default || ConstantsMod;
+
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus === 'granted') {
+        const projectId =
+          Constants?.easConfig?.projectId ??
+          Constants?.expoConfig?.extra?.eas?.projectId ??
+          EAS_PROJECT_ID;
+
+        const tokenResp = await Notifications.getExpoPushTokenAsync({ projectId });
+        const candidate = String(tokenResp?.data || '').trim();
+        if (isRealExpoPushToken(candidate)) {
+          realToken = candidate;
+          (globalThis as any).__EXPO_PUSH_TOKEN__ = realToken;
         }
       }
-    } catch (_e) {}
+    } catch (pushErr) {
+      console.warn('[Push] Error obteniendo ExpoPushToken real:', pushErr);
+    }
   }
 
-  const pushToken = injectedToken || existingDbToken || `ExponentPushToken[${deviceId}]`;
+  const pushToken = realToken || (isRealExpoPushToken(existingDbToken) ? existingDbToken : null);
   const deviceModel = `${platform === 'ios' ? 'iOS' : platform === 'android' ? 'Android' : 'Web'}${osVersion ? ` ${osVersion}` : ''} (${deviceId})`;
 
   try {
@@ -174,7 +206,7 @@ const getCurrentDevicePushCredentials = async (targetUserId?: string | null): Pr
   };
 };
 
-// 🔍 Verifica si push_token ya existe en public.user_devices para ese usuario; si no existe, lo inserta
+// 🔍 Verifica si push_token REAL ya existe en public.user_devices para ese usuario; si no existe, lo inserta
 const ensureDeviceRegisteredInUserDevices = async (params: {
   apiFetchFn: (url: string, options?: RequestInit) => Promise<Response>;
   userId?: string | null;
@@ -185,6 +217,10 @@ const ensureDeviceRegisteredInUserDevices = async (params: {
   tenantId?: string | null;
 }) => {
   const creds = await getCurrentDevicePushCredentials(params.userId);
+  if (!creds.pushToken) {
+    return creds;
+  }
+
   const deviceModelLabel = `${params.role === 'staff' ? 'Staff' : 'Client'} Device (${creds.platform}) | ${creds.deviceModel}`;
 
   const payload = {
@@ -217,7 +253,7 @@ const ensureDeviceRegisteredInUserDevices = async (params: {
     } catch (_e) {}
   }
 
-  // Respaldo directo en Supabase sobre las columnas reales de public.user_devices: (id, user_id, push_token, device_model)
+  // Respaldo directo en Supabase sobre public.user_devices solo con token real
   if (!registeredViaApi && supabaseUrl && !supabaseUrl.includes('tu-anon-key') && params.userId) {
     try {
       const { data: existingRows } = await supabase
@@ -226,9 +262,7 @@ const ensureDeviceRegisteredInUserDevices = async (params: {
         .eq('user_id', params.userId);
 
       const alreadyExists = (existingRows || []).some(
-        (r: any) =>
-          String(r.push_token || '').trim() === creds.pushToken ||
-          (creds.deviceId && String(r.device_model || '').includes(creds.deviceId))
+        (r: any) => String(r.push_token || '').trim() === creds.pushToken
       );
 
       if (!alreadyExists) {
@@ -380,6 +414,17 @@ const toSentenceCase = (str: string) => {
   const clean = String(str).trim();
   if (!clean) return '';
   return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
+};
+
+// 🌐 Helper bilingüe: lee primero `translations[lang]` y si no existe usa el campo original
+const getLocalized = (
+  item: any,
+  field: 'name' | 'description' | 'title' | 'message',
+  currentLang: 'es' | 'en'
+): string => {
+  const fromLang = item?.translations?.[currentLang]?.[field];
+  if (fromLang && String(fromLang).trim()) return String(fromLang);
+  return String(item?.[field] || '');
 };
 
 const cleanPhoneDigits = (phoneStr?: string | null): string => {
@@ -959,14 +1004,14 @@ const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tCo
 // ==========================================
 // 🧩 INTERFACES DE TYPESCRIPT
 // ==========================================
-interface PortfolioItem { url: string; title: string; description: string; }
+interface PortfolioItem { url: string; title: string; description: string; translations?: any; }
 interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; }
-interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; }
+interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; translations?: any; }
 interface VapiVoiceConfig { isActive?: boolean; phoneNumber?: string; privateApiKey?: string; phoneNumberId?: string; assistantId?: string; languageMode?: 'bilingual' | 'es' | 'en'; transferPhone?: string; webhookBaseUrl?: string; allowUrgentOverride?: boolean; lastSyncedAt?: string; }
 interface TelegramChannelConfig { isActive?: boolean; channelName?: string; chatId?: string; botToken?: string; notifyNewAppointments?: boolean; notifyRecordings?: boolean; notifyConfirmationsAndCancels?: boolean; notifyPOSClosures?: boolean; updatedAt?: string; }
 interface LoyaltyConfig { isActive: boolean; visitsRequired: number; rewardType: 'free_service' | 'discount'; rewardValue: number; referralActive?: boolean; referralDiscountPercent?: number; reviews?: ReviewItem[]; campaigns?: PushCampaignItem[]; vapiConfig?: VapiVoiceConfig; telegramConfig?: TelegramChannelConfig; staffPortalPin?: string; }
 interface TenantInfo { id: string; name: string; businessType?: string; niche?: string; logoUrl?: string | null; primaryColor?: string | null; business_hours?: any; businessHours?: any; portfolio?: PortfolioItem[]; loyaltyConfig?: LoyaltyConfig; }
-interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; } 
+interface ServiceInfo { id: string; name: string; description: string | null; price: string; durationMinutes?: number; isActive?: boolean; imageUrl?: string | null; translations?: any; } 
 interface StaffInfo { id: string; name: string; phone?: string | null; role: string; isActive?: boolean; }
 interface ReportItem { id: string; date?: string; createdAt?: string; plate?: string; clientName?: string; service?: string; mechanicId?: string; mechanicName?: string; cost?: number; finalCost?: number | string; status?: string; mechanicNotes?: string; notes?: string; _empty?: boolean; }
 
@@ -2398,7 +2443,7 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
       // Guardar y sincronizar en PostgreSQL 18 a través de /api/tenants/config
       const resConfig = await apiFetch('/api/tenants/config', {
         method: 'PUT',
-        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig })
+        body: JSON.stringify({ loyaltyConfig: updatedLoyaltyConfig,sourceLang: lang })
       });
 
       if (resConfig.ok) {
@@ -3068,11 +3113,16 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
       }
 
       const res = await apiFetch('/api/tenants/config', { 
-        method: 'PUT', body: JSON.stringify({ portfolio: updatedPortfolio }) 
+        method: 'PUT', body: JSON.stringify({ portfolio: updatedPortfolio,sourceLang: lang }) 
       });
       
       if (res.ok) {
-        setLocalPortfolio(updatedPortfolio);
+        const savedData = await res.json().catch(() => null);
+        let savedPortfolio = savedData?.tenant?.portfolio;
+        if (typeof savedPortfolio === 'string') {
+          try { savedPortfolio = JSON.parse(savedPortfolio); } catch (_e) {}
+        }
+        setLocalPortfolio(Array.isArray(savedPortfolio) ? savedPortfolio : updatedPortfolio);
         handleCancelPortfolioForm();
       } else {
         alert('Error guardando el ítem en la base de datos.');
@@ -3151,7 +3201,8 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
           description: toTitleCase(catalogFormDesc), 
           price: cleanPrice, 
           durationMinutes: Number(catalogFormDuration),
-          imageUrl: finalImageUrl 
+          imageUrl: finalImageUrl,
+          sourceLang: lang
         })
       });
       
@@ -4450,6 +4501,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         });
       }
 
+      const bookingDeviceCreds = await getCurrentDevicePushCredentials(clientExpedienteData?.client?.id || null);
       const response = await apiFetch('/api/appointments', {
         method: 'POST', 
         body: JSON.stringify({ 
@@ -4463,8 +4515,8 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           appointmentDate: combinedDateTime, 
           notes: toTitleCase(quickNotes), 
           acceptedTerms: effectiveTermsAccepted,
-          expoPushToken: (await getCurrentDevicePushCredentials(clientExpedienteData?.client?.id || null)).expoPushToken,
-          deviceId: (await getCurrentDevicePushCredentials(clientExpedienteData?.client?.id || null)).deviceId,
+          expoPushToken: bookingDeviceCreds.expoPushToken || undefined,
+          deviceId: bookingDeviceCreds.deviceId,
           deviceInfo: {
             os: Platform.OS,
             authProvider: bookingAuthMethod || 'manual',
@@ -5617,9 +5669,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     <View style={{ backgroundColor: brandColor, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
                       <Text style={{ color: '#FFF', fontSize: 10, fontWeight: '900' }}>{t.promoBadge}</Text>
                     </View>
-                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{toTitleCase(activeCamp.title)}</Text>
+                    <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 14 }}>{toTitleCase(getLocalized(activeCamp, 'title', lang))}</Text>
                   </View>
-                  <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 17 }}>{toTitleCase(activeCamp.message)}</Text>
+                  <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 17 }}>{toTitleCase(getLocalized(activeCamp, 'message', lang))}</Text>
                 </View>
                 {renderReportButton({ type: 'campaign', id: activeCamp.id, title: activeCamp.title, excerpt: String(activeCamp.message || '').slice(0, 200) }, true, { position: 'absolute', top: 8, right: 8 })}
                 <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 9, paddingHorizontal: 15, borderRadius: 10 }]} onPress={() => {
@@ -5652,9 +5704,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                   ) : null}
                   {renderReportButton({ type: 'service', id: srv.id, title: srv.name, excerpt: String(srv.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                   <View style={{ padding: isMobile ? 20 : 28 }}>
-                    <Text style={{ fontSize: isMobile ? 18 : 20, fontWeight: '800', color: tColor.text, marginBottom: 10, paddingRight: 28 }}>{toTitleCase(srv.name)}</Text>
+                    <Text style={{ fontSize: isMobile ? 18 : 20, fontWeight: '800', color: tColor.text, marginBottom: 10, paddingRight: 28 }}>{toTitleCase(getLocalized(srv, 'name', lang))}</Text>
                     {srv.description ? (
-                      <Text style={{ color: tColor.muted, marginBottom: 20, lineHeight: 21, fontSize: 13.5 }}>{toSentenceCase(srv.description)}</Text>
+                      <Text style={{ color: tColor.muted, marginBottom: 20, lineHeight: 21, fontSize: 13.5 }}>{toSentenceCase(getLocalized(srv, 'description', lang))}</Text>
                     ) : (
                       <Text style={{ color: tColor.muted, marginBottom: 20, fontSize: 13.5 }}>⏱️ {srv.durationMinutes || 30} {tr('minutos', 'minutes')}</Text>
                     )}
@@ -5700,9 +5752,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       </TouchableOpacity>
                       {renderReportButton({ type: 'portfolio', id: item.url, title: item.title, excerpt: String(item.description || '').slice(0, 200) }, true, { position: 'absolute', top: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)', zIndex: 5 })}
                       <View style={{ padding: 18 }}>
-                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 17, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
+                        <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 17, marginBottom: 4 }}>{toTitleCase(getLocalized(item, 'title', lang))}</Text>
                         {item.description ? (
-                          <Text style={{ color: tColor.muted, fontSize: 13.5, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
+                          <Text style={{ color: tColor.muted, fontSize: 13.5, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(getLocalized(item, 'description', lang))}</Text>
                         ) : null}
                       </View>
                     </View>
@@ -7904,7 +7956,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                   <View style={{ flex: 1 }}>
                                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
                                       <Text style={[{ color: tColor.text, fontWeight: '900', fontSize: 14 }, !isCampActive ? { textDecorationLine: 'line-through' } : {}]}>
-                                        {toTitleCase(cmp.title)}
+                                        {toTitleCase(getLocalized(cmp, 'title', lang))}
                                       </Text>
                                       <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
                                         <Text style={{ color: '#3B82F6', fontSize: 10, fontWeight: 'bold' }}>{cmp.target_audience}</Text>
@@ -7913,7 +7965,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                         🕒 {cmp.sent_at ? new Date(cmp.sent_at).toLocaleDateString('es-ES') : 'Enviada'}
                                       </Text>
                                     </View>
-                                    <Text style={{ color: tColor.muted, fontSize: 12.5 }}>{toTitleCase(cmp.message)}</Text>
+                                    <Text style={{ color: tColor.muted, fontSize: 12.5 }}>{toTitleCase(getLocalized(cmp, 'message', lang))}</Text>
                                   </View>
 
                                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -8125,9 +8177,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                 <PrivateSupabaseImage path={item.url} alt={item.title || `Portafolio ${idx}`} />
                               </TouchableOpacity>
                               <View style={{ padding: 16 }}>
-                                <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, marginBottom: 4 }}>{toTitleCase(item.title)}</Text>
+                                <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, marginBottom: 4 }}>{toTitleCase(getLocalized(item, 'title', lang))}</Text>
                                 {item.description ? (
-                                  <Text style={{ color: tColor.muted, fontSize: 13, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(item.description)}</Text>
+                                  <Text style={{ color: tColor.muted, fontSize: 13, marginBottom: 8 }} numberOfLines={2}>{toTitleCase(getLocalized(item, 'description', lang))}</Text>
                                 ) : null}
                               </View>
 
@@ -8179,14 +8231,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             ) : null}
                             <View style={{ padding: 24 }}>
                               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                                <Text style={[styles.cardTitle, { color: tColor.text, marginBottom: 8 }, srv.isActive === false ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(srv.name)}</Text>
+                                <Text style={[styles.cardTitle, { color: tColor.text, marginBottom: 8 }, srv.isActive === false ? { textDecorationLine: 'line-through' } : {}]}>{toTitleCase(getLocalized(srv, 'name', lang))}</Text>
                                 <TouchableOpacity style={srv.isActive !== false ? styles.activeStatusBadge : styles.inactiveStatusBadge} onPress={() => handleToggleServiceStatus(srv.id, srv.isActive !== false)}>
                                   <Text style={srv.isActive !== false ? styles.activeStatusText : styles.inactiveStatusText}>{srv.isActive !== false ? 'ACTIVO' : 'INACTIVO'}</Text>
                                 </TouchableOpacity>
                               </View>
                               
                               {srv.description ? (
-                                <Text style={{ color: tColor.muted, marginBottom: 16, lineHeight: 22 }}>{toTitleCase(srv.description)}</Text>
+                                <Text style={{ color: tColor.muted, marginBottom: 16, lineHeight: 22 }}>{toTitleCase(getLocalized(srv, 'description', lang))}</Text>
                               ) : (
                                 <Text style={{ color: tColor.muted, marginBottom: 16 }}>⏱️ {srv.durationMinutes || 30} minutos</Text>
                               )}
@@ -9616,7 +9668,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     <Text style={[styles.inputLabel, { color: tColor.muted }]}>Servicio Seleccionado</Text>
                     {Platform.OS === 'web' ? (
                       <select className="web-input-override" value={selectedServiceType} onChange={e => setSelectedServiceType(e.target.value)}>
-                        {activeCatalogServices.map((srv, idx) => <option key={`${srv.id}-${idx}`} value={srv.id}>{toTitleCase(srv.name)} - ${srv.price}</option>)}
+                        {activeCatalogServices.map((srv, idx) => <option key={`${srv.id}-${idx}`} value={srv.id}>{toTitleCase(getLocalized(srv, 'name', lang))} - ${srv.price}</option>)}
                       </select>
                     ) : (
                       <View style={{ backgroundColor: tColor.input, borderWidth: 1, borderColor: tColor.border, borderRadius: 12, padding: 14 }}>
@@ -9625,11 +9677,11 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           return (
                             <View>
                               <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, marginBottom: 2 }}>
-                                {toTitleCase(srvObj?.name || 'Servicio Seleccionado')} — ${srvObj?.price || '0'}
+                                {toTitleCase(srvObj ? getLocalized(srvObj, 'name', lang) : tr('Servicio Seleccionado', 'Selected Service'))} — ${srvObj?.price || '0'}
                               </Text>
                               {srvObj?.description ? (
                                 <Text style={{ color: tColor.muted, fontSize: 12.5 }} numberOfLines={2}>
-                                  {toSentenceCase(srvObj.description)}
+                                  {toSentenceCase(getLocalized(srvObj, 'description', lang))}
                                 </Text>
                               ) : null}
                             </View>

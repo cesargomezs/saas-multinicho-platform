@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { db, tenants, users } from '@taller/database';
 import { eq, and, sql } from 'drizzle-orm';
 import crypto from 'crypto';
+import { buildBilingualTitledTranslations } from '../src/services/translationService';
 
 // 🔐 Helper criptográfico nativo (scrypt + salt aleatorio) para guardar y verificar contraseñas seguras
 export const hashPasswordScrypt = (plainPassword: string): string => {
@@ -223,6 +224,22 @@ export async function createTenant(req: Request, res: Response) {
               used_at = NOW()
           WHERE UPPER(TRIM(code)) = ${cleanPromoCode}
         `);
+        await db.execute(sql`
+          INSERT INTO public.payments (
+            tenant_id, amount, currency, status, payment_method, plan_tier, promo_code, paid_at, metadata
+          )
+          VALUES (
+            ${tenantUuid}::uuid,
+            0.00,
+            'usd',
+            'succeeded',
+            'promo_code',
+            ${planTier || 'pro'},
+            ${cleanPromoCode},
+            NOW(),
+            '{"source":"promo_code_activation"}'::jsonb
+          )
+        `);
       } catch (promoErr) {
         console.warn('⚠️ Aviso marcando promo_code como usado:', promoErr);
       }
@@ -269,7 +286,15 @@ export async function getTenantInfo(req: Request, res: Response) {
       `);
       const dbCampaigns = Array.isArray(cmpResult) ? cmpResult : (cmpResult as any).rows || [];
       if (dbCampaigns.length > 0) {
-        parsedLoyalty.campaigns = dbCampaigns;
+        const existingLoyaltyCampaigns = Array.isArray(parsedLoyalty.campaigns) ? parsedLoyalty.campaigns : [];
+        parsedLoyalty.campaigns = dbCampaigns.map((dbCamp: any) => {
+          const matched = existingLoyaltyCampaigns.find(
+            (c: any) =>
+              (c?.id && String(c.id) === String(dbCamp.id)) ||
+              (c?.title === dbCamp.title && c?.message === dbCamp.message)
+          );
+          return matched?.translations ? { ...dbCamp, translations: matched.translations } : dbCamp;
+        });
       }
     } catch (cmpErr) {
       console.warn('⚠️ No se pudieron leer push_campaigns:', cmpErr);
@@ -326,13 +351,44 @@ export async function updateTenantConfig(req: Request, res: Response) {
       return res.status(400).json({ success: false, message: 'Falta x-tenant-id en los headers' });
     }
 
-    const { business_hours, portfolio, portfolio_images, loyaltyConfig } = req.body;
+    const { business_hours, portfolio, portfolio_images, loyaltyConfig, sourceLang } = req.body;
+    const resolvedSourceLang = sourceLang === 'en' ? 'en' : 'es';
     const updateData: any = {};
     
     if (business_hours !== undefined) updateData.businessHours = business_hours;
     
     const newPortfolio = portfolio || portfolio_images;
-    if (newPortfolio !== undefined) updateData.portfolio = newPortfolio;
+    if (newPortfolio !== undefined) {
+      if (Array.isArray(newPortfolio)) {
+        const translatedPortfolio: any[] = [];
+        for (const item of newPortfolio) {
+          if (!item || !item.title) {
+            translatedPortfolio.push(item);
+            continue;
+          }
+          const existingTrans = item.translations || {};
+          const hasBothLangs = Boolean(existingTrans?.es?.title && existingTrans?.en?.title);
+          const sourceMatches =
+            existingTrans?.[resolvedSourceLang]?.title === String(item.title || '').trim() &&
+            (existingTrans?.[resolvedSourceLang]?.description || '') === String(item.description || '').trim();
+
+          if (hasBothLangs && sourceMatches) {
+            translatedPortfolio.push(item);
+          } else {
+            const translations = await buildBilingualTitledTranslations({
+              title: item.title,
+              description: item.description || '',
+              sourceLang: resolvedSourceLang,
+              manualTranslations: hasBothLangs ? existingTrans : null,
+            });
+            translatedPortfolio.push({ ...item, translations });
+          }
+        }
+        updateData.portfolio = translatedPortfolio;
+      } else {
+        updateData.portfolio = newPortfolio;
+      }
+    }
 
     if (loyaltyConfig !== undefined) {
       const cleanLoyalty = safeParseJSON(loyaltyConfig);
@@ -344,6 +400,23 @@ export async function updateTenantConfig(req: Request, res: Response) {
         for (let i = 0; i < cleanLoyalty.campaigns.length; i++) {
           const camp = cleanLoyalty.campaigns[i];
           if (!camp || !camp.title || !camp.message) continue;
+
+          // Traducir automáticamente título y mensaje de la campaña (ES <-> EN) solo si falta algún idioma o cambió el texto
+          const existingCampTrans = camp.translations || {};
+          const campHasBoth = Boolean(existingCampTrans?.es?.title && existingCampTrans?.en?.title);
+          const campSourceMatches =
+            existingCampTrans?.[resolvedSourceLang]?.title === String(camp.title || '').trim() &&
+            (existingCampTrans?.[resolvedSourceLang]?.message || '') === String(camp.message || '').trim();
+
+          if (!campHasBoth || !campSourceMatches) {
+            camp.translations = await buildBilingualTitledTranslations({
+              title: camp.title,
+              message: camp.message,
+              sourceLang: resolvedSourceLang,
+              manualTranslations: campHasBoth ? existingCampTrans : null,
+            });
+          }
+
           const isActiveBool = camp.is_active !== false;
           const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(camp.id || ''));
 
@@ -392,7 +465,10 @@ export async function updateTenantConfig(req: Request, res: Response) {
                 `);
                 const insertedRows = Array.isArray(insertedResult) ? insertedResult : (insertedResult as any).rows || [];
                 if (insertedRows[0]) {
-                  cleanLoyalty.campaigns[i] = insertedRows[0];
+                  cleanLoyalty.campaigns[i] = {
+                    ...insertedRows[0],
+                    translations: camp.translations,
+                  };
                   if (isActiveBool) {
                     dispatchLocalPushNotifications(tenantId, camp.title, camp.message, camp.target_audience || 'all_clients');
                   }

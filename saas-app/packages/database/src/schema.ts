@@ -215,6 +215,10 @@ export const services = pgTable('services', {
   requiredInventory: jsonb('required_inventory').default({}),
   isActive: boolean('is_active').default(true), 
   createdAt: timestamp('created_at').defaultNow(),
+  translations: jsonb('translations').$type<{
+    es?: { name: string; description?: string };
+    en?: { name: string; description?: string };
+  }>().default({}),
 });
 
 // ============================================================================
@@ -403,6 +407,57 @@ export const promoCodes = pgTable('promo_codes', {
 });
 
 // ============================================================================
+// 16. PLATFORM SETTINGS (Configuración Global de la Plataforma — SuperAdmin)
+// ============================================================================
+export const platformSettings = pgTable('platform_settings', {
+  key: varchar('key', { length: 100 }).primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// ============================================================================
+// 17. PAYMENTS (Historial de Pagos, Suscripciones Stripe y Activaciones por Cupón)
+// ============================================================================
+export const payments = pgTable('payments', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  tenantId: uuid('tenant_id').references(() => tenants.id).notNull(),
+  userId: uuid('user_id').references(() => users.id),
+
+  // 💳 Identificadores nativos de Stripe (idempotencia para Webhooks)
+  stripeCustomerId: varchar('stripe_customer_id', { length: 255 }),
+  stripeSubscriptionId: varchar('stripe_subscription_id', { length: 255 }),
+  stripeCheckoutSessionId: varchar('stripe_checkout_session_id', { length: 255 }).unique(),
+  stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }).unique(),
+  stripeInvoiceId: varchar('stripe_invoice_id', { length: 255 }).unique(),
+
+  // 💰 Detalles financieros
+  amount: decimal('amount', { precision: 10, scale: 2 }).default('0.00').notNull(),
+  currency: varchar('currency', { length: 10 }).default('usd').notNull(),
+  status: varchar('status', { length: 40 }).default('pending').notNull(), // 'pending' | 'succeeded' | 'failed' | 'refunded' | 'canceled'
+  paymentMethod: varchar('payment_method', { length: 40 }).default('stripe_card').notNull(), // 'stripe_card' | 'promo_code' | 'manual'
+  planTier: varchar('plan_tier', { length: 50 }), // 'starter' | 'pro' | 'elite'
+  promoCode: varchar('promo_code', { length: 60 }),
+
+  // 📅 Vigencia del periodo facturado
+  billingPeriodStart: timestamp('billing_period_start'),
+  billingPeriodEnd: timestamp('billing_period_end'),
+
+  // 🧾 Comprobante, errores y auditoría
+  receiptUrl: text('receipt_url'),
+  failureReason: text('failure_reason'),
+  metadata: jsonb('metadata').default({}),
+  paidAt: timestamp('paid_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    paymentsTenantIdx: index('payments_tenant_id_idx').on(table.tenantId),
+    paymentsStatusIdx: index('payments_status_idx').on(table.status),
+    paymentsSubIdx: index('payments_stripe_subscription_id_idx').on(table.stripeSubscriptionId),
+  };
+});
+
+// ============================================================================
 // DEFINICIÓN DE RELACIONES (Drizzle ORM)
 // ============================================================================
 export const tenantsRelations = relations(tenants, ({ many }) => ({
@@ -418,6 +473,7 @@ export const tenantsRelations = relations(tenants, ({ many }) => ({
   legalDocuments: many(legalDocuments),
   userDevices: many(userDevices),
   pushNotifications: many(pushNotifications),
+  payments: many(payments),
 }));
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -428,6 +484,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   clientAppointments: many(appointments, { relationName: 'clientAppointments' }),
   reviews: many(reviews),
   reportsMade: many(reports),
+  payments: many(payments),
 }));
 
 export const userDevicesRelations = relations(userDevices, ({ one, many }) => ({
@@ -495,4 +552,9 @@ export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
 export const promoCodesRelations = relations(promoCodes, ({ one }) => ({
   usedByUser: one(users, { fields: [promoCodes.usedByUserId], references: [users.id] }),
   usedForTenant: one(tenants, { fields: [promoCodes.usedForEntityId], references: [tenants.id] }),
+}));
+
+export const paymentsRelations = relations(payments, ({ one }) => ({
+  tenant: one(tenants, { fields: [payments.tenantId], references: [tenants.id] }),
+  user: one(users, { fields: [payments.userId], references: [users.id] }),
 }));

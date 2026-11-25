@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator, Share, Linking } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, TextInput, Platform, useWindowDimensions, Image, StatusBar, Modal, ActivityIndicator, Share, Linking, Switch } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import { useRouter } from 'expo-router';
 
@@ -138,6 +138,9 @@ export default function B2BRegistrationScreen() {
 
   // 💳 Estados para el Paso 4: Opciones de Pago vs Cupón Promocional (`public.promo_codes`)
   const [paymentMethod, setPaymentMethod] = useState<'card' | 'promo_code'>('promo_code');
+  // 🎛️ Interruptor global controlado por SuperAdmin: prende/apaga la opción de pago con tarjeta en el Paso 4
+  const [cardPaymentsEnabled, setCardPaymentsEnabled] = useState<boolean>(false);
+  const [isSavingPaymentFlag, setIsSavingPaymentFlag] = useState<boolean>(false);
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [isValidatingPromo, setIsValidatingPromo] = useState(false);
   const [validatedPromoObj, setValidatedPromoObj] = useState<any | null>(null);
@@ -199,6 +202,38 @@ export default function B2BRegistrationScreen() {
       } catch (e) {}
     };
     loadCategoriesFromDb();
+
+    const loadPlatformPaymentSetting = async () => {
+      try {
+        const baseHost =
+          process.env.EXPO_PUBLIC_API_URL ||
+          process.env.NEXT_PUBLIC_API_URL ||
+          (Platform.OS === 'web' ? 'http://localhost:4000' : 'http://127.0.0.1:4000');
+        const res = await fetch(`${baseHost.replace(/\/$/, '')}/api/platform-settings`);
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data?.cardPaymentsEnabled === 'boolean') {
+            setCardPaymentsEnabled(data.cardPaymentsEnabled);
+            if (!data.cardPaymentsEnabled) setPaymentMethod('promo_code');
+            return;
+          }
+        }
+      } catch (_e) {}
+
+      try {
+        const { data } = await supabase
+          .from('platform_settings')
+          .select('value')
+          .eq('key', 'card_payments_enabled')
+          .maybeSingle();
+        if (data && data.value !== undefined) {
+          const enabled = data.value === true || data.value === 'true';
+          setCardPaymentsEnabled(enabled);
+          if (!enabled) setPaymentMethod('promo_code');
+        }
+      } catch (_sbErr) {}
+    };
+    loadPlatformPaymentSetting();
   }, []);
 
   const selectedCategoryObj = dbCategories.find((c) => c.code === category);
@@ -756,6 +791,43 @@ export default function B2BRegistrationScreen() {
     ownerLoginEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL &&
     myOwnedTenants.length > 0;
 
+  // 🎛️ SuperAdmin: Prender o apagar pagos con tarjeta en el registro (persiste en BD)
+  const handleToggleCardPayments = async (nextVal: boolean) => {
+    if (!isSuperAdminLogged) return;
+    setCardPaymentsEnabled(nextVal);
+    if (!nextVal) {
+      setPaymentMethod('promo_code');
+    }
+    setIsSavingPaymentFlag(true);
+    try {
+      let savedViaApi = false;
+      try {
+        const res = await fetch(`${getApiBaseUrl()}/api/platform-settings/card-payments`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: nextVal,
+            ownerEmail: verifiedOwnerEmail,
+          }),
+        });
+        if (res.ok) savedViaApi = true;
+      } catch (_e) {}
+
+      if (!savedViaApi) {
+        await supabase
+          .from('platform_settings')
+          .upsert(
+            { key: 'card_payments_enabled', value: String(nextVal), updated_at: new Date().toISOString() },
+            { onConflict: 'key' }
+          );
+      }
+    } catch (_err) {
+      alert('No se pudo guardar la configuración en la base de datos.');
+    } finally {
+      setIsSavingPaymentFlag(false);
+    }
+  };
+
   const handleOwnerLogin = async () => {
     const cleanEmail = ownerLoginEmail.trim().toLowerCase();
     if (!cleanEmail || !ownerLoginPassword) {
@@ -831,8 +903,13 @@ export default function B2BRegistrationScreen() {
 
   const handleFinalCheckoutAndStore = async () => {
     if (!selectedPlan) return alert('Por favor selecciona un plan para continuar.');
-    if (paymentMethod === 'promo_code' && !validatedPromoObj) {
-      return alert('Por favor valida un Código Promocional activo antes de completar el registro con cupón, o elige Pago con Tarjeta.');
+    const effectivePaymentMethod = cardPaymentsEnabled ? paymentMethod : 'promo_code';
+    if (effectivePaymentMethod === 'promo_code' && !validatedPromoObj) {
+      return alert(
+        cardPaymentsEnabled
+          ? 'Por favor valida un Código Promocional activo antes de completar el registro con cupón, o elige Suscripción Mensual.'
+          : 'Por favor ingresa y valida tu Código Promocional VIP para activar tu cuenta.'
+      );
     }
     setIsSubmitting(true);
 
@@ -1371,9 +1448,57 @@ export default function B2BRegistrationScreen() {
                       );
                     })}
 
-                    {/* 🔒 EXCLUSIVO PARA CESAR GOMEZ (cesargomez853@gmail.com): GENERADOR Y COMPARTIDOR DE CUPONES */}
+                    {/* 🔒 EXCLUSIVO PARA CESAR GOMEZ (cesargomez853@gmail.com): CONTROL DE PAGOS + CUPONES */}
                     {isSuperAdminLogged ? (
-                      <View style={{ marginTop: 8, paddingTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', width: '100%' }}>
+                      <View style={{ marginTop: 8, paddingTop: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', width: '100%', gap: 12 }}>
+                        {/* 🎛️ Switch Maestro: Prender / Apagar Pagos con Tarjeta al Registrarse */}
+                        <View
+                          style={{
+                            backgroundColor: cardPaymentsEnabled ? 'rgba(16, 185, 129, 0.14)' : 'rgba(245, 158, 11, 0.12)',
+                            borderWidth: 1,
+                            borderColor: cardPaymentsEnabled ? '#10B981' : '#F59E0B',
+                            borderRadius: 14,
+                            paddingVertical: 13,
+                            paddingHorizontal: 14,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 12,
+                          }}
+                        >
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+                            <View
+                              style={{
+                                width: 34,
+                                height: 34,
+                                borderRadius: 10,
+                                backgroundColor: cardPaymentsEnabled ? 'rgba(16, 185, 129, 0.25)' : 'rgba(245, 158, 11, 0.22)',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0,
+                              }}
+                            >
+                              <Feather name="credit-card" size={17} color={cardPaymentsEnabled ? '#10B981' : '#F59E0B'} />
+                            </View>
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13.5 }} numberOfLines={1}>
+                                💳 Pagos con Tarjeta en Registro
+                              </Text>
+                              <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2, lineHeight: 15 }}>
+                                {cardPaymentsEnabled
+                                  ? 'PRENDIDO: Se muestra Cupón + Suscripción Mensual'
+                                  : 'APAGADO: Solo activación con Cupón Promocional'}
+                              </Text>
+                            </View>
+                          </View>
+                          <Switch
+                            value={cardPaymentsEnabled}
+                            onValueChange={handleToggleCardPayments}
+                            disabled={isSavingPaymentFlag}
+                            trackColor={{ false: '#334155', true: '#10B981' }}
+                            thumbColor="#FFFFFF"
+                          />
+                        </View>
                         <TouchableOpacity
                           activeOpacity={0.85}
                           onPress={() => {
@@ -2241,15 +2366,21 @@ export default function B2BRegistrationScreen() {
             {step === 4 && (
               <View style={{ width: '100%', alignItems: 'center' }}>
                 <Text style={[styles.title, { textAlign: 'center' }]}>Desbloquea tu Potencial</Text>
-                <Text style={[styles.subtitle, { textAlign: 'center', marginBottom: 24 }]}>Selecciona el plan que mejor se adapte a tu volumen operativo mensual y elige tu método de activación.</Text>
+                <Text style={[styles.subtitle, { textAlign: 'center', marginBottom: 24 }]}>
+                  {cardPaymentsEnabled
+                    ? 'Selecciona el plan que mejor se adapte a tu volumen operativo mensual y elige tu método de activación.'
+                    : 'Selecciona el plan ideal para tu negocio y activa tu cuenta hoy ingresando tu código promocional VIP.'}
+                </Text>
 
-                {/* 💳 SELECTOR DE MÉTODO DE ACTIVACIÓN: PAGO CON TARJETA VS CUPÓN PROMOCIONAL (`public.promo_codes`) */}
+                {/* 💳 SELECTOR DE MÉTODO DE ACTIVACIÓN: CUPÓN PROMOCIONAL (+ TARJETA SI SUPERADMIN LA PRENDIÓ) */}
                 <View style={[styles.glassCard, { width: '100%', maxWidth: 760, padding: isMobile ? 20 : 28, marginBottom: 32, borderColor: validatedPromoObj ? '#10B981' : 'rgba(255,255,255,0.12)' }]}>
                   <Text style={[styles.inputLabel, { marginBottom: 12, color: '#E2E8F0' }]}>
-                    1. Elige cómo deseas activar tu cuenta hoy:
+                    {cardPaymentsEnabled
+                      ? '1. Elige cómo deseas activar tu cuenta hoy:'
+                      : '1. Activa tu cuenta con tu Código Promocional:'}
                   </Text>
 
-                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12, marginBottom: paymentMethod === 'promo_code' ? 18 : 0 }}>
+                  <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12, marginBottom: (!cardPaymentsEnabled || paymentMethod === 'promo_code') ? 18 : 0 }}>
                     <TouchableOpacity
                       activeOpacity={0.85}
                       onPress={() => setPaymentMethod('promo_code')}
@@ -2259,17 +2390,17 @@ export default function B2BRegistrationScreen() {
                         paddingHorizontal: 16,
                         borderRadius: 14,
                         borderWidth: 1.5,
-                        borderColor: paymentMethod === 'promo_code' ? '#10B981' : 'rgba(255,255,255,0.1)',
-                        backgroundColor: paymentMethod === 'promo_code' ? 'rgba(16, 185, 129, 0.14)' : 'rgba(0,0,0,0.35)',
+                        borderColor: (!cardPaymentsEnabled || paymentMethod === 'promo_code') ? '#10B981' : 'rgba(255,255,255,0.1)',
+                        backgroundColor: (!cardPaymentsEnabled || paymentMethod === 'promo_code') ? 'rgba(16, 185, 129, 0.14)' : 'rgba(0,0,0,0.35)',
                         flexDirection: 'row',
                         alignItems: 'center',
                         gap: 10,
                       }}
                     >
                       <Ionicons
-                        name={paymentMethod === 'promo_code' ? 'pricetag' : 'pricetag-outline'}
+                        name={(!cardPaymentsEnabled || paymentMethod === 'promo_code') ? 'pricetag' : 'pricetag-outline'}
                         size={18}
-                        color={paymentMethod === 'promo_code' ? '#10B981' : '#94A3B8'}
+                        color={(!cardPaymentsEnabled || paymentMethod === 'promo_code') ? '#10B981' : '#94A3B8'}
                       />
                       <View style={{ flex: 1 }}>
                         <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
@@ -2281,36 +2412,38 @@ export default function B2BRegistrationScreen() {
                       </View>
                     </TouchableOpacity>
 
-                    <TouchableOpacity
-                      activeOpacity={0.85}
-                      onPress={() => setPaymentMethod('card')}
-                      style={{
-                        flex: 1,
-                        paddingVertical: 14,
-                        paddingHorizontal: 16,
-                        borderRadius: 14,
-                        borderWidth: 1.5,
-                        borderColor: paymentMethod === 'card' ? primaryColor : 'rgba(255,255,255,0.1)',
-                        backgroundColor: paymentMethod === 'card' ? `${primaryColor}18` : 'rgba(0,0,0,0.35)',
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: 10,
-                      }}
-                    >
-                      <Feather
-                        name="credit-card"
-                        size={18}
-                        color={paymentMethod === 'card' ? primaryColor : '#94A3B8'}
-                      />
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
-                          💳 Suscripción Mensual Estándar
-                        </Text>
-                        <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
-                          Facturación según el plan elegido abajo
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
+                    {cardPaymentsEnabled ? (
+                      <TouchableOpacity
+                        activeOpacity={0.85}
+                        onPress={() => setPaymentMethod('card')}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 14,
+                          paddingHorizontal: 16,
+                          borderRadius: 14,
+                          borderWidth: 1.5,
+                          borderColor: paymentMethod === 'card' ? primaryColor : 'rgba(255,255,255,0.1)',
+                          backgroundColor: paymentMethod === 'card' ? `${primaryColor}18` : 'rgba(0,0,0,0.35)',
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          gap: 10,
+                        }}
+                      >
+                        <Feather
+                          name="credit-card"
+                          size={18}
+                          color={paymentMethod === 'card' ? primaryColor : '#94A3B8'}
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 14 }}>
+                            💳 Suscripción Mensual Estándar
+                          </Text>
+                          <Text style={{ color: '#94A3B8', fontSize: 11.5, marginTop: 2 }}>
+                            Facturación según el plan elegido abajo
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : null}
                   </View>
 
                   {paymentMethod === 'promo_code' ? (

@@ -99,6 +99,14 @@ import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
 import router from '../routes/reportsRoute';
 import { generatePromoCode, getPromoCodes, validatePromoCode } from '../controllers/tenantController';
+import { backfillServiceTranslations } from '../controllers/serviceController';
+import {
+  getPlatformSettings,
+  setCardPaymentsEnabled,
+  createStripeCheckoutSession,
+  handleStripeWebhook,
+  getTenantPayments,
+} from '../controllers/paymentController';
 
 // =========================================================================
 // 🗄️ AUTO-MIGRACIÓN Y SEMILLA EN BD PARA NUEVOS NICHOS (LEGAL & DENTAL)
@@ -226,6 +234,52 @@ async function ensureMultinicheDatabaseReady() {
         ADD COLUMN IF NOT EXISTS apple_user_id VARCHAR(255);
     `);
 
+    // 6. Asegurar columna bilingüe (ES/EN) JSONB en public.services
+    await db.execute(sql`
+      ALTER TABLE public.services
+        ADD COLUMN IF NOT EXISTS translations JSONB DEFAULT '{}'::jsonb;
+    `);
+
+    // 7. Asegurar tabla public.platform_settings y public.payments (Stripe + Cupones)
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS public.platform_settings (
+        key VARCHAR(100) PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMP DEFAULT NOW() NOT NULL
+      );
+    `);
+    await db.execute(sql`
+      INSERT INTO public.platform_settings (key, value)
+      VALUES ('card_payments_enabled', 'false')
+      ON CONFLICT (key) DO NOTHING;
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS public.payments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID NOT NULL REFERENCES public.tenants(id),
+        user_id UUID REFERENCES public.users(id),
+        stripe_customer_id VARCHAR(255),
+        stripe_subscription_id VARCHAR(255),
+        stripe_checkout_session_id VARCHAR(255) UNIQUE,
+        stripe_payment_intent_id VARCHAR(255) UNIQUE,
+        stripe_invoice_id VARCHAR(255) UNIQUE,
+        amount NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+        currency VARCHAR(10) NOT NULL DEFAULT 'usd',
+        status VARCHAR(40) NOT NULL DEFAULT 'pending',
+        payment_method VARCHAR(40) NOT NULL DEFAULT 'stripe_card',
+        plan_tier VARCHAR(50),
+        promo_code VARCHAR(60),
+        billing_period_start TIMESTAMP,
+        billing_period_end TIMESTAMP,
+        receipt_url TEXT,
+        failure_reason TEXT,
+        metadata JSONB DEFAULT '{}'::jsonb,
+        paid_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
+    `);
+
     console.log('✅ Base de datos sincronizada con los nichos (automotive, spa, barbershop, legal, dental) y Canal Interno de Telegram por negocio.');
   } catch (err) {
     console.warn('⚠️ Aviso verificando esquema multi-nicho en BD:', err);
@@ -265,11 +319,19 @@ app.get('/api/categories', async (_req, res) => {
 app.use('/api/reports', router); // Ruta para reportar comentarios
 app.use('/api/staff', staffRoutes);
 app.use('/api/tenants', tenantRoutes);
+app.post('/api/services/backfill-translations', backfillServiceTranslations);
 app.use('/api/services', serviceRoutes);
 app.use('/api/directory', directoryRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/work-orders', workOrderRoutes);
 app.use('/api/appointments', appointmentRoutes);
+
+// Rutas de Configuración Global (SuperAdmin) y Pagos Stripe (`public.payments`)
+app.get('/api/platform-settings', getPlatformSettings);
+app.put('/api/platform-settings/card-payments', setCardPaymentsEnabled);
+app.post('/api/payments/create-checkout-session', createStripeCheckoutSession);
+app.post('/api/payments/webhook', handleStripeWebhook);
+app.get('/api/payments/history', getTenantPayments);
 
 // Rutas de Cupones Promocionales (public.promo_codes)
 app.get('/api/promo-codes', getPromoCodes);
