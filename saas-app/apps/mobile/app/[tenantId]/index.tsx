@@ -1005,7 +1005,7 @@ const WebStyles = ({ theme, tColor, brandColor }: { theme: 'dark' | 'light', tCo
 // 🧩 INTERFACES DE TYPESCRIPT
 // ==========================================
 interface PortfolioItem { url: string; title: string; description: string; translations?: any; }
-interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; }
+interface ReviewItem { id: string; clientKey: string; clientName: string; rating: number; reaction?: 'like' | 'dislike'; comment: string; serviceName?: string; createdAt: string; translations?: any; }
 interface PushCampaignItem { id: string; tenant_id?: string; title: string; message: string; target_audience: string; is_active?: boolean; sent_at: string; translations?: any; }
 interface VapiVoiceConfig { isActive?: boolean; phoneNumber?: string; privateApiKey?: string; phoneNumberId?: string; assistantId?: string; languageMode?: 'bilingual' | 'es' | 'en'; transferPhone?: string; webhookBaseUrl?: string; allowUrgentOverride?: boolean; lastSyncedAt?: string; }
 interface TelegramChannelConfig { isActive?: boolean; channelName?: string; chatId?: string; botToken?: string; notifyNewAppointments?: boolean; notifyRecordings?: boolean; notifyConfirmationsAndCancels?: boolean; notifyPOSClosures?: boolean; updatedAt?: string; }
@@ -5858,21 +5858,27 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                 {renderReportButton({ type: 'review', id: rev.id, title: `Reseña de ${rev.clientName}`, excerpt: String(rev.comment || '').slice(0, 200) }, true)}
                               </View>
                             </View>
-                            {rev.comment ? (
-                              <Text style={{ color: tColor.text, fontSize: 14, lineHeight: 20, fontStyle: 'italic', marginBottom: 16 }}>
-                                "{toTitleCase(rev.comment)}"
-                              </Text>
-                            ) : (
-                              <Text style={{ color: tColor.muted, fontSize: 13, fontStyle: 'italic', marginBottom: 16 }}>
-                                {isLike ? tr('El cliente recomendó este negocio con un 👍.', 'The client recommended this business with a 👍.') : tr('El cliente calificó este negocio sin dejar comentario.', 'The client rated this business without leaving a comment.')}
-                              </Text>
-                            )}
+                            {(() => {
+                              const localizedComment = String(rev?.translations?.[lang]?.comment || rev?.comment || '').trim();
+                              return localizedComment ? (
+                                <Text style={{ color: tColor.text, fontSize: 14, lineHeight: 20, fontStyle: 'italic', marginBottom: 16 }}>
+                                  "{toTitleCase(localizedComment)}"
+                                </Text>
+                              ) : (
+                                <Text style={{ color: tColor.muted, fontSize: 13, fontStyle: 'italic', marginBottom: 16 }}>
+                                  {isLike ? tr('El cliente recomendó este negocio con un 👍.', 'The client recommended this business with a 👍.') : tr('El cliente calificó este negocio sin dejar comentario.', 'The client rated this business without leaving a comment.')}
+                                </Text>
+                              );
+                            })()}
                           </View>
                           <View style={{ borderTopWidth: 1, borderTopColor: tColor.border, paddingTop: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                             <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 13 }}>👤 {toTitleCase(rev.clientName)}</Text>
-                            {rev.serviceName ? (
-                              <Text style={{ color: brandColor, fontSize: 11, fontWeight: 'bold' }}>✨ {toTitleCase(rev.serviceName)}</Text>
-                            ) : null}
+                            {(() => {
+                              const localizedServiceName = String(rev?.translations?.[lang]?.serviceName || rev?.serviceName || '').trim();
+                              return localizedServiceName ? (
+                                <Text style={{ color: brandColor, fontSize: 11, fontWeight: 'bold' }}>✨ {toTitleCase(localizedServiceName)}</Text>
+                              ) : null;
+                            })()}
                           </View>
                         </View>
                     );

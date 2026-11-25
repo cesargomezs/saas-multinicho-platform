@@ -1015,3 +1015,97 @@ export async function searchDirectory(req: Request, res: Response) {
     return res.status(500).json({ success: false, message: error.message || String(error) });
   }
 }
+
+// 🔄 Backfill de traducciones ES/EN para Portafolio y Campañas ya existentes en la BD
+export async function backfillTenantTranslations(req: Request, res: Response) {
+  try {
+    const tenantId = (req.headers['x-tenant-id'] as string) || (req.body?.tenantId as string);
+    const sourceLang: 'es' | 'en' = req.body?.sourceLang === 'en' ? 'en' : 'es';
+    const overwrite = Boolean(req.body?.overwrite);
+
+    const targetTenants = tenantId
+      ? await db.select().from(tenants).where(eq(tenants.id, tenantId))
+      : await db.select().from(tenants);
+
+    let updatedTenants = 0;
+
+    for (const t of targetTenants) {
+      let changed = false;
+      const rawPortfolio = safeParseJSON((t as any).portfolio);
+      let nextPortfolio = rawPortfolio;
+
+      if (Array.isArray(rawPortfolio) && rawPortfolio.length > 0) {
+        const mapped: any[] = [];
+        for (const item of rawPortfolio) {
+          if (!item || !item.title) {
+            mapped.push(item);
+            continue;
+          }
+          const exT = item.translations || {};
+          const hasBoth = Boolean(exT?.es?.title && exT?.en?.title);
+          if (!hasBoth || overwrite) {
+            const translations = await buildBilingualTitledTranslations({
+              title: item.title,
+              description: item.description || '',
+              sourceLang,
+              manualTranslations: overwrite ? null : exT,
+            });
+            mapped.push({ ...item, translations });
+            changed = true;
+          } else {
+            mapped.push(item);
+          }
+        }
+        nextPortfolio = mapped;
+      }
+
+      const loyalty = safeParseJSON((t as any).loyaltyConfig);
+      let nextLoyalty = loyalty;
+      if (loyalty && Array.isArray(loyalty.campaigns) && loyalty.campaigns.length > 0) {
+        const mappedCampaigns: any[] = [];
+        for (const camp of loyalty.campaigns) {
+          if (!camp || !camp.title || !camp.message) {
+            mappedCampaigns.push(camp);
+            continue;
+          }
+          const exC = camp.translations || {};
+          const hasBothC = Boolean(exC?.es?.title && exC?.en?.title);
+          if (!hasBothC || overwrite) {
+            const translations = await buildBilingualTitledTranslations({
+              title: camp.title,
+              message: camp.message,
+              sourceLang,
+              manualTranslations: overwrite ? null : exC,
+            });
+            mappedCampaigns.push({ ...camp, translations });
+            changed = true;
+          } else {
+            mappedCampaigns.push(camp);
+          }
+        }
+        nextLoyalty = { ...loyalty, campaigns: mappedCampaigns };
+      }
+
+      if (changed) {
+        await db
+          .update(tenants)
+          .set({
+            portfolio: nextPortfolio,
+            loyaltyConfig: nextLoyalty,
+          } as any)
+          .where(eq(tenants.id, t.id));
+        updatedTenants += 1;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Backfill de portafolio y campañas completado en ${updatedTenants} negocio(s).`,
+      updatedTenants,
+      totalEvaluated: targetTenants.length,
+    });
+  } catch (error: any) {
+    console.error('❌ Error en backfillTenantTranslations:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Error en backfill de tenant.' });
+  }
+}

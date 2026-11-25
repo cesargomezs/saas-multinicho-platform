@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -98,7 +98,7 @@ import {
 import staffRoutes from '../routes/staffRoutes';
 import directoryRoutes from '../routes/directoryRoutes';
 import router from '../routes/reportsRoute';
-import { generatePromoCode, getPromoCodes, validatePromoCode } from '../controllers/tenantController';
+import { generatePromoCode, getPromoCodes, validatePromoCode, backfillTenantTranslations } from '../controllers/tenantController';
 import { backfillServiceTranslations } from '../controllers/serviceController';
 import {
   getPlatformSettings,
@@ -316,10 +316,19 @@ app.get('/api/categories', async (_req, res) => {
 });
 
 // 4. Registrar Rutas de Express
+// Healthcheck ligero (sin tocar BD) para waking / monitoreo rápido en Render o proxies
+app.get('/health', (_req, res) => {
+  return res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
+});
+app.get('/api/health', (_req, res) => {
+  return res.status(200).json({ ok: true, status: 'alive', timestamp: new Date().toISOString() });
+});
+
 app.use('/api/reports', router); // Ruta para reportar comentarios
 app.use('/api/staff', staffRoutes);
 app.use('/api/tenants', tenantRoutes);
 app.post('/api/services/backfill-translations', backfillServiceTranslations);
+app.post('/api/tenants/backfill-translations', backfillTenantTranslations);
 app.use('/api/services', serviceRoutes);
 app.use('/api/directory', directoryRoutes);
 app.use('/api/inventory', inventoryRoutes);
@@ -472,11 +481,25 @@ app.post(['/api/notifications/staff-event', '/api/notifications/send', '/api/dev
   }
 });
 
+// 🛡️ Manejador global de errores para que una falla puntual de conexión no deje colgada la petición
+app.use((err: any, _req: Request, res: Response, _next: any) => {
+  console.error('❌ Error no controlado en Express:', err);
+  if (!res.headersSent) {
+    return res.status(500).json({
+      success: false,
+      message: err?.message || 'Error temporal de conexión en el servidor. Intenta de nuevo.',
+    });
+  }
+});
+
 // 5. Levantar el Servidor, sincronizar BD y arrancar Cron de recordatorios
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor ejecutándose en http://127.0.0.1:${PORT}`);
   ensureMultinicheDatabaseReady().finally(() => {
     startAppointmentRemindersCron();
+    setInterval(() => {
+      db.execute(sql`SELECT 1`).catch(() => {});
+    }, 4 * 60 * 1000);
   });
 });

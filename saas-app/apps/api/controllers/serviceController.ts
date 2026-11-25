@@ -7,6 +7,30 @@ import {
   ServiceTranslations,
 } from '../src/services/translationService';
 
+async function withDbRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err || '').toLowerCase();
+      const isTransient =
+        msg.includes('connection') ||
+        msg.includes('terminat') ||
+        msg.includes('closed') ||
+        msg.includes('timeout') ||
+        msg.includes('econnreset') ||
+        msg.includes('57p01');
+      if (!isTransient || attempt === retries) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 // 1. Listar todos los servicios del catálogo del tenant actual (incluye `translations` ES/EN)
 export async function getServices(req: Request, res: Response) {
   try {
@@ -15,10 +39,12 @@ export async function getServices(req: Request, res: Response) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
     }
 
-    const tenantServices = await db
-      .select()
-      .from(services)
-      .where(eq(services.tenantId, tenantId));
+    const tenantServices = await withDbRetry(() =>
+      db
+        .select()
+        .from(services)
+        .where(eq(services.tenantId, tenantId))
+    );
 
     return res.status(200).json({ success: true, services: tenantServices });
   } catch (error: any) {
@@ -56,18 +82,20 @@ export const createService = async (req: Request, res: Response) => {
       manualTranslations: manualTranslations || null,
     });
 
-    const [createdService] = await db
-      .insert(services)
-      .values({
-        tenantId,
-        name: cleanName,
-        description: cleanDesc,
-        price: String(price),
-        durationMinutes: Number(durationMinutes || 30),
-        imageUrl: imageUrl || null,
-        translations,
-      } as any)
-      .returning();
+    const [createdService] = await withDbRetry(() =>
+      db
+        .insert(services)
+        .values({
+          tenantId,
+          name: cleanName,
+          description: cleanDesc,
+          price: String(price),
+          durationMinutes: Number(durationMinutes || 30),
+          imageUrl: imageUrl || null,
+          translations,
+        } as any)
+        .returning()
+    );
 
     // Disparar en segundo plano Push a clientes en el código postal / radio cercano + aviso Telegram
     (async () => {
@@ -152,10 +180,12 @@ export async function updateService(req: Request, res: Response) {
 
     if (manualTranslations && typeof manualTranslations === 'object') {
       // El dueño editó manualmente ES y/o EN: completar cualquier hueco faltante sin pisar sus cambios
-      const [existing] = await db
-        .select()
-        .from(services)
-        .where(and(eq(services.id, id), eq(services.tenantId, tenantId)));
+      const [existing] = await withDbRetry(() =>
+        db
+          .select()
+          .from(services)
+          .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
+      );
 
       if (!existing) {
         return res.status(404).json({ success: false, error: 'Servicio no encontrado o no pertenece a este tenant.' });
@@ -174,10 +204,12 @@ export async function updateService(req: Request, res: Response) {
         manualTranslations: mergedManual,
       });
     } else if (textChanged) {
-      const [existing] = await db
-        .select()
-        .from(services)
-        .where(and(eq(services.id, id), eq(services.tenantId, tenantId)));
+      const [existing] = await withDbRetry(() =>
+        db
+          .select()
+          .from(services)
+          .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
+      );
 
       if (!existing) {
         return res.status(404).json({ success: false, error: 'Servicio no encontrado o no pertenece a este tenant.' });
@@ -203,11 +235,13 @@ export async function updateService(req: Request, res: Response) {
       return res.status(400).json({ success: false, error: 'No se enviaron datos válidos para actualizar.' });
     }
 
-    const [updatedService] = await db
-      .update(services)
-      .set(updateData)
-      .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
-      .returning();
+    const [updatedService] = await withDbRetry(() =>
+      db
+        .update(services)
+        .set(updateData)
+        .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
+        .returning()
+    );
 
     if (!updatedService) {
       return res.status(404).json({ success: false, error: 'Servicio no encontrado o no pertenece a este tenant.' });
@@ -230,10 +264,12 @@ export async function backfillServiceTranslations(req: Request, res: Response) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
     }
 
-    const tenantServices = await db
-      .select()
-      .from(services)
-      .where(eq(services.tenantId, tenantId));
+    const tenantServices = await withDbRetry(() =>
+      db
+        .select()
+        .from(services)
+        .where(eq(services.tenantId, tenantId))
+    );
 
     let updatedCount = 0;
 
@@ -250,10 +286,12 @@ export async function backfillServiceTranslations(req: Request, res: Response) {
         manualTranslations: existingTrans,
       });
 
-      await db
-        .update(services)
-        .set({ translations } as any)
-        .where(and(eq(services.id, srv.id), eq(services.tenantId, tenantId)));
+      await withDbRetry(() =>
+        db
+          .update(services)
+          .set({ translations } as any)
+          .where(and(eq(services.id, srv.id), eq(services.tenantId, tenantId)))
+      );
 
       updatedCount += 1;
     }
@@ -279,10 +317,12 @@ export async function deleteService(req: Request, res: Response) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
     }
 
-    const [deleted] = await db
-      .delete(services)
-      .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
-      .returning();
+    const [deleted] = await withDbRetry(() =>
+      db
+        .delete(services)
+        .where(and(eq(services.id, id), eq(services.tenantId, tenantId)))
+        .returning()
+    );
 
     if (!deleted) {
       return res.status(404).json({ success: false, error: 'Servicio no encontrado.' });
