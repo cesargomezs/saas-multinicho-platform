@@ -309,7 +309,7 @@ app.post('/api/reviews', saveClientReview);
 // Rutas de prueba (Cron 6h + Telegram + Push)
 app.post('/api/dev/run-reminders-cron', async (req, res) => {
   const forceAllActive = Boolean(req.body?.forceAllActive);
-  const stats = await runSixHourAppointmentRemindersJob({ forceAllActive });
+  const stats = await (runSixHourAppointmentRemindersJob as any)(forceAllActive ? { forceAllActive } : undefined);
   return res.json({ success: true, forceAllActive, ...stats });
 });
 
@@ -322,7 +322,7 @@ app.post('/api/dev/test-notifications', async (req, res) => {
   const sName = serviceName || 'Corte + Barba';
   const whenStr = whenLabel || 'En ~6 horas';
 
-  await Promise.allSettled([
+  const settled = await Promise.allSettled([
     sendTelegramNotification(
       `💈 <b>[PRUEBA] Cita en Barbería</b>\n👤 <b>Cliente:</b> ${cName}\n✂️ <b>Servicio:</b> ${sName}\n🕒 <b>Horario:</b> ${whenStr}`,
       tenantId,
@@ -339,7 +339,7 @@ app.post('/api/dev/test-notifications', async (req, res) => {
           },
           'dev_test_client'
         )
-      : Promise.resolve(),
+      : Promise.resolve({ skipped: true, reason: 'no_clientUserId' }),
     notifyTenantPush(
       tenantId,
       {
@@ -351,7 +351,63 @@ app.post('/api/dev/test-notifications', async (req, res) => {
     ),
   ]);
 
-  return res.json({ success: true, message: 'Prueba ejecutada (Telegram si aplica + Push cliente + Push trabajador).' });
+  const debugTrace = settled.map((item, idx) => ({
+    step: idx === 0 ? 'telegram' : idx === 1 ? 'clientPush' : 'tenantStaffPush',
+    status: item.status,
+    value: item.status === 'fulfilled' ? item.value : String((item as PromiseRejectedResult).reason || 'error'),
+  }));
+
+  return res.json({ success: true, message: 'Prueba ejecutada (Telegram si aplica + Push cliente + Push trabajador).', debugTrace });
+});
+
+app.post(['/api/notifications/staff-event', '/api/notifications/send', '/api/dev/notify-assigned', '/api/dev/notify-cancelled'], async (req, res) => {
+  try {
+    const body = req.body || {};
+    const tenantId = String(body.tenantId || req.headers['x-tenant-id'] || '').trim();
+    if (!tenantId) {
+      return res.status(400).json({ success: false, message: 'Falta tenantId' });
+    }
+
+    const isCancelled = body.eventType === 'cancelled' || String(req.path || '').includes('notify-cancelled');
+    const sLabel = body.staffName || 'Staff asignado';
+    const cLabel = body.clientName || 'Cliente';
+    const srvLabel = body.serviceName || 'Servicio';
+    const whenStr = [body.appointmentDate, body.appointmentTime].filter(Boolean).join(' • ') || 'Hoy';
+
+    const tgText = isCancelled
+      ? `❌ <b>Cita Cancelada (${sLabel})</b>\n👤 <b>Cliente:</b> ${cLabel}\n✂️ <b>Servicio:</b> ${srvLabel}\n🕒 <b>Horario:</b> ${whenStr}${body.reason ? `\n📝 <b>Motivo:</b> ${body.reason}` : ''}`
+      : `📌 <b>Nueva Cita Asignada (${sLabel})</b>\n👤 <b>Cliente:</b> ${cLabel}\n✂️ <b>Servicio:</b> ${srvLabel}\n🕒 <b>Horario:</b> ${whenStr}`;
+
+    const pushTitle = body.title || (isCancelled ? `❌ Cita cancelada (${sLabel})` : `📌 Nueva cita asignada (${sLabel})`);
+    const pushBody = body.body || `${cLabel} • ${srvLabel} (${whenStr})`;
+
+    const settled = await Promise.allSettled([
+      sendTelegramNotification(tgText, tenantId, isCancelled ? 'status' : 'appointment'),
+      notifyTenantPush(
+        tenantId,
+        {
+          title: pushTitle,
+          body: pushBody,
+          data: {
+            tenantId,
+            staffId: body.staffId || null,
+            eventType: isCancelled ? 'appointment_cancelled' : 'appointment_assigned',
+          },
+        },
+        body.staffId || null
+      ),
+    ]);
+
+    const debugTrace = settled.map((item, idx) => ({
+      step: idx === 0 ? 'telegram' : 'tenantStaffPush',
+      status: item.status,
+      value: item.status === 'fulfilled' ? item.value : String((item as PromiseRejectedResult).reason || 'error'),
+    }));
+
+    return res.json({ success: true, debugTrace });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Error enviando notificación a staff' });
+  }
 });
 
 // 5. Levantar el Servidor, sincronizar BD y arrancar Cron de recordatorios
