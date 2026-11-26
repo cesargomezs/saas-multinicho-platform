@@ -167,12 +167,15 @@ export const pushNotifications = pgTable('push_notifications', {
   tenantId: uuid('tenant_id').references(() => tenants.id),
   userId: uuid('user_id').references(() => users.id),
   deviceId: uuid('device_id').references(() => userDevices.id),
-  pushToken: varchar('push_token', { length: 255 }).notNull(),
+  pushToken: varchar('push_token', { length: 255 }),
+  role: varchar('role', { length: 20 }).default('client').notNull(), // 'client' | 'business'
   eventType: varchar('event_type', { length: 50 }).notNull(), // 'appointment' | 'new_service' | 'new_business' | 'campaign'
   title: varchar('title', { length: 255 }).notNull(),
   body: text('body').notNull(),
   data: jsonb('data').default({}),
   status: varchar('status', { length: 30 }).default('pending').notNull(), // 'pending' | 'sent' | 'failed'
+  isRead: boolean('is_read').default(false).notNull(),
+  isDeleted: boolean('is_deleted').default(false).notNull(),
   errorMessage: text('error_message'),
   sentAt: timestamp('sent_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -181,6 +184,7 @@ export const pushNotifications = pgTable('push_notifications', {
     tenantStatusIdx: index('push_notifications_tenant_status_idx').on(table.tenantId, table.status),
     userIdx: index('push_notifications_user_idx').on(table.userId),
     eventIdx: index('push_notifications_event_type_idx').on(table.eventType),
+    inboxIdx: index('push_notifications_inbox_idx').on(table.userId, table.isDeleted, table.createdAt),
   };
 });
 

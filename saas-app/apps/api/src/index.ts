@@ -107,6 +107,7 @@ import {
   handleStripeWebhook,
   getTenantPayments,
 } from '../controllers/paymentController';
+import { deleteAllNotifications, deleteNotificationById, getNotifications, markNotificationsRead } from '../controllers/notificationController';
 
 // =========================================================================
 // 🗄️ AUTO-MIGRACIÓN Y SEMILLA EN BD PARA NUEVOS NICHOS (LEGAL & DENTAL)
@@ -376,6 +377,12 @@ app.post('/api/support/autoflow', requestAutoFlowSupport);
 app.get('/api/campaigns', getPushCampaigns);
 app.post('/api/campaigns', createPushCampaign);
 app.post('/api/reviews', saveClientReview);
+
+// Rutas de Bandeja de Notificaciones (Cliente y Negocio)
+app.get('/api/notifications', getNotifications);
+app.put('/api/notifications/read', markNotificationsRead);
+app.delete('/api/notifications/:id', deleteNotificationById);
+app.delete('/api/notifications', deleteAllNotifications);
 
 // Rutas de prueba (Cron 6h + Telegram + Push)
 app.post('/api/dev/run-reminders-cron', async (req, res) => {

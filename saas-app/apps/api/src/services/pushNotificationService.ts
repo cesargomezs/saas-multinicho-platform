@@ -4,6 +4,7 @@ import { sql } from 'drizzle-orm';
 export interface ExpoPushPayload {
   title: string;
   body: string;
+  badge?: number;
   data?: Record<string, any>;
 }
 
@@ -68,6 +69,7 @@ export async function sendExpoPushInBatches(tokens: string[], payload: ExpoPushP
       sound: 'default',
       title: payload.title,
       body: payload.body,
+      ...(typeof payload.badge === 'number' ? { badge: payload.badge } : {}),
       data: payload.data || {},
     }));
 
@@ -104,20 +106,99 @@ export async function sendExpoPushInBatches(tokens: string[], payload: ExpoPushP
   }
 }
 
+// Helper interno para persistir la notificación en la bandeja real (public.push_notifications)
+async function saveNotificationToInbox(params: {
+  tenantId?: string | null;
+  userId?: string | null;
+  pushToken?: string | null;
+  role: 'client' | 'business';
+  eventType: string;
+  payload: ExpoPushPayload;
+}) {
+  try {
+    await db.execute(sql`
+      INSERT INTO public.push_notifications (
+        tenant_id, user_id, push_token, role, event_type, title, body, data, status, is_read, is_deleted, sent_at, created_at
+      )
+      VALUES (
+        ${params.tenantId ? sql`${params.tenantId}::uuid` : sql`NULL`},
+        ${params.userId ? sql`${params.userId}::uuid` : sql`NULL`},
+        ${params.pushToken || null},
+        ${params.role},
+        ${params.eventType},
+        ${params.payload.title},
+        ${params.payload.body},
+        ${JSON.stringify(params.payload.data || {})}::jsonb,
+        'sent',
+        FALSE,
+        FALSE,
+        NOW(),
+        NOW()
+      )
+    `);
+  } catch (err) {
+    console.error('⚠️ Error guardando notificación en push_notifications:', err);
+  }
+}
+
+// 🏢 Notificar al Dueño / Barbero / Staff (se guarda en bandeja de negocio + Expo Push)
 export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayload): Promise<void> {
   if (!tenantId) return;
+
   const devRes = await db.execute(sql`
-    SELECT expo_push_token
+    SELECT expo_push_token, user_id
     FROM public.device_push_tokens
     WHERE is_active = TRUE AND tenant_id = ${tenantId}::uuid
   `);
   const rows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
+
+  // Guardar 1 registro en bandeja de negocio (Hoy + Futuros)
+  await saveNotificationToInbox({
+    tenantId,
+    userId: rows[0]?.user_id ? String(rows[0].user_id) : null,
+    pushToken: rows[0]?.expo_push_token ? String(rows[0].expo_push_token) : null,
+    role: 'business',
+    eventType: String(payload.data?.eventType || 'appointment'),
+    payload,
+  });
+
   await sendExpoPushInBatches(
     rows.map((r: any) => String(r.expo_push_token)),
     payload
   );
 }
 
+// 👤 Notificar a un Cliente específico (confirmación, cancelación, recordatorio 6h)
+export async function notifyClientPush(
+  userId: string,
+  tenantId: string | null,
+  payload: ExpoPushPayload
+): Promise<void> {
+  if (!userId) return;
+
+  const devRes = await db.execute(sql`
+    SELECT expo_push_token
+    FROM public.device_push_tokens
+    WHERE is_active = TRUE AND user_id = ${userId}::uuid
+  `);
+  const rows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
+
+  await saveNotificationToInbox({
+    tenantId,
+    userId,
+    pushToken: rows[0]?.expo_push_token ? String(rows[0].expo_push_token) : null,
+    role: 'client',
+    eventType: String(payload.data?.eventType || 'appointment'),
+    payload,
+  });
+
+  await sendExpoPushInBatches(
+    rows.map((r: any) => String(r.expo_push_token)),
+    payload
+  );
+}
+
+// 📍 Notificar a Clientes cercanos por ZIP o radio <= 8 millas (nuevos negocios / promos)
 export async function notifyNearbyClientsPush(params: {
   zipCode?: string | null;
   latitude?: number | null;
@@ -129,7 +210,7 @@ export async function notifyNearbyClientsPush(params: {
   const lonNum = params.longitude !== null && params.longitude !== undefined ? Number(params.longitude) : null;
 
   const res = await db.execute(sql`
-    SELECT expo_push_token
+    SELECT expo_push_token, user_id
     FROM public.device_push_tokens
     WHERE is_active = TRUE
       AND role = 'client'
@@ -149,6 +230,27 @@ export async function notifyNearbyClientsPush(params: {
       )
   `);
   const rows = Array.isArray(res) ? res : (res as any).rows || [];
+
+  // Guardar en bandeja una vez por cada user_id único alcanzado
+  const seenUsers = new Set<string>();
+  const tenantIdFromData = params.payload.data?.tenantId ? String(params.payload.data.tenantId) : null;
+  const eventType = String(params.payload.data?.eventType || 'nearby_zip');
+
+  for (const r of rows) {
+    const uid = r.user_id ? String(r.user_id) : null;
+    if (uid && !seenUsers.has(uid)) {
+      seenUsers.add(uid);
+      await saveNotificationToInbox({
+        tenantId: tenantIdFromData,
+        userId: uid,
+        pushToken: String(r.expo_push_token),
+        role: 'client',
+        eventType,
+        payload: params.payload,
+      });
+    }
+  }
+
   await sendExpoPushInBatches(
     rows.map((r: any) => String(r.expo_push_token)),
     params.payload

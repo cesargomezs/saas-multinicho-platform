@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -12,6 +12,10 @@ import {
   Image,
   StatusBar,
   ActivityIndicator,
+  Modal,
+  Animated,
+  PanResponder,
+  AppState,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -182,6 +186,308 @@ const haversineMiles = (lat1: number, lon1: number, lat2: number, lon2: number):
   return Number((R * c).toFixed(1));
 };
 
+
+// ==========================================
+// 🔔 CENTRO DE NOTIFICACIONES PRO (BADGE + SWIPE RIGHT TO DELETE)
+// ==========================================
+interface AppNotificationItem {
+  id: string;
+  title: string;
+  body: string;
+  role: 'client' | 'business';
+  category: 'nearby_zip' | 'promo' | 'appointment' | 'staff_alert';
+  tenantId?: string;
+  appointmentId?: string;
+  zipCode?: string;
+  createdAt: string;
+  isRead: boolean;
+  data?: Record<string, any>;
+}
+
+const NOTIF_STORAGE_KEY = 'picktime_notifications_v1';
+const NOTIF_DISMISSED_KEY = 'picktime_notifications_dismissed_v1';
+
+const readPersistedJson = async <T,>(key: string, fallback: T): Promise<T> => {
+  try {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const raw = window.localStorage?.getItem(key);
+      if (raw) return JSON.parse(raw) as T;
+    } else {
+      try {
+        const AsyncStorageMod = require('@react-native-async-storage/async-storage');
+        const asyncStorage = AsyncStorageMod?.default || AsyncStorageMod;
+        if (asyncStorage && typeof asyncStorage.getItem === 'function') {
+          const raw = await asyncStorage.getItem(key);
+          if (raw) return JSON.parse(raw) as T;
+        }
+      } catch (_asErr) {}
+    }
+    const mem = (globalThis as any).__picktimeNotifStore?.[key];
+    if (mem !== undefined) return mem as T;
+  } catch (_e) {}
+  return fallback;
+};
+
+const writePersistedJson = async (key: string, value: any): Promise<void> => {
+  try {
+    if (!(globalThis as any).__picktimeNotifStore) {
+      (globalThis as any).__picktimeNotifStore = {};
+    }
+    (globalThis as any).__picktimeNotifStore[key] = value;
+
+    const serialized = JSON.stringify(value);
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.localStorage?.setItem(key, serialized);
+    } else {
+      try {
+        const AsyncStorageMod = require('@react-native-async-storage/async-storage');
+        const asyncStorage = AsyncStorageMod?.default || AsyncStorageMod;
+        if (asyncStorage && typeof asyncStorage.setItem === 'function') {
+          await asyncStorage.setItem(key, serialized);
+        }
+      } catch (_asErr) {}
+    }
+  } catch (_e) {}
+};
+
+const formatNotifRelativeTime = (isoStr: string, lang: 'es' | 'en'): string => {
+  const ts = new Date(isoStr).getTime();
+  if (Number.isNaN(ts)) return lang === 'en' ? 'Just now' : 'Ahora';
+  const diffMin = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+  if (diffMin < 1) return lang === 'en' ? 'Just now' : 'Ahora';
+  if (diffMin < 60) return lang === 'en' ? `${diffMin}m ago` : `Hace ${diffMin} min`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return lang === 'en' ? `${diffHr}h ago` : `Hace ${diffHr} h`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays === 1) return lang === 'en' ? 'Yesterday' : 'Ayer';
+  return lang === 'en' ? `${diffDays}d ago` : `Hace ${diffDays} d`;
+};
+
+const SwipeableNotificationRow = ({
+  item,
+  tColor,
+  theme,
+  lang,
+  onPress,
+  onDelete,
+}: {
+  item: AppNotificationItem;
+  tColor: any;
+  theme: 'dark' | 'light';
+  lang: 'es' | 'en';
+  onPress: (item: AppNotificationItem) => void;
+  onDelete: (id: string) => void;
+}) => {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const rowOpacity = useRef(new Animated.Value(1)).current;
+  const isDeletingRef = useRef(false);
+
+  const triggerDismissAnimation = useCallback(() => {
+    if (isDeletingRef.current) return;
+    isDeletingRef.current = true;
+    Animated.parallel([
+      Animated.timing(translateX, {
+        toValue: 420,
+        duration: 210,
+        useNativeDriver: true,
+      }),
+      Animated.timing(rowOpacity, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      onDelete(item.id);
+    });
+  }, [item.id, onDelete, rowOpacity, translateX]);
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_evt, gesture) =>
+          !isDeletingRef.current && gesture.dx > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.2,
+        onPanResponderMove: (_evt, gesture) => {
+          if (gesture.dx > 0) {
+            translateX.setValue(Math.min(gesture.dx, 260));
+          }
+        },
+        onPanResponderRelease: (_evt, gesture) => {
+          if (gesture.dx > 92 || gesture.vx > 0.65) {
+            triggerDismissAnimation();
+          } else {
+            Animated.spring(translateX, {
+              toValue: 0,
+              bounciness: 6,
+              speed: 18,
+              useNativeDriver: true,
+            }).start();
+          }
+        },
+        onPanResponderTerminate: () => {
+          Animated.spring(translateX, {
+            toValue: 0,
+            useNativeDriver: true,
+          }).start();
+        },
+      }),
+    [translateX, triggerDismissAnimation]
+  );
+
+  const accentColor =
+    item.category === 'staff_alert'
+      ? '#3B82F6'
+      : item.category === 'promo'
+      ? '#FF5E00'
+      : item.category === 'appointment'
+      ? '#10B981'
+      : '#F59E0B';
+
+  const iconName =
+    item.category === 'staff_alert'
+      ? 'briefcase'
+      : item.category === 'promo'
+      ? 'tag'
+      : item.category === 'appointment'
+      ? 'calendar'
+      : 'map-pin';
+
+  const roleTag =
+    item.role === 'business'
+      ? lang === 'en'
+        ? 'Business / Staff'
+        : 'Negocio / Staff'
+      : item.zipCode
+      ? `ZIP ${item.zipCode}`
+      : item.category === 'promo'
+      ? lang === 'en'
+        ? 'Active Promo'
+        : 'Promo Activa'
+      : lang === 'en'
+      ? 'Client'
+      : 'Cliente';
+
+  return (
+    <Animated.View style={{ opacity: rowOpacity, marginBottom: 10, borderRadius: 16, overflow: 'hidden', position: 'relative' }}>
+      {/* Fondo rojo SOLO visible al deslizar hacia la derecha (invisible en reposo) */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            backgroundColor: '#EF4444',
+            borderRadius: 16,
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingLeft: 20,
+            gap: 8,
+            opacity: translateX.interpolate({
+              inputRange: [0, 12, 56],
+              outputRange: [0, 0, 1],
+              extrapolate: 'clamp',
+            }),
+          },
+        ]}
+      >
+        <Feather name="trash-2" size={18} color="#FFFFFF" />
+        <Text style={{ color: '#FFFFFF', fontWeight: '900', fontSize: 13 }}>
+          {lang === 'en' ? 'Delete' : 'Eliminar'}
+        </Text>
+      </Animated.View>
+
+      {/* Tarjeta deslizable */}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={{
+          transform: [{ translateX }],
+          backgroundColor: theme === 'dark' ? '#121721' : '#FFFFFF',
+          borderRadius: 16,
+          borderWidth: 1,
+          borderColor: item.isRead ? tColor.border : `${accentColor}66`,
+          borderLeftWidth: 4,
+          borderLeftColor: accentColor,
+          overflow: 'hidden',
+        }}
+      >
+        <TouchableOpacity
+          activeOpacity={0.88}
+          onPress={() => onPress(item)}
+          style={{ padding: 14, flexDirection: 'row', alignItems: 'flex-start', gap: 12 }}
+        >
+          <View
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 11,
+              backgroundColor: `${accentColor}1C`,
+              borderWidth: 1,
+              borderColor: `${accentColor}44`,
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              marginTop: 2,
+            }}
+          >
+            <Feather name={iconName as any} size={17} color={accentColor} />
+          </View>
+
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
+                {!item.isRead ? (
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: '#FF5E00', flexShrink: 0 }} />
+                ) : null}
+                <Text style={{ color: tColor.text, fontWeight: item.isRead ? '700' : '900', fontSize: 13.5, flex: 1 }} numberOfLines={1}>
+                  {item.title}
+                </Text>
+              </View>
+              <Text style={{ color: tColor.muted, fontSize: 10.5, fontWeight: '700', flexShrink: 0 }}>
+                {formatNotifRelativeTime(item.createdAt, lang)}
+              </Text>
+            </View>
+
+            <Text style={{ color: tColor.muted, fontSize: 12.5, lineHeight: 17.5 }} numberOfLines={2}>
+              {item.body}
+            </Text>
+
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+              <View
+                style={{
+                  paddingHorizontal: 8,
+                  paddingVertical: 2.5,
+                  borderRadius: 7,
+                  backgroundColor: `${accentColor}18`,
+                }}
+              >
+                <Text style={{ color: accentColor, fontSize: 10.5, fontWeight: '900' }}>
+                  {roleTag}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                onPress={triggerDismissAnimation}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel={lang === 'en' ? 'Delete notification' : 'Eliminar notificación'}
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(239, 68, 68, 0.14)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(239, 68, 68, 0.35)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Feather name="trash-2" size={17} color="#EF4444" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Animated.View>
+    </Animated.View>
+  );
+};
+
 export default function DirectoryHomeScreen() {
   const router = useRouter();
   const { category: categoryParam } = useLocalSearchParams();
@@ -276,6 +582,172 @@ export default function DirectoryHomeScreen() {
   const [isLoadingTenants, setIsLoadingTenants] = useState<boolean>(true);
   const [isSearchingZip, setIsSearchingZip] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+
+  // 🔔 CENTRO DE NOTIFICACIONES + BADGE EN ICONO DE LA APP
+  const [notifications, setNotifications] = useState<AppNotificationItem[]>([]);
+  const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
+  const [notifRoleTab, setNotifRoleTab] = useState<'all' | 'client' | 'business'>('all');
+  const [notifsHydrated, setNotifsHydrated] = useState<boolean>(false);
+
+  // Cargar historial guardado de notificaciones y descartadas
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const [savedNotifs, savedDismissed] = await Promise.all([
+        readPersistedJson<AppNotificationItem[]>(NOTIF_STORAGE_KEY, []),
+        readPersistedJson<string[]>(NOTIF_DISMISSED_KEY, []),
+      ]);
+      if (!mounted) return;
+      if (Array.isArray(savedNotifs)) setNotifications(savedNotifs);
+      if (Array.isArray(savedDismissed)) setDismissedNotifIds(savedDismissed);
+      setNotifsHydrated(true);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Persistir notificaciones cada vez que cambian + sincronizar badge real del icono (iOS/Android)
+  const unreadNotifCount = useMemo(
+    () => notifications.filter((n) => !n.isRead).length,
+    [notifications]
+  );
+
+  useEffect(() => {
+    if (!notifsHydrated) return;
+    writePersistedJson(NOTIF_STORAGE_KEY, notifications);
+    if (Platform.OS !== 'web') {
+      try {
+        const Notifications = require('expo-notifications');
+        if (typeof Notifications?.setBadgeCountAsync === 'function') {
+          Notifications.setBadgeCountAsync(unreadNotifCount).catch(() => {});
+        }
+      } catch (_badgeErr) {}
+    }
+  }, [notifications, unreadNotifCount, notifsHydrated]);
+
+  useEffect(() => {
+    if (!notifsHydrated) return;
+    writePersistedJson(NOTIF_DISMISSED_KEY, dismissedNotifIds);
+  }, [dismissedNotifIds, notifsHydrated]);
+
+  // Escuchar notificaciones push entrantes (Expo) para listarlas en tiempo real
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let recvSub: any = null;
+    let respSub: any = null;
+    try {
+      const Notifications = require('expo-notifications');
+      const pushIncomingToInbox = (notifObj: any, markRead = false) => {
+        const content = notifObj?.request?.content || {};
+        const data = (content?.data && typeof content.data === 'object') ? content.data : {};
+        const incomingId = String(notifObj?.request?.identifier || data?.notificationId || `push-${Date.now()}`);
+        const roleRaw = String(data?.role || data?.audience || '').toLowerCase();
+        const eventRaw = String(data?.eventType || '').toLowerCase();
+        const isBiz =
+          roleRaw === 'owner' ||
+          roleRaw === 'staff' ||
+          roleRaw === 'barber' ||
+          data?.view === 'mecanico' ||
+          eventRaw.includes('staff') ||
+          eventRaw.includes('assigned');
+
+        const newItem: AppNotificationItem = {
+          id: incomingId,
+          title: String(content?.title || (isBiz ? 'Nueva alerta de tu negocio' : 'Nueva notificación')),
+          body: String(content?.body || ''),
+          role: isBiz ? 'business' : 'client',
+          category: isBiz
+            ? 'staff_alert'
+            : eventRaw.includes('promo') || eventRaw.includes('campaign')
+            ? 'promo'
+            : data?.appointmentId
+            ? 'appointment'
+            : 'nearby_zip',
+          tenantId: data?.tenantId ? String(data.tenantId) : undefined,
+          appointmentId: data?.appointmentId ? String(data.appointmentId) : undefined,
+          zipCode: data?.zipCode ? String(data.zipCode) : undefined,
+          createdAt: new Date().toISOString(),
+          isRead: markRead,
+          data,
+        };
+
+        setNotifications((prev) => {
+          const withoutDup = prev.filter((x) => x.id !== newItem.id);
+          return [newItem, ...withoutDup].slice(0, 60);
+        });
+      };
+
+      if (typeof Notifications?.addNotificationReceivedListener === 'function') {
+        recvSub = Notifications.addNotificationReceivedListener((notification: any) => {
+          pushIncomingToInbox(notification, false);
+        });
+      }
+      if (typeof Notifications?.addNotificationResponseReceivedListener === 'function') {
+        respSub = Notifications.addNotificationResponseReceivedListener((response: any) => {
+          pushIncomingToInbox(response?.notification, true);
+        });
+      }
+    } catch (_e) {}
+
+    return () => {
+      try { recvSub?.remove?.(); } catch (_e) {}
+      try { respSub?.remove?.(); } catch (_e) {}
+    };
+  }, []);
+
+  const handleDeleteNotification = useCallback((id: string) => {
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
+    setDismissedNotifIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
+
+  const handleMarkAllNotificationsRead = useCallback(() => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
+  }, []);
+
+  const handleClearAllNotifications = useCallback(() => {
+    setNotifications((prev) => {
+      const toDismiss = prev
+        .filter((n) => notifRoleTab === 'all' || n.role === notifRoleTab)
+        .map((n) => n.id);
+      if (toDismiss.length > 0) {
+        setDismissedNotifIds((dPrev) => Array.from(new Set([...dPrev, ...toDismiss])));
+      }
+      return notifRoleTab === 'all'
+        ? []
+        : prev.filter((n) => n.role !== notifRoleTab);
+    });
+  }, [notifRoleTab]);
+
+  const handleNotificationTap = useCallback(
+    (item: AppNotificationItem) => {
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === item.id ? { ...n, isRead: true } : n))
+      );
+      setIsNotificationsOpen(false);
+      if (!item.tenantId) return;
+
+      if (item.role === 'business') {
+        const qs = new URLSearchParams({ view: 'mecanico', section: 'today' });
+        if (item.appointmentId) qs.set('appointmentId', item.appointmentId);
+        router.push(`/${item.tenantId}?${qs.toString()}` as any);
+        return;
+      }
+
+      if (item.appointmentId) {
+        router.push(`/${item.tenantId}?view=expediente&appointmentId=${encodeURIComponent(item.appointmentId)}` as any);
+        return;
+      }
+
+      router.push(`/${item.tenantId}` as any);
+    },
+    [router]
+  );
+
+  const visibleNotifications = useMemo(() => {
+    return notifications.filter((n) => notifRoleTab === 'all' || n.role === notifRoleTab);
+  }, [notifications, notifRoleTab]);
 
   // ❤️ FAVORITOS SINCRONIZADOS CON LA VISTA INTERNA DEL NEGOCIO
   const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
@@ -448,6 +920,93 @@ export default function DirectoryHomeScreen() {
     // Al abrir la app, carga todos los negocios del backend sin bloquear por GPS para que siempre muestre los negocios disponibles
     loadDirectoryTenants();
   }, []);
+
+  // 🔄 Refrescar negocios automáticamente cuando la app regresa de segundo plano
+  useEffect(() => {
+    let prevState = AppState.currentState;
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (prevState !== 'active' && nextState === 'active') {
+        loadDirectoryTenants();
+      }
+      prevState = nextState;
+    });
+    return () => {
+      sub.remove();
+    };
+  }, []);
+
+  // 📍 Detectar nuevos negocios y promos activas en el código postal del cliente y agregarlos a su bandeja (si no fueron descartados)
+  useEffect(() => {
+    if (!notifsHydrated || allTenants.length === 0) return;
+
+    const cleanZipSearch = locationQuery.replace(/\D/g, '');
+    const candidates: AppNotificationItem[] = [];
+
+    allTenants.forEach((biz: any) => {
+      const bizZip = String(biz.zipCode || biz.zip_code || '').trim();
+      if (cleanZipSearch.length === 5 && bizZip && bizZip !== cleanZipSearch) return;
+
+      let parsedLoyalty = biz.loyaltyConfig || biz.loyalty_config;
+      if (typeof parsedLoyalty === 'string') {
+        try {
+          parsedLoyalty = JSON.parse(parsedLoyalty);
+        } catch (_e) {
+          parsedLoyalty = null;
+        }
+      }
+
+      // 1) Campañas activas de negocios cercanos
+      const activeCamps = Array.isArray(parsedLoyalty?.campaigns)
+        ? parsedLoyalty.campaigns.filter((c: any) => c && c.is_active !== false)
+        : [];
+
+      activeCamps.slice(0, 1).forEach((camp: any) => {
+        const cid = `camp-${biz.id}-${camp.id || camp.title}`;
+        candidates.push({
+          id: cid,
+          title: `${toTitleCase(biz.name || 'Negocio')}: ${toTitleCase(camp.translations?.[lang]?.title || camp.title || 'Promo Activa')}`,
+          body: toTitleCase(camp.translations?.[lang]?.message || camp.message || ''),
+          role: 'client',
+          category: 'promo',
+          tenantId: String(biz.id),
+          zipCode: bizZip || undefined,
+          createdAt: camp.sent_at || new Date().toISOString(),
+          isRead: false,
+        });
+      });
+
+      // 2) Negocio disponible en el código postal
+      if (bizZip) {
+        const nid = `zip-biz-${biz.id}-${bizZip}`;
+        candidates.push({
+          id: nid,
+          title: tr(`Nuevo cerca de ti (ZIP ${bizZip})`, `New near you (ZIP ${bizZip})`),
+          body: tr(
+            `${toTitleCase(biz.name || 'Negocio')} ya tiene turnos disponibles en tu zona.`,
+            `${toTitleCase(biz.name || 'Business')} now has appointments available in your area.`
+          ),
+          role: 'client',
+          category: 'nearby_zip',
+          tenantId: String(biz.id),
+          zipCode: bizZip,
+          createdAt: biz.createdAt || biz.created_at || new Date().toISOString(),
+          isRead: false,
+        });
+      }
+    });
+
+    if (candidates.length === 0) return;
+
+    setNotifications((prev) => {
+      const existingIds = new Set(prev.map((x) => x.id));
+      const dismissedSet = new Set(dismissedNotifIds);
+      const fresh = candidates
+        .filter((c) => !existingIds.has(c.id) && !dismissedSet.has(c.id))
+        .slice(0, 8);
+      if (fresh.length === 0) return prev;
+      return [...fresh, ...prev].slice(0, 60);
+    });
+  }, [allTenants, locationQuery, notifsHydrated, dismissedNotifIds, lang]);
 
   // 🔍 BUSCAR NEGOCIOS CERCANOS (FILTRADO INTELIGENTE EN EL CLIENTE POR COORDENADAS ZIP O CIUDAD)
   const handleSearchNearby = async () => {
@@ -780,29 +1339,30 @@ export default function DirectoryHomeScreen() {
         )}
 
         {/* Controles Derechos */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 12, flexShrink: 0 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 8 : 10, flexShrink: 0 }}>
           {!selectedCategory ? (
             <TouchableOpacity
               activeOpacity={0.85}
               onPress={() => {
                 setIsSettingsOpen(false);
+                setIsNotificationsOpen(false);
                 router.push('/register' as any);
               }}
               style={{
                 height: isMobile ? 36 : 42,
-                paddingHorizontal: isMobile ? 13 : 16,
+                paddingHorizontal: isMobile ? 11 : 16,
                 borderRadius: isMobile ? 11 : 12,
                 backgroundColor: 'rgba(255, 94, 0, 0.12)',
                 borderWidth: 1,
                 borderColor: brandOrange,
                 flexDirection: 'row',
                 alignItems: 'center',
-                gap: 7,
+                gap: 6,
               }}
             >
-              <Feather name="briefcase" size={14} color={brandOrange} />
-              <Text style={{ color: brandOrange, fontWeight: '900', fontSize: isMobile ? 11.5 : 13.5 }}>
-                {tr('Soy un Negocio', 'For Business')}
+              <Feather name="briefcase" size={13} color={brandOrange} />
+              <Text style={{ color: brandOrange, fontWeight: '900', fontSize: isMobile ? 12 : 13.5 }} numberOfLines={1}>
+                {isMobile ? tr('Negocios', 'Business') : tr('Soy un Negocio', 'For Business')}
               </Text>
             </TouchableOpacity>
           ) : (
@@ -844,20 +1404,71 @@ export default function DirectoryHomeScreen() {
             </TouchableOpacity>
           )}
 
+          {/* 🔔 Campana de Notificaciones con Contador (Badge) */}
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={() => {
+              setIsSettingsOpen(false);
+              setIsNotificationsOpen(true);
+            }}
+            accessibilityLabel={tr('Abrir notificaciones', 'Open notifications')}
+            style={{
+              width: isMobile ? 36 : 42,
+              height: isMobile ? 36 : 42,
+              borderRadius: isMobile ? 11 : 12,
+              backgroundColor: isNotificationsOpen ? `${brandOrange}22` : tColor.input,
+              borderWidth: 1.5,
+              borderColor: isNotificationsOpen ? brandOrange : tColor.border,
+              alignItems: 'center',
+              justifyContent: 'center',
+              position: 'relative',
+            }}
+          >
+            <Feather
+              name="bell"
+              size={16}
+              color={isNotificationsOpen || unreadNotifCount > 0 ? brandOrange : tColor.text}
+            />
+            {unreadNotifCount > 0 ? (
+              <View
+                style={{
+                  position: 'absolute',
+                  top: -5,
+                  right: -5,
+                  minWidth: 19,
+                  height: 19,
+                  borderRadius: 10,
+                  paddingHorizontal: 4,
+                  backgroundColor: '#EF4444',
+                  borderWidth: 2,
+                  borderColor: theme === 'dark' ? '#05070C' : '#F1F5F9',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontSize: 10, fontWeight: '900' }}>
+                  {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+                </Text>
+              </View>
+            ) : null}
+          </TouchableOpacity>
+
           {/* ⚙️ Botón Único de Configuración (Idioma ES/EN + Tema Light/Dark) */}
           <TouchableOpacity
             activeOpacity={0.85}
             onPress={() => setIsSettingsOpen((prev) => !prev)}
             accessibilityLabel={tr('Abrir preferencias de idioma y apariencia', 'Open language and appearance settings')}
             style={{
-              height: isMobile ? 38 : 42,
-              paddingHorizontal: isMobile ? 10 : 15,
+              width: isMobile ? 36 : undefined,
+              height: isMobile ? 36 : 42,
+              paddingHorizontal: isMobile ? 0 : 15,
               borderRadius: isMobile ? 11 : 12,
               backgroundColor: isSettingsOpen ? `${brandOrange}22` : tColor.input,
               borderWidth: 1.5,
               borderColor: isSettingsOpen ? brandOrange : tColor.border,
               flexDirection: 'row',
               alignItems: 'center',
+              justifyContent: 'center',
               gap: 6,
             }}
           >
@@ -866,24 +1477,26 @@ export default function DirectoryHomeScreen() {
               size={16}
               color={isSettingsOpen ? brandOrange : tColor.text}
             />
-            <View
-              style={{
-                paddingHorizontal: 5,
-                paddingVertical: 2,
-                borderRadius: 6,
-                backgroundColor: isSettingsOpen ? brandOrange : tColor.border,
-              }}
-            >
-              <Text
+            {!isMobile ? (
+              <View
                 style={{
-                  color: isSettingsOpen ? '#FFFFFF' : tColor.text,
-                  fontSize: 10,
-                  fontWeight: '900',
+                  paddingHorizontal: 5,
+                  paddingVertical: 2,
+                  borderRadius: 6,
+                  backgroundColor: isSettingsOpen ? brandOrange : tColor.border,
                 }}
               >
-                {lang.toUpperCase()}
-              </Text>
-            </View>
+                <Text
+                  style={{
+                    color: isSettingsOpen ? '#FFFFFF' : tColor.text,
+                    fontSize: 10,
+                    fontWeight: '900',
+                  }}
+                >
+                  {lang.toUpperCase()}
+                </Text>
+              </View>
+            ) : null}
           </TouchableOpacity>
         </View>
       </View>
@@ -1498,7 +2111,7 @@ export default function DirectoryHomeScreen() {
                 >
                   {tr('Encuentra ', 'Find ')}
                   <Text style={{ color: brandOrange }}>{tr('Servicios', 'Services')}</Text>
-                  {''}
+                  {' '}
                   {tr('Cerca de Ti', 'Near You')}
                 </Text>
                 <Text
@@ -2087,6 +2700,285 @@ export default function DirectoryHomeScreen() {
           )}
         </View>
       </ScrollView>
+
+      {/* ============================================================== */}
+      {/* 🔔 CENTRO DE NOTIFICACIONES (BOTTOM SHEET PRO + SWIPE RIGHT)   */}
+      {/* ============================================================== */}
+      <Modal
+        visible={isNotificationsOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setIsNotificationsOpen(false)}
+      >
+        <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(2, 6, 23, 0.72)' }}>
+          <TouchableOpacity
+            activeOpacity={1}
+            style={{ flex: 1 }}
+            onPress={() => setIsNotificationsOpen(false)}
+          />
+
+          <View
+            style={{
+              backgroundColor: theme === 'dark' ? '#0B0F17' : '#F8FAFC',
+              borderTopLeftRadius: 28,
+              borderTopRightRadius: 28,
+              borderTopWidth: 1.5,
+              borderColor: tColor.border,
+              maxHeight: '82%',
+              width: '100%',
+              maxWidth: 640,
+              alignSelf: 'center',
+              paddingTop: 10,
+              paddingBottom: Platform.OS === 'ios' ? 30 : 20,
+              shadowColor: '#000',
+              shadowOffset: { width: 0, height: -10 },
+              shadowOpacity: 0.45,
+              shadowRadius: 24,
+              elevation: 24,
+            }}
+          >
+            {/* Drag handle pill */}
+            <View
+              style={{
+                width: 42,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: tColor.border,
+                alignSelf: 'center',
+                marginBottom: 14,
+              }}
+            />
+
+            {/* Header del panel */}
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingHorizontal: 20,
+                paddingBottom: 14,
+                borderBottomWidth: 1,
+                borderBottomColor: tColor.border,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 10,
+                    backgroundColor: `${brandOrange}20`,
+                    borderWidth: 1,
+                    borderColor: `${brandOrange}45`,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Feather name="bell" size={16} color={brandOrange} />
+                </View>
+                <View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
+                      {tr('Notificaciones', 'Notifications')}
+                    </Text>
+                    {unreadNotifCount > 0 ? (
+                      <View style={{ backgroundColor: '#EF4444', paddingHorizontal: 7, paddingVertical: 2, borderRadius: 10 }}>
+                        <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '900' }}>
+                          {unreadNotifCount}
+                        </Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={{ color: tColor.muted, fontSize: 11.5, marginTop: 1 }}>
+                    {tr('Desliza hacia la derecha para eliminar', 'Swipe right to delete')}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => setIsNotificationsOpen(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 17,
+                  backgroundColor: tColor.input,
+                  borderWidth: 1,
+                  borderColor: tColor.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Feather name="x" size={18} color={tColor.text} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Pestañas por Rol: Todas | Cliente | Negocio */}
+            <View style={{ paddingHorizontal: 20, paddingTop: 14, paddingBottom: 10 }}>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  backgroundColor: tColor.input,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: tColor.border,
+                  padding: 4,
+                  gap: 4,
+                }}
+              >
+                {[
+                  {
+                    key: 'all' as const,
+                    label: `${tr('Todas', 'All')} (${notifications.length})`,
+                  },
+                  {
+                    key: 'client' as const,
+                    label: `${tr('Cliente', 'Client')} (${notifications.filter((n) => n.role === 'client').length})`,
+                  },
+                  {
+                    key: 'business' as const,
+                    label: `${tr('Negocio', 'Business')} (${notifications.filter((n) => n.role === 'business').length})`,
+                  },
+                ].map((tab) => {
+                  const active = notifRoleTab === tab.key;
+                  return (
+                    <TouchableOpacity
+                      key={tab.key}
+                      activeOpacity={0.85}
+                      onPress={() => setNotifRoleTab(tab.key)}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 8,
+                        borderRadius: 9,
+                        backgroundColor: active ? brandOrange : 'transparent',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: active ? '#FFFFFF' : tColor.muted,
+                          fontSize: 12,
+                          fontWeight: '900',
+                        }}
+                        numberOfLines={1}
+                      >
+                        {tab.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              {/* Acciones rápidas: Marcar leídas + Eliminar todas */}
+              {visibleNotifications.length > 0 ? (
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 10 }}>
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handleMarkAllNotificationsRead}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      paddingVertical: 6,
+                      paddingHorizontal: 10,
+                      borderRadius: 8,
+                      backgroundColor: 'rgba(16, 185, 129, 0.12)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(16, 185, 129, 0.35)',
+                    }}
+                  >
+                    <Feather name="check-circle" size={13} color="#10B981" />
+                    <Text style={{ color: '#10B981', fontSize: 12, fontWeight: '900' }}>
+                      {tr('Marcar leídas', 'Mark all read')}
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    activeOpacity={0.8}
+                    onPress={handleClearAllNotifications}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      paddingVertical: 6,
+                      paddingHorizontal: 10,
+                      borderRadius: 8,
+                      backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(239, 68, 68, 0.38)',
+                    }}
+                  >
+                    <Feather name="trash-2" size={13} color="#EF4444" />
+                    <Text style={{ color: '#EF4444', fontSize: 12, fontWeight: '900' }}>
+                      {tr('Eliminar todas', 'Delete all')}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Lista de Notificaciones deslizables hacia la derecha */}
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 4, paddingBottom: 20 }}
+            >
+              {visibleNotifications.length === 0 ? (
+                <View
+                  style={{
+                    paddingVertical: 44,
+                    paddingHorizontal: 20,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 56,
+                      height: 56,
+                      borderRadius: 28,
+                      backgroundColor: tColor.input,
+                      borderWidth: 1,
+                      borderColor: tColor.border,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginBottom: 14,
+                    }}
+                  >
+                    <Feather name="bell-off" size={24} color={tColor.muted} />
+                  </View>
+                  <Text style={{ color: tColor.text, fontWeight: '900', fontSize: 16, textAlign: 'center' }}>
+                    {tr('Estás al día', 'You are all caught up')}
+                  </Text>
+                  <Text style={{ color: tColor.muted, fontSize: 13, textAlign: 'center', marginTop: 6, lineHeight: 19, maxWidth: 300 }}>
+                    {notifRoleTab === 'business'
+                      ? tr(
+                          'Aquí verás las nuevas citas, confirmaciones y cancelaciones de tu negocio o silla.',
+                          'Here you will see new bookings, confirmations, and cancellations for your business or chair.'
+                        )
+                      : tr(
+                          'Aquí aparecerán nuevos negocios en tu código postal, promos activas y recordatorios de tus citas.',
+                          'New businesses in your ZIP code, active promos, and appointment reminders will appear here.'
+                        )}
+                  </Text>
+                </View>
+              ) : (
+                visibleNotifications.map((item) => (
+                  <SwipeableNotificationRow
+                    key={item.id}
+                    item={item}
+                    tColor={tColor}
+                    theme={theme}
+                    lang={lang}
+                    onPress={handleNotificationTap}
+                    onDelete={handleDeleteNotification}
+                  />
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
