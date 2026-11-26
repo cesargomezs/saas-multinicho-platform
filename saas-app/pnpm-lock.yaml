@@ -72,6 +72,9 @@ importers:
       expo-constants:
         specifier: ~58.0.16
         version: 58.0.16(expo@58.0.26)(react-native@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@13.6.6(supports-color@8.1.1))(@react-native/metro-config@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(supports-color@8.1.1)(typescript@7.0.2)
+      expo-device:
+        specifier: ~58.0.5
+        version: 58.0.5(expo@58.0.26)
       expo-font:
         specifier: ~58.0.12
         version: 58.0.12(expo@58.0.26)(react-native@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@13.6.6(supports-color@8.1.1))(@react-native/metro-config@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1))(react@19.3.0)
@@ -99,6 +102,9 @@ importers:
       react:
         specifier: 19.3.0
         version: 19.3.0
+      react-dom:
+        specifier: 19.3.0
+        version: 19.3.0(react@19.3.0)
       react-native:
         specifier: 0.88.1
         version: 0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@13.6.6(supports-color@8.1.1))(@react-native/metro-config@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)
@@ -3547,6 +3553,11 @@ packages:
       expo: '*'
       react-native: '*'
 
+  expo-device@58.0.5:
+    resolution: {integrity: sha512-GNyaHPwoiI/z2SGR14R6d9J7hFSW2JabZieJtC3l6/LO2mJYVCbhEsQ7/1ljGBeTUnFFWHcFLccdaWEhOWtaQQ==}
+    peerDependencies:
+      expo: '*'
+
   expo-file-system@58.0.14:
     resolution: {integrity: sha512-VK67RQPDmWRHGbvpmPY5MeA1Ulw1LiyKs4KIN8na/q7SlkxYuPPR8biWsyX1S1/8XAHm6y2txUnYjCKh9l93lQ==}
     peerDependencies:
@@ -5416,6 +5427,10 @@ packages:
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
+
+  ua-parser-js@0.7.41:
+    resolution: {integrity: sha512-O3oYyCMPYgNNHuO7Jjk3uacJWZF8loBgwrfd/5LE/HyZ3lUIOdniQ7DNXJcIgZbwioZxk0fLfI4EVnetdiX5jg==}
+    hasBin: true
 
   ua-parser-js@1.0.41:
     resolution: {integrity: sha512-LbBDqdIC5s8iROCUjMbW1f5dJQTEFB1+KO9ogbvlb3nm9n4YHa5p4KTvFPWvh2Hs8gZMBuiB1/8+pdfe/tDPug==}
@@ -9031,6 +9046,11 @@ snapshots:
       - supports-color
       - typescript
 
+  expo-device@58.0.5(expo@58.0.26):
+    dependencies:
+      expo: 58.0.26(5b42bfe87c53cb1d59734997ba24c0fe)
+      ua-parser-js: 0.7.41
+
   expo-file-system@58.0.14(expo@58.0.26)(react-native@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@13.6.6(supports-color@8.1.1))(@react-native/metro-config@0.88.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.3.0)(supports-color@8.1.1)):
     dependencies:
       expo: 58.0.26(5b42bfe87c53cb1d59734997ba24c0fe)
@@ -11308,6 +11328,8 @@ snapshots:
       '@typescript/typescript-sunos-x64': 7.0.2
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
+
+  ua-parser-js@0.7.41: {}
 
   ua-parser-js@1.0.41:
     optional: true

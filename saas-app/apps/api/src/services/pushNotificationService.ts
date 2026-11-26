@@ -141,7 +141,43 @@ async function saveNotificationToInbox(params: {
   }
 }
 
-// 🏢 Notificar al Dueño / Barbero / Staff (se guarda en bandeja de negocio + Expo Push)
+// Helper para obtener el contador real de no leídas en BD (Badge del icono)
+async function getUnreadBadgeCount(params: {
+  role: 'client' | 'business';
+  userId?: string | null;
+  tenantId?: string | null;
+}): Promise<number> {
+  try {
+    if (params.role === 'business' && params.tenantId) {
+      const res = await db.execute(sql`
+        SELECT COUNT(*)::int AS total
+        FROM public.push_notifications
+        WHERE tenant_id = ${params.tenantId}::uuid
+          AND role = 'business'
+          AND is_deleted = FALSE
+          AND is_read = FALSE
+      `);
+      const rows = Array.isArray(res) ? res : (res as any).rows || [];
+      return Math.max(1, Number(rows[0]?.total || 1));
+    }
+
+    if (params.role === 'client' && params.userId) {
+      const res = await db.execute(sql`
+        SELECT COUNT(*)::int AS total
+        FROM public.push_notifications
+        WHERE user_id = ${params.userId}::uuid
+          AND role = 'client'
+          AND is_deleted = FALSE
+          AND is_read = FALSE
+      `);
+      const rows = Array.isArray(res) ? res : (res as any).rows || [];
+      return Math.max(1, Number(rows[0]?.total || 1));
+    }
+  } catch (_e) {}
+  return 1;
+}
+
+// 🏢 Notificar al Dueño / Barbero / Staff (bandeja de negocio + Expo Push con badge real)
 export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayload): Promise<void> {
   if (!tenantId) return;
 
@@ -152,7 +188,6 @@ export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayloa
   `);
   const rows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
 
-  // Guardar 1 registro en bandeja de negocio (Hoy + Futuros)
   await saveNotificationToInbox({
     tenantId,
     userId: rows[0]?.user_id ? String(rows[0].user_id) : null,
@@ -162,9 +197,10 @@ export async function notifyTenantPush(tenantId: string, payload: ExpoPushPayloa
     payload,
   });
 
+  const unreadBadge = await getUnreadBadgeCount({ role: 'business', tenantId });
   await sendExpoPushInBatches(
     rows.map((r: any) => String(r.expo_push_token)),
-    payload
+    { ...payload, badge: unreadBadge }
   );
 }
 
@@ -192,9 +228,10 @@ export async function notifyClientPush(
     payload,
   });
 
+  const unreadBadge = await getUnreadBadgeCount({ role: 'client', userId });
   await sendExpoPushInBatches(
     rows.map((r: any) => String(r.expo_push_token)),
-    payload
+    { ...payload, badge: unreadBadge }
   );
 }
 
@@ -231,7 +268,6 @@ export async function notifyNearbyClientsPush(params: {
   `);
   const rows = Array.isArray(res) ? res : (res as any).rows || [];
 
-  // Guardar en bandeja una vez por cada user_id único alcanzado
   const seenUsers = new Set<string>();
   const tenantIdFromData = params.payload.data?.tenantId ? String(params.payload.data.tenantId) : null;
   const eventType = String(params.payload.data?.eventType || 'nearby_zip');
@@ -253,6 +289,6 @@ export async function notifyNearbyClientsPush(params: {
 
   await sendExpoPushInBatches(
     rows.map((r: any) => String(r.expo_push_token)),
-    params.payload
+    { ...params.payload, badge: params.payload.badge ?? 1 }
   );
 }

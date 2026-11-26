@@ -1043,7 +1043,7 @@ export default function B2BRegistrationScreen() {
             />
           </View>
           <Text style={{ fontSize: 20, fontWeight: '900', color: '#FFF', letterSpacing: -0.5 }}>
-            PickTime <Text style={{ color: primaryColor }}>Book</Text>
+            Pick-Time <Text style={{ color: primaryColor }}>Book</Text>
           </Text>
         </TouchableOpacity>
         
@@ -1080,7 +1080,7 @@ export default function B2BRegistrationScreen() {
                 </View>
                 
                 <Text style={{ fontSize: isMobile ? 34 : 52, fontWeight: '900', color: '#FFF', textAlign: 'center', marginBottom: 18, lineHeight: isMobile ? 42 : 60, letterSpacing: -1 }}>
-                  Digitaliza tu Negocio, Clínica o Firma Legal con <Text style={{ color: primaryColor }}>PickTime Book</Text>
+                  Digitaliza tu Negocio, Clínica o Firma Legal con <Text style={{ color: primaryColor }}>Pick-Time Book</Text>
                 </Text>
                 
                 <Text style={{ fontSize: isMobile ? 16 : 18, color: '#94A3B8', textAlign: 'center', maxWidth: 650, lineHeight: isMobile ? 24 : 28, marginBottom: 36 }}>

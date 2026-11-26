@@ -2,11 +2,8 @@ import { Request, Response } from 'express';
 // Importamos la interfaz SQL explícita para tipar correctamente los filtros
 import { sql, eq, and, ilike, or, SQL } from 'drizzle-orm';
 
-
-
 // Importamos la BD y el esquema desde el paquete del monorepo
-import { db } from '@taller/database'; 
-import { tenants, services } from '@taller/database'; 
+import { db, tenants, services } from '@taller/database';
 
 // 🗺️ Diccionario Geográfico de Prueba (En producción se reemplaza por Google Maps API / Mapbox)
 const MOCK_GEOCODER: Record<string, { lat: number; lng: number }> = {
@@ -16,6 +13,19 @@ const MOCK_GEOCODER: Record<string, { lat: number; lng: number }> = {
   'los angeles': { lat: 34.0620, lng: -118.3490 },
   '91101': { lat: 34.1458, lng: -118.1319 }, // Pasadena
   'pasadena': { lat: 34.1458, lng: -118.1319 },
+};
+
+const parseLoyaltyObject = (rawLoyalty: any): Record<string, any> | null => {
+  if (!rawLoyalty) return null;
+  if (typeof rawLoyalty === 'string') {
+    try {
+      const parsed = JSON.parse(rawLoyalty);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof rawLoyalty === 'object' ? rawLoyalty : null;
 };
 
 export const searchDirectory = async (req: Request, res: Response) => {
@@ -49,20 +59,20 @@ export const searchDirectory = async (req: Request, res: Response) => {
         userLng = coordinates.lng;
       } else {
         // Fallback: Si no tenemos coordenadas, buscamos directamente por texto en ciudad o zip
-        // Guardamos la condición en una variable para validar que no sea 'undefined' (Fix TypeScript)
         const fallbackCondition = or(
           ilike(tenants.city, `%${queryLower}%`),
           ilike(tenants.zipCode, `%${queryLower}%`)
         );
-        
+
         if (fallbackCondition) {
           filters.push(fallbackCondition);
         }
       }
     }
 
-    let results;
+    let results: any[];
     const maxDistance = radius ? parseFloat(radius as string) : 30; // 30 millas por defecto
+    const loyaltyCol = (tenants as any).loyaltyConfig ?? (tenants as any).loyalty_config;
 
     // ========================================================================
     // 🧠 MOTOR DE BÚSQUEDA GEOGRÁFICA (FÓRMULA HAVERSINE EN POSTGRESQL)
@@ -81,96 +91,137 @@ export const searchDirectory = async (req: Request, res: Response) => {
 
       filters.push(sql`${distanceSql} <= ${maxDistance}`);
 
-      results = await db.select({
-        id: tenants.id,
-        name: tenants.name,
-        niche: tenants.niche,
-        city: tenants.city,
-        zipCode: tenants.zipCode,
-        logoUrl: tenants.logoUrl,
-        primaryColor: tenants.primaryColor,
-        distance: distanceSql.mapWith(Number) 
-      })
-      .from(tenants)
-      .where(filters.length > 0 ? and(...filters) : undefined)
-      .orderBy(distanceSql); // Ordenamos del más cercano al más lejano automáticamente
-
+      results = await db
+        .select({
+          id: tenants.id,
+          name: tenants.name,
+          niche: tenants.niche,
+          city: tenants.city,
+          zipCode: tenants.zipCode,
+          logoUrl: tenants.logoUrl,
+          primaryColor: tenants.primaryColor,
+          ...(loyaltyCol ? { loyaltyConfig: loyaltyCol } : {}),
+          distance: distanceSql.mapWith(Number),
+        })
+        .from(tenants)
+        .where(filters.length > 0 ? and(...filters) : undefined)
+        .orderBy(distanceSql); // Ordenamos del más cercano al más lejano automáticamente
     } else {
       // ========================================================================
       // BÚSQUEDA ESTÁNDAR (Sin coordenadas)
       // ========================================================================
-      results = await db.select({
-        id: tenants.id,
-        name: tenants.name,
-        niche: tenants.niche,
-        city: tenants.city,
-        zipCode: tenants.zipCode,
-        logoUrl: tenants.logoUrl,
-        primaryColor: tenants.primaryColor,
-      })
-      .from(tenants)
-      .where(filters.length > 0 ? and(...filters) : undefined)
-      .orderBy(tenants.name);
+      results = await db
+        .select({
+          id: tenants.id,
+          name: tenants.name,
+          niche: tenants.niche,
+          city: tenants.city,
+          zipCode: tenants.zipCode,
+          logoUrl: tenants.logoUrl,
+          primaryColor: tenants.primaryColor,
+          ...(loyaltyCol ? { loyaltyConfig: loyaltyCol } : {}),
+        })
+        .from(tenants)
+        .where(filters.length > 0 ? and(...filters) : undefined)
+        .orderBy(tenants.name);
     }
 
-    // 5. Formatear los resultados para la UI del Directorio
-    const formattedResults = results.map(biz => ({
-      ...biz,
-      label: biz.niche === 'automotive' ? 'Taller Automotriz' : biz.niche === 'spa' ? 'Spa & Relajación' : 'Barbería Clásica',
-      icon: biz.niche === 'automotive' ? '🚗' : biz.niche === 'spa' ? '💆‍♀️' : '✂️',
-      // Redondear la distancia a 1 decimal (ej. "4.2")
-      distance: 'distance' in biz && biz.distance !== null ? Number(biz.distance).toFixed(1) : null 
-    }));
+    // 5. Formatear los resultados para la UI del Directorio con rating real y conteo de reseñas
+    const formattedResults = results.map((biz: any) => {
+      const parsedLoyalty = parseLoyaltyObject(biz.loyaltyConfig ?? biz.loyalty_config);
+      const reviews = Array.isArray(parsedLoyalty?.reviews) ? parsedLoyalty.reviews : [];
+      const reviewsCount = reviews.length;
+      const rating =
+        reviewsCount > 0
+          ? Number(
+              (
+                reviews.reduce((acc: number, r: any) => acc + Number(r?.rating ?? 5), 0) /
+                reviewsCount
+              ).toFixed(1)
+            )
+          : null;
+
+      return {
+        ...biz,
+        loyaltyConfig: parsedLoyalty,
+        rating,
+        reviewsCount,
+        label:
+          biz.niche === 'automotive'
+            ? 'Taller Automotriz'
+            : biz.niche === 'spa'
+            ? 'Spa & Relajación'
+            : 'Barbería Clásica',
+        icon: biz.niche === 'automotive' ? '🚗' : biz.niche === 'spa' ? '💆‍♀️' : '✂️',
+        distance:
+          'distance' in biz && biz.distance !== null ? Number(biz.distance).toFixed(1) : null,
+      };
+    });
 
     return res.status(200).json({
       success: true,
       count: formattedResults.length,
-      data: formattedResults
+      data: formattedResults,
     });
-
   } catch (error) {
-    console.error("Error en búsqueda de directorio:", error);
+    console.error('Error en búsqueda de directorio:', error);
     return res.status(500).json({ success: false, message: 'Error interno del servidor' });
   }
 };
 
 export const getTenantById = async (req: Request, res: Response) => {
-    try {
-      const { id } = req.params;
-  
-      // 1. Buscar la información base del Tenant (Marca Blanca, Info legal, etc)
-      const tenantResult = await db.select()
-        .from(tenants)
-        .where(eq(tenants.id, id as string))
-        .limit(1);
-  
-      if (tenantResult.length === 0) {
-        return res.status(404).json({ success: false, message: 'Negocio no encontrado' });
-      }
-  
-      const tenantData = tenantResult[0];
-  
-      // 2. Buscar el catálogo de servicios de este negocio
-      const catalog = await db.select({
+  try {
+    const { id } = req.params;
+
+    // 1. Buscar la información base del Tenant (Marca Blanca, Info legal, etc)
+    const tenantResult = await db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, id as string))
+      .limit(1);
+
+    if (tenantResult.length === 0) {
+      return res.status(404).json({ success: false, message: 'Negocio no encontrado' });
+    }
+
+    const tenantData: any = tenantResult[0];
+    const parsedLoyalty = parseLoyaltyObject(tenantData.loyaltyConfig ?? tenantData.loyalty_config);
+    const reviews = Array.isArray(parsedLoyalty?.reviews) ? parsedLoyalty.reviews : [];
+    const reviewsCount = reviews.length;
+    const rating =
+      reviewsCount > 0
+        ? Number(
+            (
+              reviews.reduce((acc: number, r: any) => acc + Number(r?.rating ?? 5), 0) /
+              reviewsCount
+            ).toFixed(1)
+          )
+        : null;
+
+    // 2. Buscar el catálogo de servicios de este negocio
+    const catalog = await db
+      .select({
         id: services.id,
         name: services.name,
         price: services.price,
-        durationMinutes: services.durationMinutes
+        durationMinutes: services.durationMinutes,
       })
       .from(services)
       .where(eq(services.tenantId, id as string))
       .orderBy(services.name);
-  
-      return res.status(200).json({
-        success: true,
-        data: {
-          ...tenantData,
-          services: catalog
-        }
-      });
-  
-    } catch (error) {
-      console.error("Error al obtener perfil del negocio:", error);
-      return res.status(500).json({ success: false, message: 'Error interno del servidor' });
-    }
-  };
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        ...tenantData,
+        loyaltyConfig: parsedLoyalty ?? tenantData.loyaltyConfig,
+        rating,
+        reviewsCount,
+        services: catalog,
+      },
+    });
+  } catch (error) {
+    console.error('Error al obtener perfil del negocio:', error);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+};

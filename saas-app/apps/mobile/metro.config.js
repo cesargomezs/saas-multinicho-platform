@@ -12,4 +12,10 @@ config.resolver.nodeModulesPaths = [
   path.resolve(monorepoRoot, 'node_modules'),
 ];
 
+// Obliga a que react y react-dom apunten siempre a una única copia
+config.resolver.extraNodeModules = {
+  react: path.resolve(projectRoot, 'node_modules/react'),
+  'react-dom': path.resolve(projectRoot, 'node_modules/react-dom'),
+};
+
 module.exports = config;

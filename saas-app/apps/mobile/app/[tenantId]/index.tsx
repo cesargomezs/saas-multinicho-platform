@@ -7,6 +7,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
+import NotificationCenter from '../../components/NotificationCenter';
 
 try { WebBrowser.maybeCompleteAuthSession(); } catch (_e) {}
 
@@ -2831,7 +2832,7 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
 
   const ratingSummary = useMemo(() => {
     if (!reviewsList || reviewsList.length === 0) {
-      return { avg: '5.0', count: 0, likes: 0, dislikes: 0 };
+      return { avg: '4.9', count: 0, likes: 0, dislikes: 0 };
     }
     const sum = reviewsList.reduce((acc, r) => acc + Number(r.rating || 5), 0);
     const likes = reviewsList.filter((r) => r.reaction === 'like' || (!r.reaction && Number(r.rating) >= 4)).length;
@@ -5006,6 +5007,38 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
         ) : null}
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 7 : 10, flexShrink: 0 }}>
+          {/* 🔔 Campana de Notificaciones con Badge y Bottom Sheet conectado a BD */}
+          <NotificationCenter
+            tColor={tColor}
+            theme={theme}
+            lang={lang}
+            brandColor={brandColor}
+            isMobile={isMobile}
+            currentTenantId={tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''))}
+            clientUserId={clientExpedienteData?.client?.id || null}
+            staffId={authenticatedStaffMember?.id || null}
+            hasBusinessAccess={isMechanicAuth}
+            onOpen={() => {
+              setIsSettingsOpen(false);
+              setIsMobileMenuOpen(false);
+            }}
+            onSelectNotification={(item) => {
+              const activeTid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+              if (item.tenantId && activeTid && item.tenantId === activeTid) {
+                if (item.role === 'business') {
+                  setActiveView('mecanico');
+                  setAgendaFilter('today');
+                  return true;
+                }
+                if (item.appointmentId) {
+                  setActiveView('expediente');
+                  return true;
+                }
+              }
+              return false;
+            }}
+          />
+
           {/* ⚙️ Botón Único de Configuración (Idioma ES/EN + Tema Light/Dark) — Idéntico al Directorio */}
           <TouchableOpacity
             activeOpacity={0.85}
@@ -5015,40 +5048,44 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
             }}
             accessibilityLabel={tr('Abrir preferencias de idioma y apariencia', 'Open language and appearance settings')}
             style={{
+              width: isMobile ? 36 : undefined,
               height: isMobile ? 36 : 42,
-              paddingHorizontal: isMobile ? 9 : 12,
-              borderRadius: isMobile ? 10 : 12,
+              paddingHorizontal: isMobile ? 0 : 15,
+              borderRadius: isMobile ? 11 : 12,
               backgroundColor: isSettingsOpen ? `${brandColor}22` : tColor.input,
               borderWidth: 1.5,
               borderColor: isSettingsOpen ? brandColor : tColor.border,
               flexDirection: 'row',
               alignItems: 'center',
-              gap: 5,
+              justifyContent: 'center',
+              gap: 6,
             }}
           >
             <Feather
               name="settings"
-              size={15}
+              size={16}
               color={isSettingsOpen ? brandColor : tColor.text}
             />
-            <View
-              style={{
-                paddingHorizontal: 5,
-                paddingVertical: 1.5,
-                borderRadius: 6,
-                backgroundColor: isSettingsOpen ? brandColor : tColor.border,
-              }}
-            >
-              <Text
+            {!isMobile ? (
+              <View
                 style={{
-                  color: isSettingsOpen ? '#FFFFFF' : tColor.text,
-                  fontSize: 10,
-                  fontWeight: '900',
+                  paddingHorizontal: 5,
+                  paddingVertical: 2,
+                  borderRadius: 6,
+                  backgroundColor: isSettingsOpen ? brandColor : tColor.border,
                 }}
               >
-                {lang.toUpperCase()}
-              </Text>
-            </View>
+                <Text
+                  style={{
+                    color: isSettingsOpen ? '#FFFFFF' : tColor.text,
+                    fontSize: 10,
+                    fontWeight: '900',
+                  }}
+                >
+                  {lang.toUpperCase()}
+                </Text>
+              </View>
+            ) : null}
           </TouchableOpacity>
 
           <TouchableOpacity

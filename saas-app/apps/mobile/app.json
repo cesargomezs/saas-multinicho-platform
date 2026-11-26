@@ -53,7 +53,7 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/images/logopick-time-1024x1024.png",
+          "icon": "./assets/images/logopick-time.png",
           "color": "#FF5E00",
           "defaultChannel": "default"
         }
