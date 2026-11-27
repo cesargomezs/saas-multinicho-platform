@@ -108,7 +108,7 @@ import {
   getTenantPayments,
 } from '../controllers/paymentController';
 import { deleteAllNotifications, deleteNotificationById, getNotifications, markNotificationsRead } from '../controllers/notificationController';
-import { handleClientAnonymize } from '../../controllers/authController';
+import { handleClientAnonymize } from '../clients/auth/authController';
 
 // =========================================================================
 // 🗄️ AUTO-MIGRACIÓN Y SEMILLA EN BD PARA NUEVOS NICHOS (LEGAL & DENTAL)
