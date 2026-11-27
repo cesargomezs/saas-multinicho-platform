@@ -2047,6 +2047,35 @@ export default function DirectoryHomeScreen() {
                         const isElite = biz.tierKind === 'elite';
                         const borderHighlight = isElite ? '#F59E0B' : '#10B981';
 
+                        let parsedLoyaltyPrem = biz.loyaltyConfig || biz.loyalty_config;
+                        if (typeof parsedLoyaltyPrem === 'string') {
+                          try {
+                            parsedLoyaltyPrem = JSON.parse(parsedLoyaltyPrem);
+                          } catch (_e) {
+                            parsedLoyaltyPrem = null;
+                          }
+                        }
+                        const reviewsPremArr = Array.isArray(parsedLoyaltyPrem?.reviews)
+                          ? parsedLoyaltyPrem.reviews
+                          : Array.isArray(biz.reviews)
+                          ? biz.reviews
+                          : [];
+                        const revCountPrem =
+                          typeof biz.reviewsCount === 'number'
+                            ? biz.reviewsCount
+                            : typeof biz.reviews_count === 'number'
+                            ? biz.reviews_count
+                            : reviewsPremArr.length;
+                        const avgRatingPrem =
+                          revCountPrem > 0
+                            ? typeof biz.rating === 'number' && biz.rating > 0
+                              ? biz.rating.toFixed(1)
+                              : (
+                                  reviewsPremArr.reduce((acc: number, r: any) => acc + Number(r?.rating || 5), 0) /
+                                  revCountPrem
+                                ).toFixed(1)
+                            : '4.9';
+
                         return (
                           <TouchableOpacity
                             key={`${biz.id}-${idx}-prem`}
@@ -2140,9 +2169,29 @@ export default function DirectoryHomeScreen() {
                                   <Ionicons name="checkmark-circle" size={16} color={tColorPrimary} />
                                 </View>
 
-                                <Text style={{ color: tColorPrimary, fontSize: 12, fontWeight: '800', marginTop: 2 }}>
-                                  {catMeta.title}
-                                </Text>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 3, flexWrap: 'wrap' }}>
+                                  <Text style={{ color: tColorPrimary, fontSize: 12, fontWeight: '800' }}>
+                                    {catMeta.title}
+                                  </Text>
+                                  <View
+                                    style={{
+                                      flexDirection: 'row',
+                                      alignItems: 'center',
+                                      gap: 3,
+                                      paddingHorizontal: 7,
+                                      paddingVertical: 1.5,
+                                      borderRadius: 8,
+                                      backgroundColor: 'rgba(245, 158, 11, 0.14)',
+                                      borderWidth: 1,
+                                      borderColor: 'rgba(245, 158, 11, 0.4)',
+                                    }}
+                                  >
+                                    <Ionicons name="star" size={11} color="#F59E0B" />
+                                    <Text style={{ color: '#F59E0B', fontSize: 11, fontWeight: '900' }}>
+                                      {avgRatingPrem} ({revCountPrem})
+                                    </Text>
+                                  </View>
+                                </View>
 
                                 <Text style={{ color: tColor.muted, fontSize: 12.5, marginTop: 3 }} numberOfLines={1}>
                                   📍{' '}
