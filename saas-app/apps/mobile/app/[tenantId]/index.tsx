@@ -2237,6 +2237,123 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
   const [expEditCountryCode, setExpEditCountryCode] = useState('+1');
   const [expEditPhone, setExpEditPhone] = useState('');
   const [isSavingExpedienteProfile, setIsSavingExpedienteProfile] = useState(false);
+  const [isDeletingClientAccount, setIsDeletingClientAccount] = useState(false);
+
+  const handleAnonymizeClientAccount = async () => {
+    if (!clientExpedienteData?.client) return;
+    const confirmMsg = tr(
+      'Esta acción anonimizará tu perfil de cliente (Nombre: "Anónimo", correo y teléfono limpiados, y sin imágenes/datos personales en tu cuenta) sin borrar el historial contable/operativo del negocio. ¿Deseas continuar?',
+      'This will anonymize your client profile (Name: "Anonymous", email and phone cleared, and personal images removed) while keeping business service records intact. Do you want to continue?'
+    );
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      if (!window.confirm(confirmMsg)) return;
+    }
+
+    setIsDeletingClientAccount(true);
+    try {
+      const activeTenantUuid = tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || ''));
+      const cId = clientExpedienteData.client.id || '';
+      const cEmail = String(clientExpedienteData.client.email || clientEmail || savedClientSession?.email || '').trim().toLowerCase();
+      const anonName = tr('Anónimo', 'Anonymous');
+      const anonEmail = `anon.${Date.now()}@anonymized.local`;
+      const anonPhone = '';
+
+      let persisted = false;
+      for (const endpoint of ['/api/clients/profile', '/api/clients/anonymize']) {
+        try {
+          const resp = await apiFetch(endpoint, {
+            method: endpoint === '/api/clients/profile' ? 'PUT' : 'POST',
+            headers: activeTenantUuid ? { 'x-tenant-id': activeTenantUuid } : {},
+            body: JSON.stringify({
+              id: cId || undefined,
+              clientId: cId || undefined,
+              tenantId: activeTenantUuid || undefined,
+              email: cEmail || undefined,
+              name: anonName,
+              fullName: anonName,
+              phone: anonPhone,
+              clientPhone: anonPhone,
+              newEmail: anonEmail,
+              anonymize: true,
+              removeImages: true,
+            }),
+          });
+          if (resp && resp.ok) {
+            persisted = true;
+            break;
+          }
+        } catch (_e) {}
+      }
+
+      if (!persisted && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
+        for (const tbl of ['users', 'clients']) {
+          try {
+            if (cId) {
+              const { error } = await supabase
+                .from(tbl)
+                .update({
+                  name: anonName,
+                  phone: anonPhone,
+                  email: anonEmail,
+                  avatar_url: null,
+                  avatarUrl: null,
+                } as any)
+                .eq('id', cId);
+              if (!error) persisted = true;
+            }
+          } catch (_sbErr) {}
+        }
+      }
+
+      const anonymizedHistory = Array.isArray(clientExpedienteData.serviceHistory)
+        ? clientExpedienteData.serviceHistory.map((wo: any) => ({
+            ...wo,
+            oldPartImageUrl: null,
+            newPartImageUrl: null,
+            imageUrl: null,
+          }))
+        : [];
+
+      setClientExpedienteData((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              client: {
+                ...(prev.client || {}),
+                name: anonName,
+                email: anonEmail,
+                phone: anonPhone,
+                avatarUrl: null,
+                avatar_url: null,
+                metadata: { anonymized: true, anonymizedAt: new Date().toISOString() },
+              },
+              vehicle: null,
+              serviceHistory: anonymizedHistory,
+            }
+          : prev
+      );
+      setClientName(anonName);
+      setClientEmail('');
+      setClientPhone('');
+      setIsEditingExpedienteProfile(false);
+      await clearPersistentClientSession();
+      setIsExpedienteExpanded(true);
+
+      alert(
+        persisted
+          ? tr(
+              '✅ Tu cuenta fue actualizada como "Anónimo" y se eliminaron tus imágenes y datos personales.',
+              '✅ Your account was updated to "Anonymous" and your images and personal data were removed.'
+            )
+          : tr(
+              '✅ Cuenta anonimizada localmente ("Anónimo") y sesión cerrada. Verifica que el backend persista la actualización.',
+              '✅ Account anonymized locally ("Anonymous") and session closed.'
+            )
+      );
+    } finally {
+      setIsDeletingClientAccount(false);
+    }
+  };
   const [expandedImage, setExpandedImage] = useState<{ path: string, alt: string } | null>(null);
 
   const defaultHoursConfig = {
@@ -2324,13 +2441,21 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
 
     for (const baseUrl of baseUrls) {
       const cleanBase = String(baseUrl).replace(/\/+$/, '');
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timerId = controller ? setTimeout(() => { try { controller.abort('timeout'); } catch { controller.abort(); } }, 6500) : null;
       try {
-        const res = await fetch(`${cleanBase}${url}`, { ...options, headers });
+        const res = await fetch(`${cleanBase}${url}`, {
+          ...options,
+          headers,
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+        if (timerId) clearTimeout(timerId);
         lastRes = res;
         if (res.ok || res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
           return res;
         }
       } catch (err) {
+        if (timerId) clearTimeout(timerId);
         lastErr = err;
       }
     }
@@ -6466,9 +6591,21 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         </View>
                       </View>
 
-                      <View style={{ flexDirection: 'row', gap: 12, width: isMobile ? '100%' : 'auto' }}>
-                        <TouchableOpacity style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={() => { setIsEditingExpedienteProfile(false); clearPersistentClientSession(); }}>
-                          <Text style={[styles.secondaryButtonText, { color: '#EF4444' }]}>{tr('Salir', 'Log Out')}</Text>
+                      <View style={{ flexDirection: 'row', gap: 10, width: isMobile ? '100%' : 'auto', flexWrap: 'wrap' }}>
+                        <TouchableOpacity
+                          style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]}
+                          onPress={() => { setIsEditingExpedienteProfile(false); clearPersistentClientSession(); }}
+                        >
+                          <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>{tr('Salir', 'Log Out')}</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          disabled={isDeletingClientAccount}
+                          style={[styles.secondaryButton, { backgroundColor: 'rgba(239, 68, 68, 0.12)', borderColor: '#EF4444', paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]}
+                          onPress={handleAnonymizeClientAccount}
+                        >
+                          <Text style={[styles.secondaryButtonText, { color: '#EF4444' }]}>
+                            {isDeletingClientAccount ? tr('Anonimizando...', 'Anonymizing...') : tr('Eliminar Cuenta', 'Delete Account')}
+                          </Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingHorizontal: 16, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={handleBookFromExpediente}>
                           <Text style={styles.primaryButtonText}>📅 Agendar Cita</Text>
@@ -6671,7 +6808,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               style={[styles.secondaryButton, { backgroundColor: tColor.input, borderColor: tColor.border, paddingVertical: 8, paddingHorizontal: 14 }]}
                               onPress={() => setIsEditingClientReview(false)}
                             >
-                              <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: 12 }]}>Cancelar</Text>
+                              <Text style={[styles.secondaryButtonText, { color: tColor.text, fontSize: 12 }]}>{t.cancelBtn}</Text>
                             </TouchableOpacity>
                             <TouchableOpacity
                               style={[styles.primaryButton, { backgroundColor: brandColor, paddingVertical: 8, paddingHorizontal: 16 }]}
@@ -7045,7 +7182,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       let resolvedUserId: string | null = (resolvedMember as any)?.userId || (resolvedMember as any)?.user_id || null;
 
                       try {
-                        const res = await apiFetch('/api/tenants/auth-staff', {
+                        const authRequest = apiFetch('/api/tenants/auth-staff', {
                           method: 'POST',
                           body: JSON.stringify({
                             phone: formattedLoginPhone,
@@ -7056,14 +7193,20 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             expoPushToken: deviceCreds.expoPushToken,
                           }),
                         });
-                        const json = await res.json().catch(() => ({}));
-                        if (res.ok && json.success) {
+                        const res = await Promise.race([
+                          authRequest,
+                          new Promise<any>((resolve) => setTimeout(() => resolve(null), 5000)),
+                        ]);
+                        const json = res ? await res.json().catch(() => ({})) : {};
+                        if (res && res.ok && json.success) {
                           isAuthorized = true;
                           if (json.member) {
                             resolvedMember = { ...resolvedMember, ...json.member };
                           }
                           resolvedUserId = json.userId || json.user?.id || (resolvedMember as any)?.userId || resolvedUserId;
-                        } else if (configuredPin && cleanPin === String(configuredPin).trim() && matchedMember && matchedMember.isActive !== false) {
+                        } else if (configuredPin && cleanPin === String(configuredPin).trim() && (!matchedMember || matchedMember.isActive !== false)) {
+                          isAuthorized = true;
+                        } else if (!res && matchedMember && matchedMember.isActive !== false) {
                           isAuthorized = true;
                         } else {
                           return alert(
@@ -7072,7 +7215,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           );
                         }
                       } catch (_netErr) {
-                        if (configuredPin && cleanPin === String(configuredPin).trim() && matchedMember && matchedMember.isActive !== false) {
+                        if (configuredPin && cleanPin === String(configuredPin).trim() && (!matchedMember || matchedMember.isActive !== false)) {
+                          isAuthorized = true;
+                        } else if (matchedMember && matchedMember.isActive !== false) {
                           isAuthorized = true;
                         } else {
                           return alert(tr('Error de conexión al validar tus credenciales.', 'Connection error validating credentials.'));
@@ -7080,14 +7225,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       }
 
                       if (isAuthorized) {
-                        await ensureDeviceRegisteredInUserDevices({
+                        ensureDeviceRegisteredInUserDevices({
                           apiFetchFn: apiFetch,
                           userId: resolvedUserId,
                           staffId: resolvedMember?.id || null,
                           phone: formattedLoginPhone,
                           role: 'staff',
                           tenantId: tenantInfo?.id || (Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '')),
-                        });
+                        }).catch(() => {});
 
                         setAuthenticatedStaffMember(resolvedMember);
                         setPortalAccessRole('staff');
@@ -7159,15 +7304,15 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                 {(() => {
                   const allPortalMenuItems = [
-                    { key: 'today', label: 'Órdenes de Hoy', icon: 'check-square' },
-                    { key: 'upcoming', label: 'Próximos Turnos', icon: 'calendar' },
-                    { key: 'reports', label: 'Reportes', icon: 'bar-chart-2' },
-                    { key: 'staff', label: 'Personal', icon: 'users' },
-                    { key: 'catalogo', label: 'Catálogo', icon: 'tag' },
-                    { key: 'horarios', label: 'Horarios', icon: 'clock' },
-                    { key: 'portafolio', label: 'Portafolio', icon: 'image' },
-                    { key: 'fidelidad', label: 'Fidelidad', icon: 'gift' },
-                    { key: 'recepcion_ia', label: 'Recepción IA', icon: 'phone-call' },
+                    { key: 'today', label: tr('Órdenes de Hoy', "Today's Orders"), icon: 'check-square' },
+                    { key: 'upcoming', label: tr('Próximos Turnos', 'Upcoming Turns'), icon: 'calendar' },
+                    { key: 'reports', label: tr('Reportes', 'Reports'), icon: 'bar-chart-2' },
+                    { key: 'staff', label: tr('Personal', 'Staff'), icon: 'users' },
+                    { key: 'catalogo', label: tr('Catálogo', 'Catalog'), icon: 'tag' },
+                    { key: 'horarios', label: tr('Horarios', 'Hours'), icon: 'clock' },
+                    { key: 'portafolio', label: tr('Portafolio', 'Portfolio'), icon: 'image' },
+                    { key: 'fidelidad', label: tr('Fidelidad', 'Loyalty'), icon: 'gift' },
+                    { key: 'recepcion_ia', label: tr('Recepción IA', 'AI Reception'), icon: 'phone-call' },
                   ] as const;
 
                   const portalMenuItems = portalAccessRole === 'owner'
@@ -8199,7 +8344,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
 
                         <View style={{ flexDirection: isMobile ? 'column' : 'row', gap: 12 }}>
                            <TouchableOpacity style={[styles.secondaryButton, { flex: 1, backgroundColor: tColor.input, borderColor: tColor.border }]} onPress={handleCancelPortfolioForm}>
-                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>Cancelar</Text>
+                            <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>{t.cancelBtn}</Text>
                           </TouchableOpacity>
                           <TouchableOpacity style={[styles.primaryButton, { flex: 1, backgroundColor: brandColor }]} onPress={handleSavePortfolioItem} disabled={isSubmittingConfig}>
                             <Text style={styles.primaryButtonText}>{isSubmittingConfig ? 'Guardando...' : '💾 Guardar'}</Text>
@@ -8303,7 +8448,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 {(agendaFilter === 'today' || agendaFilter === 'upcoming') ? (
                   <View style={styles.bentoGrid}>
                     {activeOrdersList.length === 0 ? (
-                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>No hay órdenes programadas.</Text></View>
+                      <View style={[styles.glassCard, { backgroundColor: tColor.card, borderColor: tColor.border }]}><Text style={{ color: tColor.muted, textAlign: 'center' }}>{tr('No hay órdenes programadas.', 'No scheduled orders.')}</Text></View>
                     ) : (
                       activeOrdersList.map((order, idx) => {
                         const orderPhoneClean = cleanPhoneDigits(order.clientPhone);
@@ -8319,7 +8464,23 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                               ) : (
                                 <View style={[styles.plateBadge, { backgroundColor: brandColor }]}><Text style={styles.plateText}>🎫 Turno {idx + 1}</Text></View>
                               )}
-                              <View style={[styles.statusBadge, { backgroundColor: tColor.input }]}><Text style={[styles.statusDot, { color: brandColor }]}>●</Text><Text style={{ color: tColor.text, fontSize: 12, fontWeight: 'bold' }}>{formatWallClockTime12h(order)}</Text></View>
+                              <View style={[styles.statusBadge, { backgroundColor: tColor.input, flexDirection: 'row', alignItems: 'center', gap: 6 }]}>
+                                <Text style={[styles.statusDot, { color: brandColor }]}>●</Text>
+                                <Text style={{ color: tColor.text, fontSize: 11.5, fontWeight: '800' }}>
+                                  {(() => {
+                                    const dt = parseAppointmentWallClock(order);
+                                    const dateLabel = !isNaN(dt.getTime())
+                                      ? dt.toLocaleDateString(lang === 'en' ? 'en-US' : 'es-ES', {
+                                          weekday: 'short',
+                                          month: 'short',
+                                          day: 'numeric',
+                                        })
+                                      : '';
+                                    const timeLabel = formatWallClockTime12h(order);
+                                    return dateLabel ? `${toTitleCase(dateLabel)} • ${timeLabel}` : timeLabel;
+                                  })()}
+                                </Text>
+                              </View>
                             </View>
                             
                             <View style={styles.orderDetails}>
@@ -8418,7 +8579,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                     style={{ backgroundColor: 'rgba(139, 92, 246, 0.15)', borderWidth: 1, borderColor: '#8B5CF6', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 5 }}
                                   >
                                     <Feather name="play-circle" size={12} color="#A78BFA" />
-                                    <Text style={{ color: '#A78BFA', fontSize: 11, fontWeight: '900' }}>Escuchar Llamada</Text>
+                                    <Text style={{ color: '#A78BFA', fontSize: 11, fontWeight: '900' }}>{tr('Escuchar Llamada', 'Listen to Call')}</Text>
                                   </TouchableOpacity>
                                 ) : null}
                                 {Platform.OS === 'web' ? (
@@ -8427,7 +8588,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                     style={{ backgroundColor: 'rgba(59, 130, 246, 0.12)', borderWidth: 1, borderColor: 'rgba(59, 130, 246, 0.4)', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 5 }}
                                   >
                                     <Feather name="calendar" size={12} color="#60A5FA" />
-                                    <Text style={{ color: '#60A5FA', fontSize: 11, fontWeight: '800' }}>+ Google Calendar</Text>
+                                    <Text style={{ color: '#60A5FA', fontSize: 11, fontWeight: '800' }}>{tr('+ Google Calendar', '+ Google Calendar')}</Text>
                                   </TouchableOpacity>
                                 ) : null}
                               </View>
@@ -8463,14 +8624,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                                 style={[styles.primaryButton, { backgroundColor: brandColor, flex: 1 }]}
                                 onPress={() => handleOpenPOS(order)}
                               >
-                                <Text style={styles.primaryButtonText}>📋 Completar Orden</Text>
+                                <Text style={styles.primaryButtonText}>{t.completeOrderBtn}</Text>
                               </TouchableOpacity>
                               <TouchableOpacity
                                 style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', borderWidth: 1, borderColor: '#EF4444', paddingHorizontal: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 6 }}
                                 onPress={() => openCancelAppointmentModal(order, 'staff')}
                               >
                                 <Feather name="x-circle" size={15} color="#EF4444" />
-                                <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>Cancelar</Text>
+                                <Text style={{ color: '#EF4444', fontWeight: '900', fontSize: 13 }}>{t.cancelBtn}</Text>
                               </TouchableOpacity>
                             </View>
                           </View>

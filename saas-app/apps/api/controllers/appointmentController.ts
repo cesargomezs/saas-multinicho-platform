@@ -905,6 +905,149 @@ async function recordLegalAcceptanceAndDevice(params: {
   }
 }
 
+// =========================================================================
+// 🔔 PLANIFICADOR DE RECORDATORIOS AL AGENDAR (6H / 2H / 1H -> push_notifications)
+// =========================================================================
+export interface ScheduledReminderRule {
+  ruleKey: 'reminder_6h' | 'reminder_2h' | 'reminder_1h';
+  hoursBefore: number;
+  label: string;
+  scheduledForIso: string;
+  status: 'scheduled';
+}
+
+export function buildAppointmentReminderRules(params: {
+  parsedDate: Date;
+  localDate?: string | null;
+  localTime?: string | null;
+  nowMs?: number;
+}): {
+  appointmentIso: string;
+  hoursUntilAppointment: number;
+  rules: ScheduledReminderRule[];
+} {
+  const nowMs = params.nowMs ?? Date.now();
+  let apptMs = params.parsedDate.getTime();
+
+  if (params.localDate && /^\d{4}-\d{2}-\d{2}$/.test(params.localDate)) {
+    const [y, m, d] = params.localDate.split('-').map(Number);
+    const tParts = (params.localTime || '12:00').split(':').map(Number);
+    const hh = Number.isFinite(tParts[0]) ? tParts[0] : 12;
+    const mm = Number.isFinite(tParts[1]) ? tParts[1] : 0;
+    apptMs = new Date(y, m - 1, d, hh, mm, 0, 0).getTime();
+  }
+
+  const hoursUntilAppointment = Number(((apptMs - nowMs) / (1000 * 60 * 60)).toFixed(2));
+  const candidates: { ruleKey: 'reminder_6h' | 'reminder_2h' | 'reminder_1h'; hoursBefore: number; label: string }[] = [
+    { ruleKey: 'reminder_6h', hoursBefore: 6, label: 'Recordatorio 6 horas antes' },
+    { ruleKey: 'reminder_2h', hoursBefore: 2, label: 'Recordatorio 2 horas antes' },
+    { ruleKey: 'reminder_1h', hoursBefore: 1, label: 'Recordatorio 1 hora antes' },
+  ];
+
+  const rules: ScheduledReminderRule[] = [];
+  for (const c of candidates) {
+    const triggerMs = apptMs - c.hoursBefore * 60 * 60 * 1000;
+    if (triggerMs > nowMs + 60 * 1000) {
+      rules.push({
+        ruleKey: c.ruleKey,
+        hoursBefore: c.hoursBefore,
+        label: c.label,
+        scheduledForIso: new Date(triggerMs).toISOString(),
+        status: 'scheduled',
+      });
+    }
+  }
+
+  // Si falta menos de 1h para la cita, dejamos al menos una regla de recordatorio inmediato programado
+  if (rules.length === 0) {
+    rules.push({
+      ruleKey: 'reminder_1h',
+      hoursBefore: 1,
+      label: 'Recordatorio inmediato / corta anticipación',
+      scheduledForIso: new Date(nowMs).toISOString(),
+      status: 'scheduled',
+    });
+  }
+
+  return {
+    appointmentIso: new Date(apptMs).toISOString(),
+    hoursUntilAppointment,
+    rules,
+  };
+}
+
+async function insertScheduledRemindersIntoPushNotifications(params: {
+  tenantId: string;
+  clientUserId: string;
+  appointmentId: string;
+  clientName: string;
+  serviceName: string;
+  formattedWhen: string;
+  rules: ScheduledReminderRule[];
+}): Promise<void> {
+  const { tenantId, clientUserId, appointmentId, clientName, serviceName, formattedWhen, rules } = params;
+  if (!tenantId || !clientUserId || !rules.length) return;
+
+  try {
+    await db.execute(sql`
+      ALTER TABLE public.push_notifications
+        ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ
+    `).catch(() => {});
+
+    const devRes = await db.execute(sql`
+      SELECT id, COALESCE(expo_push_token, push_token) AS push_token
+      FROM public.user_devices
+      WHERE user_id = ${clientUserId}::uuid
+        AND (tenant_id = ${tenantId}::uuid OR tenant_id IS NULL)
+      ORDER BY is_active DESC, last_used_at DESC NULLS LAST
+      LIMIT 1
+    `).catch(() => ({ rows: [] }));
+    const devRows = Array.isArray(devRes) ? devRes : (devRes as any).rows || [];
+    const deviceId = devRows[0]?.id || null;
+    const pushToken = devRows[0]?.push_token || null;
+
+    for (const rule of rules) {
+      const title =
+        rule.hoursBefore >= 6
+          ? '⏰ Recordatorio de tu Cita (6 horas antes)'
+          : rule.hoursBefore >= 2
+          ? '⏰ Recordatorio de tu Cita (2 horas antes)'
+          : '⏰ Recordatorio de tu Cita (1 hora antes)';
+
+      const body = `Hola ${clientName.trim()}, tu cita de ${serviceName} es el ${formattedWhen}. Confirma tu asistencia o cancela con al menos 3h de anticipación.`;
+      const payloadData = JSON.stringify({
+        tenantId,
+        appointmentId,
+        eventType: rule.ruleKey,
+        hoursBefore: rule.hoursBefore,
+        scheduledFor: rule.scheduledForIso,
+        action: 'confirm_or_cancel',
+      });
+
+      await db.execute(sql`
+        INSERT INTO public.push_notifications (
+          tenant_id, user_id, device_id, push_token, event_type, title, body, data, status, scheduled_for, created_at
+        )
+        VALUES (
+          ${tenantId}::uuid,
+          ${clientUserId}::uuid,
+          ${deviceId ? sql`${deviceId}::uuid` : sql`NULL`},
+          ${pushToken},
+          ${rule.ruleKey},
+          ${title},
+          ${body},
+          ${payloadData}::jsonb,
+          'scheduled',
+          ${rule.scheduledForIso}::timestamptz,
+          NOW()
+        )
+      `).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('⚠️ Aviso insertando recordatorios programados en push_notifications:', err);
+  }
+}
+
 // 📝 CREAR CITA Y DISPARAR NOTIFICACIÓN A TELEGRAM
 export async function createAppointment(req: Request, res: Response) {
   try {
@@ -1076,6 +1219,14 @@ export async function createAppointment(req: Request, res: Response) {
       finalMediaAndReports.assignedStaffId = staffId;
     }
 
+    const reminderPlan = buildAppointmentReminderRules({
+      parsedDate,
+      localDate: cleanMetadata?.localDate,
+      localTime: cleanMetadata?.localTime,
+    });
+    finalMediaAndReports.reminderRules = reminderPlan.rules;
+    finalMediaAndReports.hoursUntilAppointment = reminderPlan.hoursUntilAppointment;
+
     const [apt] = await db.insert(appointments).values({ 
       tenantId, 
       clientId: user.id, 
@@ -1088,6 +1239,20 @@ export async function createAppointment(req: Request, res: Response) {
       estimatedCost: '0.00', 
       finalCost: '0.00' 
     }).returning();
+
+    const [bookedService] = resolvedServiceId
+      ? await db.select().from(services).where(eq(services.id, resolvedServiceId))
+      : [null as any];
+    const prettyAptWhenForRule = formatWallClockForNotification(parsedDate, finalMediaAndReports);
+    await insertScheduledRemindersIntoPushNotifications({
+      tenantId,
+      clientUserId: user.id,
+      appointmentId: apt.id,
+      clientName: clientName.trim(),
+      serviceName: bookedService?.name || 'Servicio General',
+      formattedWhen: prettyAptWhenForRule,
+      rules: reminderPlan.rules,
+    });
 
     // 🔔 DISPARAR NOTIFICACIÓN A TELEGRAM (MULTI-NICHO + LINK GOOGLE CALENDAR)
     const modalityText = cleanMetadata?.modality === 'phone_call' ? '📞 Llamada Telefónica' : cleanMetadata?.modality === 'video_call' ? '💻 Videollamada' : '📍 Presencial';

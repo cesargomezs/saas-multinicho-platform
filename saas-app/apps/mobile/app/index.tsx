@@ -461,12 +461,20 @@ export default function DirectoryHomeScreen() {
     setDirectoryError(null);
 
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeoutId = controller ? setTimeout(() => controller.abort(), 9000) : null;
+    const timeoutId = controller
+      ? setTimeout(() => {
+          try {
+            controller.abort('timeout');
+          } catch {
+            controller.abort();
+          }
+        }, 20000)
+      : null;
 
     try {
       const API_URL = getApiBaseUrl();
       const res = await fetch(`${API_URL}/api/directory/search?radius=5000`, {
-        signal: controller?.signal,
+        ...(controller ? { signal: controller.signal } : {}),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -488,7 +496,12 @@ export default function DirectoryHomeScreen() {
         } catch (_e) {}
       }
     } catch (err: any) {
-      console.error('Error cargando /api/directory/search:', err);
+      const isAbortErr = err?.name === 'AbortError' || String(err?.message || '').toLowerCase().includes('aborted');
+      if (isAbortErr) {
+        console.warn('Tiempo de espera agotado consultando /api/directory/search');
+      } else {
+        console.error('Error cargando /api/directory/search:', err);
+      }
       if (!hasCached) {
         setDirectoryError(
           err?.name === 'AbortError'
@@ -856,7 +869,7 @@ export default function DirectoryHomeScreen() {
               setNameQuery('');
               setOnlyFavorites(false);
             }}
-            style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 9 : 12, flex: 0, minWidth: 0 }}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: isMobile ? 9 : 12, flexShrink: 0 }}
           >
             <View
               style={{
@@ -869,6 +882,7 @@ export default function DirectoryHomeScreen() {
                 overflow: 'hidden',
                 alignItems: 'center',
                 justifyContent: 'center',
+                flexShrink: 0,
               }}
             >
               <Image
@@ -878,7 +892,13 @@ export default function DirectoryHomeScreen() {
               />
             </View>
             <Text
-              style={{ color: tColor.text, fontSize: isMobile ? 15 : 22, fontWeight: '900', letterSpacing: -0.2 }}
+              style={{
+                color: tColor.text,
+                fontSize: isMobile ? 15 : 22,
+                fontWeight: '900',
+                letterSpacing: -0.2,
+                flexShrink: 0,
+              }}
               numberOfLines={1}
             >
               Pick-Time <Text style={{ color: '#FF5E00' }}>Book</Text>

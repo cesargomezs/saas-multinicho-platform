@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { db, tenants, users } from '@taller/database';
+import { db, tenants, users, staff } from '@taller/database';
 import { eq, and, sql } from 'drizzle-orm';
 import crypto from 'crypto';
 import { buildBilingualTitledTranslations } from '../src/services/translationService';
@@ -578,13 +578,14 @@ export async function updateTenantConfig(req: Request, res: Response) {
   }
 }
 
-// 🔐 Autenticación segura del Portal Interno por Tenant (Verifica Hash scrypt en tenants y users)
+// 🔐 Autenticación segura del Portal Interno por Tenant (Verifica Hash scrypt en tenants, staff y users)
 export async function authenticateTenantStaff(req: Request, res: Response) {
   try {
-    const tenantId = (req.headers['x-tenant-id'] as string) || req.body.tenantId;
-    const { email, password } = req.body;
+    const tenantId = (req.headers['x-tenant-id'] as string) || req.body?.tenantId;
+    const { email, phone, password, pin } = req.body || {};
+    const secretInput = String(pin ?? password ?? '').trim();
 
-    if (!tenantId || !password) {
+    if (!tenantId || !secretInput) {
       return res.status(400).json({ success: false, message: 'Faltan credenciales para validar el acceso.' });
     }
 
@@ -593,20 +594,44 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
       return res.status(404).json({ success: false, message: 'Negocio no encontrado.' });
     }
 
-    const cleanEmail = (email || '').trim().toLowerCase();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const phoneDigits10 = String(phone || '').replace(/\D/g, '').slice(-10);
     const tenantAdminEmail = String((tenant as any).adminEmail || (tenant as any).admin_email || '').trim().toLowerCase();
     const tenantPasswordHash = (tenant as any).adminPasswordHash || (tenant as any).admin_password_hash || null;
     const tenantPinHash = (tenant as any).portalPinHash || (tenant as any).portal_pin_hash || null;
+    const loyaltyObj =
+      typeof (tenant as any).loyaltyConfig === 'string'
+        ? JSON.parse((tenant as any).loyaltyConfig || '{}')
+        : ((tenant as any).loyaltyConfig || {});
+    const configuredPlainPin = String(
+      loyaltyObj?.staffPortalPin || (tenant as any).portalPin || (tenant as any).portal_pin || ''
+    ).trim();
 
-    // 1. Validar contra admin_password_hash del tenant (soporta scrypt$, bcrypt $2a$/$2b$ y SuperAdmin)
+    let matchedMember: any = null;
+    if (phoneDigits10.length >= 7) {
+      const staffRes = await db
+        .select()
+        .from(staff)
+        .where(eq(staff.tenantId, tenantId));
+      matchedMember =
+        staffRes.find((m: any) => String(m.phone || '').replace(/\D/g, '').slice(-10) === phoneDigits10) || null;
+      if (matchedMember && matchedMember.isActive === false) {
+        return res.status(401).json({
+          success: false,
+          message: 'Tu usuario de empleado está INACTIVO. Contacta al administrador del negocio.',
+        });
+      }
+    }
+
+    // 1. Validar contra admin_password_hash del tenant
     if (tenantPasswordHash) {
       const emailMatches = !cleanEmail || !tenantAdminEmail || cleanEmail === tenantAdminEmail;
-      let passOk = verifyPasswordScrypt(String(password), tenantPasswordHash);
+      let passOk = verifyPasswordScrypt(secretInput, tenantPasswordHash);
 
       if (!passOk && String(tenantPasswordHash).startsWith('$2')) {
         try {
           const bfRes = await db.execute(
-            sql`SELECT (${tenantPasswordHash} = crypt(${String(password)}, ${tenantPasswordHash})) AS matched`
+            sql`SELECT (${tenantPasswordHash} = crypt(${secretInput}, ${tenantPasswordHash})) AS matched`
           );
           const bfRows = Array.isArray(bfRes) ? bfRes : (bfRes as any).rows || [];
           passOk = bfRows?.[0]?.matched === true;
@@ -619,27 +644,38 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
           message: 'Acceso autorizado al Portal Interno',
           tenantName: tenant.name,
           adminEmail: tenantAdminEmail,
+          member: matchedMember,
         });
       }
     }
 
-    // 2. Validar contra portal_pin_hash (Código de Acceso para Empleados configurado al crear el negocio)
+    // 2. Validar contra portal_pin_hash o PIN configurado del negocio
     if (tenantPinHash) {
-      if (verifyPasswordScrypt(String(password).trim(), tenantPinHash)) {
+      const pinMatchesHash = verifyPasswordScrypt(secretInput, tenantPinHash);
+      const pinMatchesPlain = Boolean(configuredPlainPin && secretInput === configuredPlainPin);
+      if (pinMatchesHash || pinMatchesPlain) {
         return res.status(200).json({
           success: true,
           role: 'staff',
           message: 'Acceso autorizado para personal operativo',
           tenantName: tenant.name,
+          member: matchedMember,
         });
       }
-      // Si el negocio ya tiene su propio PIN configurado y no se envió email, no permitir '1234' por defecto
       if (!cleanEmail) {
         return res.status(401).json({
           success: false,
           message: 'Código de acceso de empleado incorrecto.',
         });
       }
+    } else if (configuredPlainPin && secretInput === configuredPlainPin) {
+      return res.status(200).json({
+        success: true,
+        role: 'staff',
+        message: 'Acceso autorizado para personal operativo',
+        tenantName: tenant.name,
+        member: matchedMember,
+      });
     }
 
     // 3. Validar contra la tabla public.users (rol owner / staff)
@@ -650,38 +686,42 @@ export async function authenticateTenantStaff(req: Request, res: Response) {
         .where(and(eq(users.tenantId, tenantId), eq(users.email, cleanEmail)));
 
       if (userRow && (userRow as any).passwordHash) {
-        if (verifyPasswordScrypt(String(password), (userRow as any).passwordHash)) {
+        if (verifyPasswordScrypt(secretInput, (userRow as any).passwordHash)) {
           await db.execute(sql`
             UPDATE public.users
             SET failed_login_attempts = 0, last_login_at = NOW()
             WHERE id = ${userRow.id}::uuid
-          `);
+          `).catch(() => {});
           return res.status(200).json({
             success: true,
             message: 'Acceso autorizado al Portal Interno',
             tenantName: tenant.name,
             adminEmail: cleanEmail,
+            userId: userRow.id,
+            member: matchedMember,
           });
         } else {
           await db.execute(sql`
             UPDATE public.users
             SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1
             WHERE id = ${userRow.id}::uuid
-          `);
+          `).catch(() => {});
         }
       }
     }
 
-    // 4. Fallback solo para negocios antiguos que aún tienen portal_pin_hash y admin_password_hash en NULL
-    if (!tenantPinHash && !tenantPasswordHash && String(password).trim() === '1234') {
+    // 4. Fallback solo si no hay PIN ni contraseña configurados en el tenant
+    if (!tenantPinHash && !tenantPasswordHash && !configuredPlainPin && secretInput === '1234') {
       return res.status(200).json({
         success: true,
+        role: 'staff',
         message: 'Acceso autorizado (negocio sin contraseña configurada aún)',
         tenantName: tenant.name,
+        member: matchedMember,
       });
     }
 
-    return res.status(401).json({ success: false, message: 'Correo o contraseña incorrectos.' });
+    return res.status(401).json({ success: false, message: 'Teléfono o código de acceso incorrectos.' });
   } catch (error: any) {
     console.error('Error en autenticación de staff:', error);
     return res.status(500).json({ success: false, message: error.message || String(error) });
