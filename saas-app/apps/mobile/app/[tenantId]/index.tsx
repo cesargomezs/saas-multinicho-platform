@@ -6650,12 +6650,36 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                           <Text style={[styles.secondaryButtonText, { color: tColor.text }]}>{tr('Salir', 'Log Out')}</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
+                          activeOpacity={0.82}
                           disabled={isDeletingClientAccount}
-                          style={[styles.secondaryButton, { backgroundColor: 'rgba(239, 68, 68, 0.12)', borderColor: '#EF4444', paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]}
+                          style={{
+                            backgroundColor: theme === 'dark' ? 'rgba(239, 68, 68, 0.14)' : 'rgba(239, 68, 68, 0.09)',
+                            borderWidth: 1,
+                            borderColor: 'rgba(239, 68, 68, 0.45)',
+                            paddingHorizontal: 13,
+                            paddingVertical: 10,
+                            borderRadius: 12,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                            flex: isMobile ? 1 : undefined,
+                          }}
                           onPress={handleOpenDeleteAccountModal}
                         >
-                          <Text style={[styles.secondaryButtonText, { color: '#EF4444' }]}>
-                            {isDeletingClientAccount ? tr('Anonimizando...', 'Anonymizing...') : tr('Eliminar Cuenta', 'Delete Account')}
+                          <Feather name="trash-2" size={14} color="#F87171" />
+                          <Text
+                            numberOfLines={1}
+                            style={{
+                              color: '#F87171',
+                              fontWeight: '800',
+                              fontSize: 12.5,
+                              letterSpacing: 0.2,
+                            }}
+                          >
+                            {isDeletingClientAccount
+                              ? tr('Anonimizando...', 'Anonymizing...')
+                              : tr('Eliminar cuenta', 'Delete account')}
                           </Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={[styles.primaryButton, { backgroundColor: brandColor, paddingHorizontal: 16, paddingVertical: 10, flex: isMobile ? 1 : undefined }]} onPress={handleBookFromExpediente}>
@@ -10888,202 +10912,6 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                     </View>
                   </Modal>
 
-                  {/* 🗑️ MODAL DE ELIMINACIÓN / ANONIMIZACIÓN DE CUENTA CON MOTIVOS DE SALIDA */}
-                  <Modal
-                    visible={isDeleteAccountModalOpen}
-                    transparent={true}
-                    animationType="fade"
-                    onRequestClose={() => { if (!isDeletingClientAccount) setIsDeleteAccountModalOpen(false); }}
-                  >
-                    <View
-                      style={{
-                        flex: 1,
-                        backgroundColor: 'rgba(2, 6, 23, 0.84)',
-                        justifyContent: 'center',
-                        alignItems: 'center',
-                        padding: 18,
-                      }}
-                    >
-                      <View
-                        style={{
-                          width: '100%',
-                          maxWidth: 440,
-                          backgroundColor: theme === 'dark' ? '#12161C' : '#FFFFFF',
-                          borderRadius: 24,
-                          borderWidth: 1.5,
-                          borderColor: tColor.border,
-                          padding: 22,
-                        }}
-                      >
-                        <View
-                          style={{
-                            flexDirection: 'row',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            marginBottom: 12,
-                          }}
-                        >
-                          <Text style={{ color: tColor.text, fontSize: 20, fontWeight: '900' }}>
-                            {tr('Eliminar Cuenta', 'Delete Account')}
-                          </Text>
-                          <TouchableOpacity
-                            disabled={isDeletingClientAccount}
-                            onPress={() => setIsDeleteAccountModalOpen(false)}
-                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                          >
-                            <Feather name="x" size={22} color={tColor.muted} />
-                          </TouchableOpacity>
-                        </View>
-
-                        <Text
-                          style={{
-                            color: tColor.muted,
-                            fontSize: 13.5,
-                            lineHeight: 20,
-                            marginBottom: 16,
-                          }}
-                        >
-                          {tr(
-                            'Lamentamos mucho que te vayas. Para ayudarnos a mejorar, ¿podrías decirnos por qué deseas eliminar tu cuenta? Tus datos personales e imágenes se anonimizarán de inmediato.',
-                            'We are sorry to see you go. To help us improve, could you tell us why you want to delete your account? Your personal data and images will be anonymized immediately.'
-                          )}
-                        </Text>
-
-                        <View style={{ marginBottom: 14 }}>
-                          {accountDeletionReasons.map((item) => {
-                            const isSelected = selectedDeletionReason === item.code;
-                            return (
-                              <TouchableOpacity
-                                key={item.code}
-                                activeOpacity={0.8}
-                                disabled={isDeletingClientAccount}
-                                onPress={() => setSelectedDeletionReason(item.code)}
-                                style={{
-                                  flexDirection: 'row',
-                                  alignItems: 'center',
-                                  gap: 12,
-                                  paddingVertical: 13,
-                                  paddingHorizontal: 8,
-                                  borderBottomWidth: 1,
-                                  borderBottomColor: tColor.border,
-                                }}
-                              >
-                                <View
-                                  style={{
-                                    width: 22,
-                                    height: 22,
-                                    borderRadius: 11,
-                                    borderWidth: 2,
-                                    borderColor: isSelected ? '#EF4444' : tColor.muted,
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                  }}
-                                >
-                                  {isSelected ? (
-                                    <View
-                                      style={{
-                                        width: 11,
-                                        height: 11,
-                                        borderRadius: 6,
-                                        backgroundColor: '#EF4444',
-                                      }}
-                                    />
-                                  ) : null}
-                                </View>
-                                <Text
-                                  style={{
-                                    flex: 1,
-                                    color: isSelected ? tColor.text : tColor.muted,
-                                    fontSize: 14.5,
-                                    fontWeight: isSelected ? '800' : '600',
-                                  }}
-                                >
-                                  {item.label}
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          })}
-                        </View>
-
-                        <TextInput
-                          style={[
-                            styles.formInput,
-                            {
-                              backgroundColor: tColor.input,
-                              borderColor: tColor.border,
-                              color: tColor.text,
-                              minHeight: 54,
-                              marginBottom: 18,
-                              fontSize: 13.5,
-                            },
-                          ]}
-                          placeholder={tr(
-                            'Comentario adicional (opcional)...',
-                            'Additional feedback (optional)...'
-                          )}
-                          placeholderTextColor={tColor.muted}
-                          value={deletionCustomFeedback}
-                          onChangeText={setDeletionCustomFeedback}
-                          multiline
-                        />
-
-                        <View style={{ flexDirection: 'row', gap: 12 }}>
-                          <TouchableOpacity
-                            activeOpacity={0.85}
-                            disabled={isDeletingClientAccount}
-                            onPress={() => setIsDeleteAccountModalOpen(false)}
-                            style={{
-                              flex: 1,
-                              height: 48,
-                              borderRadius: 14,
-                              backgroundColor: theme === 'dark' ? '#262B34' : '#E2E8F0',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                            }}
-                          >
-                            <Text
-                              style={{
-                                color: tColor.text,
-                                fontWeight: '900',
-                                fontSize: 15,
-                              }}
-                            >
-                              {tr('Cancelar', 'Cancel')}
-                            </Text>
-                          </TouchableOpacity>
-
-                          <TouchableOpacity
-                            activeOpacity={0.85}
-                            disabled={isDeletingClientAccount || !selectedDeletionReason}
-                            onPress={handleConfirmAnonymizeClientAccount}
-                            style={{
-                              flex: 1,
-                              height: 48,
-                              borderRadius: 14,
-                              backgroundColor: selectedDeletionReason
-                                ? '#EF4444'
-                                : 'rgba(239, 68, 68, 0.35)',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                            }}
-                          >
-                            <Text
-                              style={{
-                                color: '#FFFFFF',
-                                fontWeight: '900',
-                                fontSize: 15,
-                              }}
-                            >
-                              {isDeletingClientAccount
-                                ? tr('Eliminando...', 'Deleting...')
-                                : tr('Eliminar', 'Delete')}
-                            </Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    </View>
-                  </Modal>
-
                   {(tenantInfo?.loyaltyConfig?.referralActive && bookingClientCoupons > 0) ? (
                     <View style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#3B82F6', marginBottom: 16 }}>
                       <Text style={{ color: '#3B82F6', fontWeight: '900', fontSize: 14, marginBottom: 4 }}>
@@ -12091,6 +11919,278 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
           </View>
         </View>
       ) : null}
+
+
+      {/* 🗑️ MODAL UI/UX DE ELIMINACIÓN / ANONIMIZACIÓN DE CUENTA CON MOTIVOS DE SALIDA */}
+      <Modal
+        visible={isDeleteAccountModalOpen}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => { if (!isDeletingClientAccount) setIsDeleteAccountModalOpen(false); }}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(2, 6, 23, 0.82)',
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: 16,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 450,
+              backgroundColor: theme === 'dark' ? '#0F141D' : '#FFFFFF',
+              borderRadius: 24,
+              borderWidth: 1,
+              borderColor: theme === 'dark' ? 'rgba(255, 255, 255, 0.12)' : 'rgba(15, 23, 42, 0.12)',
+              padding: 22,
+              ...Platform.select({
+                web: {
+                  boxShadow: theme === 'dark'
+                    ? '0 24px 60px -12px rgba(0, 0, 0, 0.75)'
+                    : '0 20px 44px -12px rgba(15, 23, 42, 0.22)',
+                } as any,
+                ios: {
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 14 },
+                  shadowOpacity: 0.42,
+                  shadowRadius: 24,
+                },
+                android: { elevation: 14 },
+              }),
+            }}
+          >
+            {/* Header con ícono de alerta y botón cerrar */}
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                paddingBottom: 14,
+                marginBottom: 14,
+                borderBottomWidth: 1,
+                borderBottomColor: tColor.border,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                <View
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 12,
+                    backgroundColor: 'rgba(239, 68, 68, 0.14)',
+                    borderWidth: 1,
+                    borderColor: 'rgba(239, 68, 68, 0.35)',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Feather name="alert-triangle" size={18} color="#F87171" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: tColor.text, fontSize: 18, fontWeight: '900' }}>
+                    {tr('Eliminar cuenta', 'Delete account')}
+                  </Text>
+                  <Text style={{ color: tColor.muted, fontSize: 11.5, marginTop: 1 }}>
+                    {tr('Anonimización segura y registro de motivo', 'Safe anonymization & exit feedback')}
+                  </Text>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                disabled={isDeletingClientAccount}
+                onPress={() => setIsDeleteAccountModalOpen(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 17,
+                  backgroundColor: tColor.input,
+                  borderWidth: 1,
+                  borderColor: tColor.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Feather name="x" size={17} color={tColor.muted} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Aviso claro de privacidad y conservación histórica */}
+            <View
+              style={{
+                backgroundColor: theme === 'dark' ? 'rgba(59, 130, 246, 0.09)' : 'rgba(59, 130, 246, 0.07)',
+                borderWidth: 1,
+                borderColor: 'rgba(59, 130, 246, 0.25)',
+                borderRadius: 14,
+                padding: 12,
+                marginBottom: 16,
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 10,
+              }}
+            >
+              <Feather name="shield" size={15} color="#60A5FA" style={{ marginTop: 2 }} />
+              <Text style={{ flex: 1, color: tColor.muted, fontSize: 12, lineHeight: 18 }}>
+                {tr(
+                  'Tu perfil pasará a "Anónimo" eliminando teléfono, correo e imágenes personales, sin borrar el historial operativo del negocio. Cuéntanos por qué te vas:',
+                  'Your profile will become "Anonymous", removing phone, email, and personal images while keeping business records intact. Tell us why you are leaving:'
+                )}
+              </Text>
+            </View>
+
+            {/* Tarjetas seleccionables de motivos */}
+            <View style={{ gap: 8, marginBottom: 14 }}>
+              {accountDeletionReasons.map((item) => {
+                const isSelected = selectedDeletionReason === item.code;
+                return (
+                  <TouchableOpacity
+                    key={item.code}
+                    activeOpacity={0.82}
+                    disabled={isDeletingClientAccount}
+                    onPress={() => setSelectedDeletionReason(item.code)}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 12,
+                      paddingVertical: 12,
+                      paddingHorizontal: 14,
+                      borderRadius: 14,
+                      borderWidth: 1.5,
+                      borderColor: isSelected ? '#EF4444' : tColor.border,
+                      backgroundColor: isSelected
+                        ? (theme === 'dark' ? 'rgba(239, 68, 68, 0.14)' : 'rgba(239, 68, 68, 0.08)')
+                        : tColor.input,
+                    }}
+                  >
+                    <View
+                      style={{
+                        width: 20,
+                        height: 20,
+                        borderRadius: 10,
+                        borderWidth: 2,
+                        borderColor: isSelected ? '#EF4444' : tColor.muted,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      {isSelected ? (
+                        <View
+                          style={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: 5,
+                            backgroundColor: '#EF4444',
+                          }}
+                        />
+                      ) : null}
+                    </View>
+                    <Text
+                      style={{
+                        flex: 1,
+                        color: isSelected ? tColor.text : tColor.muted,
+                        fontSize: 13.5,
+                        fontWeight: isSelected ? '800' : '600',
+                        lineHeight: 18,
+                      }}
+                    >
+                      {item.label}
+                    </Text>
+                    {isSelected ? <Feather name="check" size={15} color="#F87171" /> : null}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* Comentario opcional */}
+            <TextInput
+              style={{
+                backgroundColor: tColor.input,
+                borderWidth: 1,
+                borderColor: tColor.border,
+                borderRadius: 14,
+                color: tColor.text,
+                minHeight: 62,
+                paddingHorizontal: 14,
+                paddingVertical: 11,
+                marginBottom: 18,
+                fontSize: 13,
+                textAlignVertical: 'top',
+              }}
+              placeholder={tr(
+                'Comentario adicional (opcional)...',
+                'Additional feedback (optional)...'
+              )}
+              placeholderTextColor={tColor.muted}
+              value={deletionCustomFeedback}
+              onChangeText={setDeletionCustomFeedback}
+              multiline
+            />
+
+            {/* Acciones inferiores */}
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={isDeletingClientAccount}
+                onPress={() => setIsDeleteAccountModalOpen(false)}
+                style={{
+                  flex: 1,
+                  height: 46,
+                  borderRadius: 13,
+                  backgroundColor: tColor.input,
+                  borderWidth: 1,
+                  borderColor: tColor.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text
+                  style={{
+                    color: tColor.text,
+                    fontWeight: '800',
+                    fontSize: 14,
+                  }}
+                >
+                  {tr('Cancelar', 'Cancel')}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                activeOpacity={0.85}
+                disabled={isDeletingClientAccount || !selectedDeletionReason}
+                onPress={handleConfirmAnonymizeClientAccount}
+                style={{
+                  flex: 1.2,
+                  height: 46,
+                  borderRadius: 13,
+                  backgroundColor: selectedDeletionReason
+                    ? '#EF4444'
+                    : 'rgba(239, 68, 68, 0.3)',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 7,
+                }}
+              >
+                <Feather name="user-x" size={15} color="#FFFFFF" />
+                <Text
+                  style={{
+                    color: '#FFFFFF',
+                    fontWeight: '900',
+                    fontSize: 14,
+                  }}
+                >
+                  {isDeletingClientAccount
+                    ? tr('Anonimizando...', 'Anonymizing...')
+                    : tr('Confirmar eliminación', 'Confirm deletion')}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
     </View>
   );

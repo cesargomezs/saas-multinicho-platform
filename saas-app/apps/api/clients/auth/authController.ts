@@ -223,6 +223,62 @@ export async function handleClientAnonymize(req: Request, res: Response) {
       )
     `);
 
+    // 1b. Registrar evento en public.audit_logs si existe la tabla en BD (sin PII)
+    try {
+      await db.execute(sql`
+        INSERT INTO public.audit_logs (
+          tenant_id, actor_user_id, action, entity_type, entity_id, metadata, created_at
+        )
+        VALUES (
+          ${effectiveTenantId ? sql`${effectiveTenantId}::uuid` : sql`NULL`},
+          ${userUuid}::uuid,
+          'account_anonymized',
+          'user',
+          ${userUuid},
+          ${JSON.stringify({
+            role: 'client',
+            reasonCode: finalReasonCode,
+            reasonLabel: finalReasonLabel,
+            appointmentsCount: aptCountNum,
+          })}::jsonb,
+          NOW()
+        )
+      `);
+    } catch (_auditErr) {
+      // Si la tabla audit_logs tiene otro esquema de columnas en BD, insertar en columnas estándar seguras
+      await db.execute(sql`
+        INSERT INTO public.audit_logs (action, details, created_at)
+        VALUES (
+          'account_anonymized',
+          ${`user=${userUuid} tenant=${effectiveTenantId || 'none'} reason=${finalReasonCode}`},
+          NOW()
+        )
+      `).catch(() => {});
+    }
+
+    // 1c. Notificación por correo electrónico de confirmación de eliminación/anonimización (si RESEND_API_KEY está configurado)
+    const originalEmail = String(targetUser.email || '').trim().toLowerCase();
+    const resendKey = process.env.RESEND_API_KEY;
+    if (resendKey && originalEmail && !originalEmail.endsWith('@anonymized.local')) {
+      try {
+        await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${resendKey}`,
+          },
+          body: JSON.stringify({
+            from: process.env.EMAIL_FROM || 'PickTime Book <no-reply@picktimebook.com>',
+            to: [originalEmail],
+            subject: 'Confirmación de eliminación y anonimización de cuenta',
+            html: `<p>Hola,</p><p>Te confirmamos que tu solicitud de eliminación de cuenta fue procesada y tus datos personales fueron anonimizados.</p><p><strong>Motivo registrado:</strong> ${finalReasonLabel}</p><p>El historial operativo del negocio se conserva de forma anonimizada sin datos personales.</p>`,
+          }),
+        });
+      } catch (_mailErr) {
+        console.warn('⚠️ No se pudo enviar el correo de confirmación de eliminación:', _mailErr);
+      }
+    }
+
     // 2. Desactivar dispositivos y limpiar tokens push en public.user_devices
     await db.execute(sql`
       UPDATE public.user_devices
