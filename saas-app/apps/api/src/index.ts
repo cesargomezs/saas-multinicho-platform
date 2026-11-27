@@ -108,6 +108,7 @@ import {
   getTenantPayments,
 } from '../controllers/paymentController';
 import { deleteAllNotifications, deleteNotificationById, getNotifications, markNotificationsRead } from '../controllers/notificationController';
+import { handleClientAnonymize } from '../../controllers/authController';
 
 // =========================================================================
 // 🗄️ AUTO-MIGRACIÓN Y SEMILLA EN BD PARA NUEVOS NICHOS (LEGAL & DENTAL)
@@ -281,6 +282,21 @@ async function ensureMultinicheDatabaseReady() {
       );
     `);
 
+    // 8. Asegurar tabla public.account_deletion_logs (motivos de salida sin PII)
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS public.account_deletion_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID,
+        user_id UUID,
+        role VARCHAR(30) DEFAULT 'client',
+        reason_code VARCHAR(60) NOT NULL,
+        reason_label TEXT NOT NULL,
+        custom_feedback TEXT,
+        appointments_count INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
     console.log('✅ Base de datos sincronizada con los nichos (automotive, spa, barbershop, legal, dental) y Canal Interno de Telegram por negocio.');
   } catch (err) {
     console.warn('⚠️ Aviso verificando esquema multi-nicho en BD:', err);
@@ -352,6 +368,8 @@ app.post('/api/promo-codes/validate', validatePromoCode);
 app.get('/api/clients/vehicle/:plate', getVehicleByPlate);
 app.get('/api/clients/history/:identifier', getClientVehicleHistory);
 app.post('/api/clients/auth', authenticateClientUser);
+app.post('/api/clients/anonymize', handleClientAnonymize);
+app.post('/api/clients/auth/anonymize', handleClientAnonymize);
 app.put('/api/clients/profile', updateClientProfile);
 app.put('/api/appointments/:appointmentId/cancel', cancelAppointment);
 app.put('/api/appointments/:appointmentId/complete', completeWorkOrder);

@@ -141,6 +141,141 @@ export async function handleClientAuth(req: Request, res: Response) {
   }
 }
 
+export async function handleClientAnonymize(req: Request, res: Response) {
+  try {
+    const headerTenant = (req.headers['x-tenant-id'] as string) || '';
+    const bodyTenant = (req.body?.tenantId as string) || '';
+    const tenantId = headerTenant || bodyTenant || null;
+    const {
+      id,
+      clientId,
+      email,
+      reasonCode,
+      reasonLabel,
+      customFeedback,
+      appointmentsCount,
+    } = req.body || {};
+
+    const targetId = String(id || clientId || '').trim();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+
+    if (!targetId && !cleanEmail) {
+      return res.status(400).json({ success: false, error: 'Se requiere id o email del cliente.' });
+    }
+
+    let targetUser: any = null;
+    if (targetId) {
+      const found = await db.select().from(users).where(eq(users.id, targetId));
+      targetUser = found[0] || null;
+    }
+    if (!targetUser && cleanEmail) {
+      const byEmail = await db
+        .select()
+        .from(users)
+        .where(
+          tenantId
+            ? and(eq(users.tenantId, tenantId), eq(users.email, cleanEmail))
+            : eq(users.email, cleanEmail)
+        );
+      targetUser = byEmail[0] || null;
+    }
+
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado.' });
+    }
+
+    const userUuid = String(targetUser.id);
+    const effectiveTenantId = tenantId || (targetUser.tenantId ? String(targetUser.tenantId) : null);
+
+    // 1. Asegurar tabla de log de motivos sin PII (account_deletion_logs) y registrar el motivo
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS public.account_deletion_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id UUID,
+        user_id UUID,
+        role VARCHAR(30) DEFAULT 'client',
+        reason_code VARCHAR(60) NOT NULL,
+        reason_label TEXT NOT NULL,
+        custom_feedback TEXT,
+        appointments_count INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    const finalReasonCode = String(reasonCode || 'unspecified').trim().slice(0, 60);
+    const finalReasonLabel = String(reasonLabel || 'No especificado').trim();
+    const finalFeedback = customFeedback ? String(customFeedback).trim().slice(0, 500) : null;
+    const aptCountNum = Number.isFinite(Number(appointmentsCount)) ? Number(appointmentsCount) : 0;
+
+    await db.execute(sql`
+      INSERT INTO public.account_deletion_logs (
+        tenant_id, user_id, role, reason_code, reason_label, custom_feedback, appointments_count, created_at
+      )
+      VALUES (
+        ${effectiveTenantId ? sql`${effectiveTenantId}::uuid` : sql`NULL`},
+        ${userUuid}::uuid,
+        'client',
+        ${finalReasonCode},
+        ${finalReasonLabel},
+        ${finalFeedback},
+        ${aptCountNum},
+        NOW()
+      )
+    `);
+
+    // 2. Desactivar dispositivos y limpiar tokens push en public.user_devices
+    await db.execute(sql`
+      UPDATE public.user_devices
+      SET is_active = FALSE, push_token = NULL, expo_push_token = NULL, last_used_at = NOW()
+      WHERE user_id = ${userUuid}::uuid
+    `).catch(() => {});
+
+    // 3. Limpiar URLs de imágenes sensibles en work_orders asociadas a las citas del cliente sin borrar registros contables
+    const clientApts = await db.select().from(appointments).where(eq(appointments.clientId, userUuid));
+    const aptIdsList = clientApts.map((a: any) => String(a.id)).filter(Boolean);
+    if (aptIdsList.length > 0) {
+      await db.execute(sql`
+        UPDATE public.work_orders
+        SET old_part_image_url = NULL,
+            new_part_image_url = NULL
+        WHERE appointment_id::text = ANY(${aptIdsList})
+      `).catch(() => {});
+    }
+
+    // 4. Anonimizar registro en public.users (manteniendo integridad referencial)
+    const anonEmail = `deleted_${userUuid.slice(0, 8)}_${Date.now()}@anonymized.local`;
+    await db
+      .update(users)
+      .set({
+        name: 'Anónimo',
+        email: anonEmail,
+        phone: '',
+        metadata: {
+          anonymized: true,
+          anonymizedAt: new Date().toISOString(),
+          deletionReasonCode: finalReasonCode,
+        },
+      } as any)
+      .where(eq(users.id, userUuid));
+
+    await db.execute(sql`
+      UPDATE public.users
+      SET password_hash = NULL,
+          apple_user_id = NULL
+      WHERE id = ${userUuid}::uuid
+    `).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Cuenta anonimizada y motivo registrado correctamente.',
+    });
+  } catch (error: any) {
+    console.error('Error en handleClientAnonymize:', error);
+    return res.status(500).json({ success: false, error: error.message || 'Error anonimizando cuenta.' });
+  }
+}
+
 router.post('/', handleClientAuth);
+router.post('/anonymize', handleClientAnonymize);
 
 export default router;

@@ -2238,16 +2238,51 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
   const [expEditPhone, setExpEditPhone] = useState('');
   const [isSavingExpedienteProfile, setIsSavingExpedienteProfile] = useState(false);
   const [isDeletingClientAccount, setIsDeletingClientAccount] = useState(false);
+  const [isDeleteAccountModalOpen, setIsDeleteAccountModalOpen] = useState(false);
+  const [selectedDeletionReason, setSelectedDeletionReason] = useState<string>('');
+  const [deletionCustomFeedback, setDeletionCustomFeedback] = useState<string>('');
 
-  const handleAnonymizeClientAccount = async () => {
+  const accountDeletionReasons = useMemo(
+    () => [
+      {
+        code: 'hard_to_use',
+        label: tr('No entiendo cómo usar la app', "I don't understand how to use the app"),
+      },
+      {
+        code: 'not_found',
+        label: tr('No encontré el servicio o negocio que buscaba', "I didn't find the service or business I was looking for"),
+      },
+      {
+        code: 'too_many_notifications',
+        label: tr('Recibo demasiadas notificaciones', 'I receive too many notifications'),
+      },
+      {
+        code: 'bugs',
+        label: tr('Errores técnicos / Bugs', 'Technical errors / Bugs'),
+      },
+      {
+        code: 'privacy',
+        label: tr('Privacidad / Seguridad', 'Privacy / Security'),
+      },
+    ],
+    [lang]
+  );
+
+  const handleOpenDeleteAccountModal = () => {
+    setSelectedDeletionReason('');
+    setDeletionCustomFeedback('');
+    setIsDeleteAccountModalOpen(true);
+  };
+
+  const handleConfirmAnonymizeClientAccount = async () => {
     if (!clientExpedienteData?.client) return;
-    const confirmMsg = tr(
-      'Esta acción anonimizará tu perfil de cliente (Nombre: "Anónimo", correo y teléfono limpiados, y sin imágenes/datos personales en tu cuenta) sin borrar el historial contable/operativo del negocio. ¿Deseas continuar?',
-      'This will anonymize your client profile (Name: "Anonymous", email and phone cleared, and personal images removed) while keeping business service records intact. Do you want to continue?'
-    );
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      if (!window.confirm(confirmMsg)) return;
+    if (!selectedDeletionReason) {
+      alert(tr('Por favor selecciona un motivo antes de continuar.', 'Please select a reason before continuing.'));
+      return;
     }
+
+    const reasonObj = accountDeletionReasons.find((r) => r.code === selectedDeletionReason);
+    const reasonLabelText = reasonObj?.label || selectedDeletionReason;
 
     setIsDeletingClientAccount(true);
     try {
@@ -2255,11 +2290,14 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
       const cId = clientExpedienteData.client.id || '';
       const cEmail = String(clientExpedienteData.client.email || clientEmail || savedClientSession?.email || '').trim().toLowerCase();
       const anonName = tr('Anónimo', 'Anonymous');
-      const anonEmail = `anon.${Date.now()}@anonymized.local`;
+      const anonEmail = `deleted_${(cId || String(Date.now())).slice(0, 8)}_${Date.now()}@anonymized.local`;
       const anonPhone = '';
+      const totalVisitsCount = Array.isArray(clientExpedienteData.serviceHistory)
+        ? clientExpedienteData.serviceHistory.length
+        : Number(clientExpedienteData.client.loyaltyVisits || 0);
 
       let persisted = false;
-      for (const endpoint of ['/api/clients/profile', '/api/clients/anonymize']) {
+      for (const endpoint of ['/api/clients/anonymize', '/api/clients/auth/anonymize', '/api/clients/profile']) {
         try {
           const resp = await apiFetch(endpoint, {
             method: endpoint === '/api/clients/profile' ? 'PUT' : 'POST',
@@ -2276,6 +2314,10 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
               newEmail: anonEmail,
               anonymize: true,
               removeImages: true,
+              reasonCode: selectedDeletionReason,
+              reasonLabel: reasonLabelText,
+              customFeedback: deletionCustomFeedback.trim() || undefined,
+              appointmentsCount: totalVisitsCount,
             }),
           });
           if (resp && resp.ok) {
@@ -2286,6 +2328,18 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
       }
 
       if (!persisted && supabaseUrl && !supabaseUrl.includes('tu-anon-key')) {
+        try {
+          await supabase.from('account_deletion_logs').insert({
+            tenant_id: activeTenantUuid || null,
+            user_id: cId || null,
+            role: 'client',
+            reason_code: selectedDeletionReason,
+            reason_label: reasonLabelText,
+            custom_feedback: deletionCustomFeedback.trim() || null,
+            appointments_count: totalVisitsCount,
+          } as any);
+        } catch (_logErr) {}
+
         for (const tbl of ['users', 'clients']) {
           try {
             if (cId) {
@@ -2336,19 +2390,15 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
       setClientEmail('');
       setClientPhone('');
       setIsEditingExpedienteProfile(false);
+      setIsDeleteAccountModalOpen(false);
       await clearPersistentClientSession();
       setIsExpedienteExpanded(true);
 
       alert(
-        persisted
-          ? tr(
-              '✅ Tu cuenta fue actualizada como "Anónimo" y se eliminaron tus imágenes y datos personales.',
-              '✅ Your account was updated to "Anonymous" and your images and personal data were removed.'
-            )
-          : tr(
-              '✅ Cuenta anonimizada localmente ("Anónimo") y sesión cerrada. Verifica que el backend persista la actualización.',
-              '✅ Account anonymized locally ("Anonymous") and session closed.'
-            )
+        tr(
+          '✅ Tu cuenta fue actualizada como "Anónimo", se eliminaron tus imágenes y datos personales, y registramos tu motivo para seguir mejorando.',
+          '✅ Your account was updated to "Anonymous", your personal images and data were removed, and your feedback was recorded.'
+        )
       );
     } finally {
       setIsDeletingClientAccount(false);
@@ -5573,6 +5623,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
       ) : null}
 
       <ScrollView
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={[
           styles.contentArea,
           {
@@ -6601,7 +6652,7 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                         <TouchableOpacity
                           disabled={isDeletingClientAccount}
                           style={[styles.secondaryButton, { backgroundColor: 'rgba(239, 68, 68, 0.12)', borderColor: '#EF4444', paddingHorizontal: 12, paddingVertical: 10, flex: isMobile ? 1 : undefined }]}
-                          onPress={handleAnonymizeClientAccount}
+                          onPress={handleOpenDeleteAccountModal}
                         >
                           <Text style={[styles.secondaryButtonText, { color: '#EF4444' }]}>
                             {isDeletingClientAccount ? tr('Anonimizando...', 'Anonymizing...') : tr('Eliminar Cuenta', 'Delete Account')}
@@ -7178,7 +7229,10 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                       let isAuthorized = false;
                       let resolvedMember: StaffInfo | null = matchedMember || null;
 
-                      const deviceCreds = await getCurrentDevicePushCredentials((matchedMember as any)?.userId || (matchedMember as any)?.user_id || null);
+                      const cachedPushToken = isRealExpoPushToken((globalThis as any).__EXPO_PUSH_TOKEN__)
+                        ? String((globalThis as any).__EXPO_PUSH_TOKEN__).trim()
+                        : undefined;
+                      const fallbackDeviceId = buildDeterministicDeviceUid(Platform.OS, String((Platform as any).Version || ''));
                       let resolvedUserId: string | null = (resolvedMember as any)?.userId || (resolvedMember as any)?.user_id || null;
 
                       try {
@@ -7188,9 +7242,9 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             phone: formattedLoginPhone,
                             password: cleanPin,
                             pin: cleanPin,
-                            platform: deviceCreds.platform,
-                            deviceId: deviceCreds.deviceId,
-                            expoPushToken: deviceCreds.expoPushToken,
+                            platform: Platform.OS,
+                            deviceId: fallbackDeviceId,
+                            expoPushToken: cachedPushToken,
                           }),
                         });
                         const res = await Promise.race([
@@ -10830,6 +10884,202 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                             {tr('✓ He leído y Acepto los Términos', '✓ I have read & Accept the Terms')}
                           </Text>
                         </TouchableOpacity>
+                      </View>
+                    </View>
+                  </Modal>
+
+                  {/* 🗑️ MODAL DE ELIMINACIÓN / ANONIMIZACIÓN DE CUENTA CON MOTIVOS DE SALIDA */}
+                  <Modal
+                    visible={isDeleteAccountModalOpen}
+                    transparent={true}
+                    animationType="fade"
+                    onRequestClose={() => { if (!isDeletingClientAccount) setIsDeleteAccountModalOpen(false); }}
+                  >
+                    <View
+                      style={{
+                        flex: 1,
+                        backgroundColor: 'rgba(2, 6, 23, 0.84)',
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        padding: 18,
+                      }}
+                    >
+                      <View
+                        style={{
+                          width: '100%',
+                          maxWidth: 440,
+                          backgroundColor: theme === 'dark' ? '#12161C' : '#FFFFFF',
+                          borderRadius: 24,
+                          borderWidth: 1.5,
+                          borderColor: tColor.border,
+                          padding: 22,
+                        }}
+                      >
+                        <View
+                          style={{
+                            flexDirection: 'row',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: 12,
+                          }}
+                        >
+                          <Text style={{ color: tColor.text, fontSize: 20, fontWeight: '900' }}>
+                            {tr('Eliminar Cuenta', 'Delete Account')}
+                          </Text>
+                          <TouchableOpacity
+                            disabled={isDeletingClientAccount}
+                            onPress={() => setIsDeleteAccountModalOpen(false)}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          >
+                            <Feather name="x" size={22} color={tColor.muted} />
+                          </TouchableOpacity>
+                        </View>
+
+                        <Text
+                          style={{
+                            color: tColor.muted,
+                            fontSize: 13.5,
+                            lineHeight: 20,
+                            marginBottom: 16,
+                          }}
+                        >
+                          {tr(
+                            'Lamentamos mucho que te vayas. Para ayudarnos a mejorar, ¿podrías decirnos por qué deseas eliminar tu cuenta? Tus datos personales e imágenes se anonimizarán de inmediato.',
+                            'We are sorry to see you go. To help us improve, could you tell us why you want to delete your account? Your personal data and images will be anonymized immediately.'
+                          )}
+                        </Text>
+
+                        <View style={{ marginBottom: 14 }}>
+                          {accountDeletionReasons.map((item) => {
+                            const isSelected = selectedDeletionReason === item.code;
+                            return (
+                              <TouchableOpacity
+                                key={item.code}
+                                activeOpacity={0.8}
+                                disabled={isDeletingClientAccount}
+                                onPress={() => setSelectedDeletionReason(item.code)}
+                                style={{
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  gap: 12,
+                                  paddingVertical: 13,
+                                  paddingHorizontal: 8,
+                                  borderBottomWidth: 1,
+                                  borderBottomColor: tColor.border,
+                                }}
+                              >
+                                <View
+                                  style={{
+                                    width: 22,
+                                    height: 22,
+                                    borderRadius: 11,
+                                    borderWidth: 2,
+                                    borderColor: isSelected ? '#EF4444' : tColor.muted,
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                  }}
+                                >
+                                  {isSelected ? (
+                                    <View
+                                      style={{
+                                        width: 11,
+                                        height: 11,
+                                        borderRadius: 6,
+                                        backgroundColor: '#EF4444',
+                                      }}
+                                    />
+                                  ) : null}
+                                </View>
+                                <Text
+                                  style={{
+                                    flex: 1,
+                                    color: isSelected ? tColor.text : tColor.muted,
+                                    fontSize: 14.5,
+                                    fontWeight: isSelected ? '800' : '600',
+                                  }}
+                                >
+                                  {item.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+
+                        <TextInput
+                          style={[
+                            styles.formInput,
+                            {
+                              backgroundColor: tColor.input,
+                              borderColor: tColor.border,
+                              color: tColor.text,
+                              minHeight: 54,
+                              marginBottom: 18,
+                              fontSize: 13.5,
+                            },
+                          ]}
+                          placeholder={tr(
+                            'Comentario adicional (opcional)...',
+                            'Additional feedback (optional)...'
+                          )}
+                          placeholderTextColor={tColor.muted}
+                          value={deletionCustomFeedback}
+                          onChangeText={setDeletionCustomFeedback}
+                          multiline
+                        />
+
+                        <View style={{ flexDirection: 'row', gap: 12 }}>
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            disabled={isDeletingClientAccount}
+                            onPress={() => setIsDeleteAccountModalOpen(false)}
+                            style={{
+                              flex: 1,
+                              height: 48,
+                              borderRadius: 14,
+                              backgroundColor: theme === 'dark' ? '#262B34' : '#E2E8F0',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: tColor.text,
+                                fontWeight: '900',
+                                fontSize: 15,
+                              }}
+                            >
+                              {tr('Cancelar', 'Cancel')}
+                            </Text>
+                          </TouchableOpacity>
+
+                          <TouchableOpacity
+                            activeOpacity={0.85}
+                            disabled={isDeletingClientAccount || !selectedDeletionReason}
+                            onPress={handleConfirmAnonymizeClientAccount}
+                            style={{
+                              flex: 1,
+                              height: 48,
+                              borderRadius: 14,
+                              backgroundColor: selectedDeletionReason
+                                ? '#EF4444'
+                                : 'rgba(239, 68, 68, 0.35)',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                color: '#FFFFFF',
+                                fontWeight: '900',
+                                fontSize: 15,
+                              }}
+                            >
+                              {isDeletingClientAccount
+                                ? tr('Eliminando...', 'Deleting...')
+                                : tr('Eliminar', 'Delete')}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     </View>
                   </Modal>
