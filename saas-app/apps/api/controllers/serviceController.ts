@@ -31,12 +31,24 @@ async function withDbRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
   throw lastErr;
 }
 
+const SERVICES_CACHE_TTL_MS = 10_000;
+const servicesCache = new Map<string, { expiresAt: number; payload: any[] }>();
+
+function invalidateServicesCache(tenantId: string) {
+  if (tenantId) servicesCache.delete(tenantId);
+}
+
 // 1. Listar todos los servicios del catálogo del tenant actual (incluye `translations` ES/EN)
 export async function getServices(req: Request, res: Response) {
   try {
-    const tenantId = req.headers['x-tenant-id'] as string;
+    const tenantId = (req.headers['x-tenant-id'] as string) || (req.query?.tenantId as string);
     if (!tenantId) {
       return res.status(400).json({ error: 'Tenant ID requerido en los headers (x-tenant-id).' });
+    }
+
+    const cached = servicesCache.get(tenantId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.status(200).json({ success: true, services: cached.payload });
     }
 
     const tenantServices = await withDbRetry(() =>
@@ -45,6 +57,11 @@ export async function getServices(req: Request, res: Response) {
         .from(services)
         .where(eq(services.tenantId, tenantId))
     );
+
+    servicesCache.set(tenantId, {
+      expiresAt: Date.now() + SERVICES_CACHE_TTL_MS,
+      payload: tenantServices,
+    });
 
     return res.status(200).json({ success: true, services: tenantServices });
   } catch (error: any) {
@@ -135,6 +152,7 @@ export const createService = async (req: Request, res: Response) => {
       }
     })();
 
+    invalidateServicesCache(tenantId);
     return res.status(201).json({ success: true, service: createdService });
   } catch (error) {
     console.error('Error creando servicio:', error);
@@ -247,6 +265,7 @@ export async function updateService(req: Request, res: Response) {
       return res.status(404).json({ success: false, error: 'Servicio no encontrado o no pertenece a este tenant.' });
     }
 
+    invalidateServicesCache(tenantId);
     return res.status(200).json({ success: true, service: updatedService });
   } catch (error: any) {
     console.error('Error al actualizar el servicio:', error);
@@ -296,6 +315,7 @@ export async function backfillServiceTranslations(req: Request, res: Response) {
       updatedCount += 1;
     }
 
+    if (updatedCount > 0) invalidateServicesCache(tenantId);
     return res.status(200).json({
       success: true,
       total: tenantServices.length,
@@ -328,6 +348,7 @@ export async function deleteService(req: Request, res: Response) {
       return res.status(404).json({ success: false, error: 'Servicio no encontrado.' });
     }
 
+    invalidateServicesCache(tenantId);
     return res.status(200).json({ success: true, message: 'Servicio eliminado correctamente.' });
   } catch (error: any) {
     console.error('Error al eliminar el servicio:', error);

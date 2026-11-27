@@ -5,7 +5,11 @@ import { sql, eq, and, ilike, or, SQL } from 'drizzle-orm';
 // Importamos la BD y el esquema desde el paquete del monorepo
 import { db, tenants, services } from '@taller/database';
 
-// 🗺️ Diccionario Geográfico de Prueba (En producción se reemplaza por Google Maps API / Mapbox)
+// ⚡ Caché ligera en memoria con TTL corto (10s) para acelerar consultas repetidas del directorio
+const DIRECTORY_CACHE_TTL_MS = 10_000;
+const directoryCache = new Map<string, { expiresAt: number; payload: any }>();
+
+// 🗺️ Diccionario Geográfico rápido (evita llamadas externas bloqueantes en ZIPs/ciudades frecuentes)
 const MOCK_GEOCODER: Record<string, { lat: number; lng: number }> = {
   '91730': { lat: 34.1064, lng: -117.5931 }, // Rancho Cucamonga
   'rancho cucamonga': { lat: 34.1064, lng: -117.5931 },
@@ -31,11 +35,22 @@ const parseLoyaltyObject = (rawLoyalty: any): Record<string, any> | null => {
 export const searchDirectory = async (req: Request, res: Response) => {
   try {
     const { locationQuery, niche, radius, nameQuery } = req.query;
+    const cacheKey = JSON.stringify({
+      locationQuery: String(locationQuery || '').trim().toLowerCase(),
+      niche: String(niche || 'all').trim().toLowerCase(),
+      radius: String(radius || '30').trim(),
+      nameQuery: String(nameQuery || '').trim().toLowerCase(),
+    });
+
+    const cached = directoryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.status(200).json(cached.payload);
+    }
 
     // 1. Inicializamos el arreglo tipado estrictamente como consultas SQL
     const filters: SQL[] = [];
 
-    // 2. Filtro por Categoría/Nicho (Taller, Spa, Barbería)
+    // 2. Filtro por Categoría/Nicho (Taller, Spa, Barbería, Legal, Dental)
     if (niche && niche !== 'all') {
       filters.push(eq(tenants.niche, niche as string));
     }
@@ -54,11 +69,9 @@ export const searchDirectory = async (req: Request, res: Response) => {
       const coordinates = MOCK_GEOCODER[queryLower];
 
       if (coordinates) {
-        // Tenemos coordenadas exactas para la fórmula de Haversine
         userLat = coordinates.lat;
         userLng = coordinates.lng;
       } else {
-        // Fallback: Si no tenemos coordenadas, buscamos directamente por texto en ciudad o zip
         const fallbackCondition = or(
           ilike(tenants.city, `%${queryLower}%`),
           ilike(tenants.zipCode, `%${queryLower}%`)
@@ -71,14 +84,13 @@ export const searchDirectory = async (req: Request, res: Response) => {
     }
 
     let results: any[];
-    const maxDistance = radius ? parseFloat(radius as string) : 30; // 30 millas por defecto
+    const maxDistance = radius ? parseFloat(radius as string) : 30;
     const loyaltyCol = (tenants as any).loyaltyConfig ?? (tenants as any).loyalty_config;
 
     // ========================================================================
     // 🧠 MOTOR DE BÚSQUEDA GEOGRÁFICA (FÓRMULA HAVERSINE EN POSTGRESQL)
     // ========================================================================
     if (userLat !== null && userLng !== null) {
-      // Fórmula matemática para calcular distancia en Millas
       const distanceSql = sql<number>`(
         3959 * acos(
           cos(radians(${userLat})) * 
@@ -97,15 +109,18 @@ export const searchDirectory = async (req: Request, res: Response) => {
           name: tenants.name,
           niche: tenants.niche,
           city: tenants.city,
+          state: tenants.state,
           zipCode: tenants.zipCode,
           logoUrl: tenants.logoUrl,
           primaryColor: tenants.primaryColor,
+          latitude: tenants.latitude,
+          longitude: tenants.longitude,
           ...(loyaltyCol ? { loyaltyConfig: loyaltyCol } : {}),
           distance: distanceSql.mapWith(Number),
         })
         .from(tenants)
         .where(filters.length > 0 ? and(...filters) : undefined)
-        .orderBy(distanceSql); // Ordenamos del más cercano al más lejano automáticamente
+        .orderBy(distanceSql);
     } else {
       // ========================================================================
       // BÚSQUEDA ESTÁNDAR (Sin coordenadas)
@@ -116,9 +131,12 @@ export const searchDirectory = async (req: Request, res: Response) => {
           name: tenants.name,
           niche: tenants.niche,
           city: tenants.city,
+          state: tenants.state,
           zipCode: tenants.zipCode,
           logoUrl: tenants.logoUrl,
           primaryColor: tenants.primaryColor,
+          latitude: tenants.latitude,
+          longitude: tenants.longitude,
           ...(loyaltyCol ? { loyaltyConfig: loyaltyCol } : {}),
         })
         .from(tenants)
@@ -151,18 +169,38 @@ export const searchDirectory = async (req: Request, res: Response) => {
             ? 'Taller Automotriz'
             : biz.niche === 'spa'
             ? 'Spa & Relajación'
+            : biz.niche === 'legal'
+            ? 'Firma Legal / Abogados'
+            : biz.niche === 'dental'
+            ? 'Clínica Odontológica'
             : 'Barbería Clásica',
-        icon: biz.niche === 'automotive' ? '🚗' : biz.niche === 'spa' ? '💆‍♀️' : '✂️',
+        icon:
+          biz.niche === 'automotive'
+            ? '🚗'
+            : biz.niche === 'spa'
+            ? '💆‍♀️'
+            : biz.niche === 'legal'
+            ? '⚖️'
+            : biz.niche === 'dental'
+            ? '🦷'
+            : '✂️',
         distance:
           'distance' in biz && biz.distance !== null ? Number(biz.distance).toFixed(1) : null,
       };
     });
 
-    return res.status(200).json({
+    const responsePayload = {
       success: true,
       count: formattedResults.length,
       data: formattedResults,
+    };
+
+    directoryCache.set(cacheKey, {
+      expiresAt: Date.now() + DIRECTORY_CACHE_TTL_MS,
+      payload: responsePayload,
     });
+
+    return res.status(200).json(responsePayload);
   } catch (error) {
     console.error('Error en búsqueda de directorio:', error);
     return res.status(500).json({ success: false, message: 'Error interno del servidor' });

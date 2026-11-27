@@ -18,6 +18,7 @@ import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import NotificationCenter from '../components/NotificationCenter';
+import { openCookiePreferencesModal, getSavedCookieConsent } from '../components/CookieConsentBanner';
 
 // ==========================================
 // ⚙️ CONFIGURACIÓN DE SUPABASE & SAFE AREA
@@ -43,6 +44,18 @@ const supabaseAnonKey =
 const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false },
 });
+
+
+const buildTenantSlug = (nameStr?: string | null, fallbackId?: string | null): string => {
+  const clean = String(nameStr || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (clean) return clean;
+  return String(fallbackId || '').trim();
+};
 
 const toTitleCase = (str: string) => {
   if (!str) return '';
@@ -1231,6 +1244,57 @@ export default function DirectoryHomeScreen() {
                 );
               })}
             </View>
+
+            {Platform.OS === 'web' ? (() => {
+              const savedCookies = getSavedCookieConsent();
+              const hasOptional = Boolean(savedCookies?.analytics || savedCookies?.marketing);
+              return (
+                <View style={{ marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                  <Text
+                    style={{
+                      color: tColor.muted,
+                      fontSize: 11,
+                      fontWeight: '900',
+                      textTransform: 'uppercase',
+                      letterSpacing: 0.7,
+                      marginBottom: 8,
+                    }}
+                  >
+                    🍪 {tr('Cookies y Privacidad', 'Cookies & Privacy')}
+                  </Text>
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      setIsSettingsOpen(false);
+                      openCookiePreferencesModal();
+                    }}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      backgroundColor: tColor.input,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: tColor.border,
+                      paddingVertical: 11,
+                      paddingHorizontal: 13,
+                    }}
+                  >
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 13 }}>
+                        {tr('Gestionar cookies', 'Manage cookies')}
+                      </Text>
+                      <Text style={{ color: tColor.muted, fontSize: 11, marginTop: 2 }}>
+                        {hasOptional
+                          ? tr('Todas las cookies activas', 'All cookies active')
+                          : tr('Solo cookies esenciales', 'Essential cookies only')}
+                      </Text>
+                    </View>
+                    <Feather name="chevron-right" size={16} color={brandOrange} />
+                  </TouchableOpacity>
+                </View>
+              );
+            })() : null}
           </View>
         </>
       ) : null}
@@ -1453,7 +1517,16 @@ export default function DirectoryHomeScreen() {
                             key={`${biz.id}-${idx}`}
                             activeOpacity={0.9}
                             {...(Platform.OS === 'web' ? { className: 'dir-card' } : ({} as any))}
-                            onPress={() => router.push(`/${biz.id}` as any)}
+                            onPress={() => {
+                              const slugPath = buildTenantSlug(biz.name, biz.id);
+                              if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                                try {
+                                  window.sessionStorage?.setItem(`picktime_slug_tenant_${slugPath}`, String(biz.id));
+                                  window.sessionStorage?.setItem('picktime_last_tenant_id', String(biz.id));
+                                } catch (_e) {}
+                              }
+                              router.push(`/${slugPath}` as any);
+                            }}
                             style={[
                               styles.businessCard,
                               {
@@ -2101,7 +2174,16 @@ export default function DirectoryHomeScreen() {
                             key={`${biz.id}-${idx}-prem`}
                             activeOpacity={0.9}
                             {...(Platform.OS === 'web' ? { className: 'dir-card' } : ({} as any))}
-                            onPress={() => router.push(`/${biz.id}` as any)}
+                            onPress={() => {
+                              const slugPath = buildTenantSlug(biz.name, biz.id);
+                              if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                                try {
+                                  window.sessionStorage?.setItem(`picktime_slug_tenant_${slugPath}`, String(biz.id));
+                                  window.sessionStorage?.setItem('picktime_last_tenant_id', String(biz.id));
+                                } catch (_e) {}
+                              }
+                              router.push(`/${slugPath}` as any);
+                            }}
                             style={[
                               styles.businessCard,
                               {

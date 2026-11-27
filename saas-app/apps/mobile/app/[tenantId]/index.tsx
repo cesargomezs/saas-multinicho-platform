@@ -8,6 +8,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createClient } from '@supabase/supabase-js';
 import NotificationCenter from '../../components/NotificationCenter';
+import { openCookiePreferencesModal, getSavedCookieConsent } from '../../components/CookieConsentBanner';
 
 try { WebBrowser.maybeCompleteAuthSession(); } catch (_e) {}
 
@@ -1337,8 +1338,95 @@ export default function TenantDashboardScreen() {
     light: { bg: '#F1F5F9', card: 'rgba(255, 255, 255, 0.85)', text: '#0F131A', muted: '#475569', border: 'rgba(0,0,0,0.1)', input: 'rgba(255, 255, 255, 0.6)', nav: 'rgba(241, 245, 249, 0.85)' }
   })[theme], [theme]);
 
+  const rawParamTenant = Array.isArray(tenantId) ? tenantId[0] : String(tenantId || '');
+  const isUuidFormat = (val: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(val || '').trim());
+
+  const [resolvedTenantUuid, setResolvedTenantUuid] = useState<string>(() => {
+    if (isUuidFormat(rawParamTenant)) return rawParamTenant;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        const cleanSlug = String(rawParamTenant || '').trim().toLowerCase().replace(/^\/+/, '');
+        const fromSlug = cleanSlug ? window.sessionStorage?.getItem(`picktime_slug_tenant_${cleanSlug}`) : '';
+        if (fromSlug && isUuidFormat(fromSlug)) return fromSlug;
+        const fromLast = window.sessionStorage?.getItem('picktime_last_tenant_id');
+        if (fromLast && isUuidFormat(fromLast)) return fromLast;
+      } catch (_e) {}
+    }
+    return rawParamTenant;
+  });
+
+  useEffect(() => {
+    let active = true;
+    const resolveSlugIfNeeded = async () => {
+      if (!rawParamTenant) return;
+      if (isUuidFormat(rawParamTenant)) {
+        if (active) setResolvedTenantUuid(rawParamTenant);
+        if (Platform.OS === 'web' && typeof window !== 'undefined') {
+          try { window.sessionStorage?.setItem('picktime_last_tenant_id', rawParamTenant); } catch (_e) {}
+        }
+        return;
+      }
+
+      const cleanSlug = rawParamTenant.trim().toLowerCase().replace(/^\/+/, '');
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try {
+          const cached = window.sessionStorage?.getItem(`picktime_slug_tenant_${cleanSlug}`);
+          if (cached && isUuidFormat(cached)) {
+            if (active) setResolvedTenantUuid(cached);
+            return;
+          }
+        } catch (_e) {}
+      }
+
+      // Buscar en el directorio el negocio cuyo slug o nombre coincida con el segmento de la URL
+      try {
+        const baseUrls = [
+          process.env.EXPO_PUBLIC_API_URL,
+          process.env.NEXT_PUBLIC_API_URL,
+          'http://127.0.0.1:4000',
+          'https://saas-multinicho-platform.onrender.com',
+        ].filter((u, idx, arr): u is string => Boolean(u && String(u).trim() && arr.indexOf(u) === idx));
+
+        const makeSlug = (s: string) =>
+          String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '');
+
+        for (const base of baseUrls) {
+          try {
+            const resp = await fetch(`${String(base).replace(/\/+$/, '')}/api/directory/search?radius=5000`);
+            if (resp.ok) {
+              const json = await resp.json().catch(() => null);
+              const list = json?.data || json?.tenants || [];
+              const match = list.find((item: any) => {
+                const itemSlug = makeSlug(item?.name);
+                return itemSlug === cleanSlug || String(item?.id || '').toLowerCase() === cleanSlug;
+              });
+              if (match?.id && isUuidFormat(match.id)) {
+                if (active) setResolvedTenantUuid(match.id);
+                if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                  try {
+                    window.sessionStorage?.setItem(`picktime_slug_tenant_${cleanSlug}`, match.id);
+                    window.sessionStorage?.setItem('picktime_last_tenant_id', match.id);
+                  } catch (_e) {}
+                }
+                return;
+              }
+            }
+          } catch (_netErr) {}
+        }
+      } catch (_err) {}
+    };
+    resolveSlugIfNeeded();
+    return () => { active = false; };
+  }, [rawParamTenant]);
+
   const urlPath = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.href : '';
-  const safeTenantId = String(tenantId || urlPath).toLowerCase();
+  const safeTenantId = String(resolvedTenantUuid || rawParamTenant || urlPath).toLowerCase();
   
   const [tenantInfo, setTenantInfo] = useState<TenantInfo | null>(null);
   const [clientDistanceMiles, setClientDistanceMiles] = useState<string | null>(null);
@@ -1699,8 +1787,23 @@ export default function TenantDashboardScreen() {
         });
         const data = await res.json().catch(() => ({}));
         if (!cancelled && res.ok && data.success && data.client) {
-          applyAuthenticatedClientToState(data, { openExpediente: true, applyToBooking: true });
-          setExpedienteAuthMethod(parsed.provider || 'apple');
+          const cMeta = typeof data.client.metadata === 'string'
+            ? (() => { try { return JSON.parse(data.client.metadata); } catch (_e) { return {}; } })()
+            : (data.client.metadata || {});
+          const isAnon = Boolean(
+            cMeta?.anonymized ||
+            String(data.client.email || '').includes('@anonymized.local') ||
+            String(data.client.name || '').toLowerCase() === 'anónimo' ||
+            String(data.client.name || '').toLowerCase() === 'anonymous'
+          );
+          if (isAnon) {
+            await clearPersistentClientSession();
+          } else {
+            applyAuthenticatedClientToState(data, { openExpediente: true, applyToBooking: true });
+            setExpedienteAuthMethod(parsed.provider || 'apple');
+          }
+        } else if (!cancelled && res.status === 404) {
+          await clearPersistentClientSession();
         }
       } catch (_e) {
       } finally {
@@ -2368,30 +2471,15 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
           }))
         : [];
 
-      setClientExpedienteData((prev: any) =>
-        prev
-          ? {
-              ...prev,
-              client: {
-                ...(prev.client || {}),
-                name: anonName,
-                email: anonEmail,
-                phone: anonPhone,
-                avatarUrl: null,
-                avatar_url: null,
-                metadata: { anonymized: true, anonymizedAt: new Date().toISOString() },
-              },
-              vehicle: null,
-              serviceHistory: anonymizedHistory,
-            }
-          : prev
-      );
-      setClientName(anonName);
+      setClientName('');
       setClientEmail('');
       setClientPhone('');
+      setExpedienteEmailInput('');
+      setExpedientePasswordInput('');
       setIsEditingExpedienteProfile(false);
       setIsDeleteAccountModalOpen(false);
       await clearPersistentClientSession();
+      setClientExpedienteData(null);
       setIsExpedienteExpanded(true);
 
       alert(
@@ -2479,20 +2567,20 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
     const baseUrls = [
       process.env.EXPO_PUBLIC_API_URL,
       process.env.NEXT_PUBLIC_API_URL,
-      'https://saas-multinicho-platform.onrender.com',
-      'http://127.0.0.1:4000'
+      'http://127.0.0.1:4000',
+      'https://saas-multinicho-platform.onrender.com'
     ].filter((u, idx, arr): u is string => Boolean(u && String(u).trim() && arr.indexOf(u) === idx));
 
-    const headerTenantId = Array.isArray(tenantId) ? tenantId[0] : (tenantId || '123e4567-e89b-12d3-a456-426614174000');
+    const headerTenantId = resolvedTenantUuid || (Array.isArray(tenantId) ? tenantId[0] : (tenantId || '123e4567-e89b-12d3-a456-426614174000'));
     const headers = { 'Content-Type': 'application/json', 'x-tenant-id': headerTenantId, ...(options.headers || {}) };
 
     let lastRes: Response | null = null;
     let lastErr: any = null;
 
-    for (const baseUrl of baseUrls) {
+    const tryOneBase = async (baseUrl: string, timeoutMs: number) => {
       const cleanBase = String(baseUrl).replace(/\/+$/, '');
       const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timerId = controller ? setTimeout(() => { try { controller.abort('timeout'); } catch { controller.abort(); } }, 6500) : null;
+      const timerId = controller ? setTimeout(() => { try { controller.abort('timeout'); } catch { controller.abort(); } }, timeoutMs) : null;
       try {
         const res = await fetch(`${cleanBase}${url}`, {
           ...options,
@@ -2500,12 +2588,23 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
           ...(controller ? { signal: controller.signal } : {}),
         });
         if (timerId) clearTimeout(timerId);
+        return res;
+      } catch (err) {
+        if (timerId) clearTimeout(timerId);
+        throw err;
+      }
+    };
+
+    for (const baseUrl of baseUrls) {
+      const isLocal = String(baseUrl).includes('127.0.0.1') || String(baseUrl).includes('localhost');
+      const timeoutMs = isLocal ? 2200 : 4000;
+      try {
+        const res = await tryOneBase(baseUrl, timeoutMs);
         lastRes = res;
         if (res.ok || res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
           return res;
         }
       } catch (err) {
-        if (timerId) clearTimeout(timerId);
         lastErr = err;
       }
     }
@@ -2883,6 +2982,20 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
           };
 
           setTenantInfo(updatedTenant);
+          if (Platform.OS === 'web' && typeof window !== 'undefined' && updatedTenant?.name) {
+            try {
+              const slugVal = String(updatedTenant.name)
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+              if (slugVal && window.location.pathname.includes(String(updatedTenant.id || ''))) {
+                window.sessionStorage?.setItem(`picktime_slug_tenant_${slugVal}`, String(updatedTenant.id));
+                window.history.replaceState(null, '', `/${slugVal}${window.location.search || ''}`);
+              }
+            } catch (_histErr) {}
+          }
           setLocalHours(mergedHours);
           if (parsedPortfolio) setLocalPortfolio(parsedPortfolio);
           const initialPin =
@@ -2918,21 +3031,53 @@ Ensure Google provider is enabled in Supabase (Authentication -> Providers) and 
           }
         }
       }
-      const resServices = await apiFetch('/api/services');
-      if (resServices.ok) {
-        const dataServices = await resServices.json();
-        if (dataServices.success && dataServices.services.length > 0) {
+      const cacheTenantKey = `autoflow_services_cache_${safeTenantId || 'default'}`;
+      if (servicesList.length === 0) {
+        try {
+          const gCache = (globalThis as any).__autoflowServicesCache?.[cacheTenantKey];
+          if (Array.isArray(gCache) && gCache.length > 0) {
+            setServicesList(gCache);
+            const firstCached = gCache.find((s: any) => s.isActive !== false);
+            if (firstCached) setSelectedServiceType((prev) => prev || firstCached.id);
+          } else if (Platform.OS === 'web' && typeof window !== 'undefined') {
+            const rawSaved = window.localStorage?.getItem(cacheTenantKey);
+            if (rawSaved) {
+              const parsedSrv = JSON.parse(rawSaved);
+              if (Array.isArray(parsedSrv) && parsedSrv.length > 0) {
+                setServicesList(parsedSrv);
+                const firstCached = parsedSrv.find((s: any) => s.isActive !== false);
+                if (firstCached) setSelectedServiceType((prev) => prev || firstCached.id);
+              }
+            }
+          }
+        } catch (_cErr) {}
+      }
+
+      const [resServices, resStaff] = await Promise.all([
+        apiFetch('/api/services').catch(() => null),
+        apiFetch('/api/staff').catch(() => null),
+      ]);
+      fetchAgendaData();
+
+      if (resServices && resServices.ok) {
+        const dataServices = await resServices.json().catch(() => null);
+        if (dataServices?.success && Array.isArray(dataServices.services) && dataServices.services.length > 0) {
           setServicesList(dataServices.services);
           const firstActive = dataServices.services.find((s: any) => s.isActive !== false);
           if (firstActive) setSelectedServiceType(firstActive.id);
+          try {
+            if (!(globalThis as any).__autoflowServicesCache) (globalThis as any).__autoflowServicesCache = {};
+            (globalThis as any).__autoflowServicesCache[cacheTenantKey] = dataServices.services;
+            if (Platform.OS === 'web' && typeof window !== 'undefined') {
+              window.localStorage?.setItem(cacheTenantKey, JSON.stringify(dataServices.services));
+            }
+          } catch (_sCacheErr) {}
         }
       }
-      fetchAgendaData();
       
-      const resStaff = await apiFetch('/api/staff');
-      if (resStaff.ok) { 
-        const data = await resStaff.json(); 
-        if (data.success && Array.isArray(data.staff) && data.staff.length > 0) {
+      if (resStaff && resStaff.ok) { 
+        const data = await resStaff.json().catch(() => null); 
+        if (data?.success && Array.isArray(data.staff) && data.staff.length > 0) {
           const mappedStaff = data.staff.map((s: any) => ({ ...s, isActive: s.isActive ?? true }));
           setStaffList(mappedStaff);
         } else {
@@ -4999,7 +5144,14 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
     } catch (err) { console.error('Error:', err); }
   };
 
-  const handleNavigate = (view: 'servicios' | 'expediente' | 'mecanico') => { setActiveView(view); setIsMobileMenuOpen(false); if (view !== 'expediente') setPendingReaction(null); };
+  const handleNavigate = (view: 'servicios' | 'expediente' | 'mecanico') => {
+    setActiveView(view);
+    setIsMobileMenuOpen(false);
+    if (view !== 'expediente') setPendingReaction(null);
+    if (view === 'servicios' && servicesList.length === 0 && safeTenantId) {
+      fetchTenantData();
+    }
+  };
   const startReactionFlow = (type: 'like' | 'dislike') => { setPendingReaction(type); handleNavigate('expediente'); };
 
   // Llegada desde el directorio o desde "Soy un Negocio" (Owner Portal):
@@ -5495,6 +5647,57 @@ La cita ya quedó agendada en tu calendario a las ${timeStr} y se disparó el me
                 );
               })}
             </View>
+
+            {Platform.OS === 'web' ? (() => {
+              const savedCookies = getSavedCookieConsent();
+              const hasOptional = Boolean(savedCookies?.analytics || savedCookies?.marketing);
+              return (
+                <View style={{ marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: tColor.border }}>
+                  <Text
+                    style={{
+                      color: tColor.muted,
+                      fontSize: 11,
+                      fontWeight: '900',
+                      textTransform: 'uppercase',
+                      letterSpacing: 0.7,
+                      marginBottom: 8,
+                    }}
+                  >
+                    🍪 {tr('Cookies y Privacidad', 'Cookies & Privacy')}
+                  </Text>
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      setIsSettingsOpen(false);
+                      openCookiePreferencesModal();
+                    }}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      backgroundColor: tColor.input,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: tColor.border,
+                      paddingVertical: 11,
+                      paddingHorizontal: 13,
+                    }}
+                  >
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={{ color: tColor.text, fontWeight: '800', fontSize: 13 }}>
+                        {tr('Gestionar cookies', 'Manage cookies')}
+                      </Text>
+                      <Text style={{ color: tColor.muted, fontSize: 11, marginTop: 2 }}>
+                        {hasOptional
+                          ? tr('Todas las cookies activas', 'All cookies active')
+                          : tr('Solo cookies esenciales', 'Essential cookies only')}
+                      </Text>
+                    </View>
+                    <Feather name="chevron-right" size={16} color={brandColor} />
+                  </TouchableOpacity>
+                </View>
+              );
+            })() : null}
           </View>
         </>
       ) : null}

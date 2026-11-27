@@ -4,6 +4,7 @@ import { View, Text, Image, StyleSheet, Animated, Easing, StatusBar, Dimensions,
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import CookieConsentBanner from '../components/CookieConsentBanner';
 
 if (Platform.OS !== 'web') {
   SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -179,6 +180,7 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: '#05070C' },
         }}
       />
+      <CookieConsentBanner />
     </View>
   );
 }
